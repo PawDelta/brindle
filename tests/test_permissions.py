@@ -141,8 +141,8 @@ def test_opaque_code_redirections_preserve_rewrites_and_path_denies(tmp_path, co
     rule = p.Rule("write", str(tmp_path / "protected"), "exact", "deny")
     read_rule = p.Rule("read", str(tmp_path / "protected"), "exact", "deny")
 
-    def decide(target, op=">"):
-        req = p.Request("claude", "bash", "Bash", here, here, here, command=f"{command} {op} {target}")
+    def decide(target, op=">", *, prefix="", cwd=here):
+        req = p.Request("claude", "bash", "Bash", cwd, here, here, command=f"{prefix}{command} {op} {target}")
         return p.decide(req, rules=[rule, read_rule], unmatched="ask", saved=[], groups={})
 
     unknown = decide('"$OUT"')
@@ -156,6 +156,13 @@ def test_opaque_code_redirections_preserve_rewrites_and_path_denies(tmp_path, co
     protected_read = decide("protected", "<")
     assert protected_read.decision == "deny"
     assert protected_read.rule == read_rule
+
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    uncertain = decide("protected", prefix="cd ..; ", cwd=str(origin))
+    assert uncertain.decision == "deny"
+    assert uncertain.reason == p.SHELL_SYNTAX_GUIDANCE
+    assert decide(str(tmp_path / "out"), prefix="cd ..; ", cwd=str(origin)).decision == "ask"
 
 
 @pytest.mark.parametrize("command, expected", [

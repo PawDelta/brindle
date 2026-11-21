@@ -3642,7 +3642,7 @@ def _decide(req: Request, *, checks: list[str] | None, rules: list[Rule], unmatc
         for part in opaque_parts:
             for kind, paths in (("read", part.reads), ("write", part.writes)):
                 for path in paths:
-                    redirected = replace(req, kind=kind, command=None, path=path, cwd=part.cwd or req.cwd)
+                    redirected = replace(req, kind=kind, command=None, path=path, cwd=part.cwd or "")
                     denied = _rule_decision(redirected, rules, checks)
                     if denied is not None and denied.decision == "deny":
                         return denied
@@ -5899,6 +5899,10 @@ class _PartReader:
             part.unresolved.append(name)
         elif self.cwd is not None or os.path.isabs(name):
             name = os.path.normpath(os.path.join(self.cwd or "", name))
+        elif self.code_input:
+            # A literal relative target is still unknown when a cd may have failed.
+            name = target.raw
+            part.unresolved.append(name)
         if op == "<":
             part.reads.append(name)
         elif name != "/dev/null":
