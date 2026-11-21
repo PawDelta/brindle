@@ -110,6 +110,7 @@ export interface ApiSchema {
   SignoffDTO: SignoffDTO;
   StoppedAgentDTO: StoppedAgentDTO;
   VisualAnswerDTO: VisualAnswerDTO;
+  VisualChoiceDTO: VisualChoiceDTO;
   VisualDTO: VisualDTO;
   VisualOptionDTO: VisualOptionDTO;
   WorkspaceDTO: WorkspaceDTO;
@@ -777,6 +778,9 @@ export interface VisualAnswerDTO {
   attachments?: string[];
   note?: string | null;
   option: string | null;
+  picks?: {
+    [k: string]: string;
+  } | null;
 }
 /**
  * A Library folder (GET /v1/library/folders): the server's, plus ``repo``,
@@ -1721,6 +1725,24 @@ export interface SharedDesignDTO {
   verdict?: PlanVerdictDTO | null;
 }
 /**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "VisualChoiceDTO".
+ */
+export interface VisualChoiceDTO {
+  id: string;
+  options: VisualOptionDTO[];
+  question: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "VisualOptionDTO".
+ */
+export interface VisualOptionDTO {
+  detail?: string | null;
+  id: string;
+  label: string;
+}
+/**
  * A visual in a session (brindle.visuals). ``rev``: its current revision,
  * served at /v1/visuals/{id}/r/{rev}; an answer names the revision it read.
  * ``unread``: a revision the person hasn't opened yet. ``holding``: the queued
@@ -1735,9 +1757,11 @@ export interface VisualDTO {
   answer_agent_id: string;
   answered_in_chat?: boolean;
   by: string;
+  choices?: VisualChoiceDTO[] | null;
   created_at: number;
   holding?: number;
   id: string;
+  inline_html?: string | null;
   kept: boolean;
   kind: "visual" | "plan";
   options?: VisualOptionDTO[] | null;
@@ -1746,15 +1770,6 @@ export interface VisualDTO {
   session: string;
   title: string;
   unread: boolean;
-}
-/**
- * This interface was referenced by `ApiSchema`'s JSON-Schema
- * via the `definition` "VisualOptionDTO".
- */
-export interface VisualOptionDTO {
-  detail?: string | null;
-  id: string;
-  label: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

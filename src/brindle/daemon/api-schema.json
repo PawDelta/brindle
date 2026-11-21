@@ -3763,6 +3763,21 @@
                 }
               ],
               "title": "Option"
+            },
+            "picks": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Picks"
             }
           },
           "required": [
@@ -13966,6 +13981,21 @@
             }
           ],
           "title": "Option"
+        },
+        "picks": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Picks"
         }
       },
       "required": [
@@ -13973,6 +14003,64 @@
         "at"
       ],
       "title": "VisualAnswerDTO",
+      "type": "object"
+    },
+    "VisualChoiceDTO": {
+      "$defs": {
+        "VisualOptionDTO": {
+          "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ],
+          "title": "VisualOptionDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "options": {
+          "items": {
+            "$ref": "#/$defs/VisualOptionDTO"
+          },
+          "title": "Options",
+          "type": "array"
+        },
+        "question": {
+          "title": "Question",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "question",
+        "options"
+      ],
+      "title": "VisualChoiceDTO",
       "type": "object"
     },
     "VisualDTO": {
@@ -14013,6 +14101,21 @@
                 }
               ],
               "title": "Option"
+            },
+            "picks": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Picks"
             }
           },
           "required": [
@@ -14020,6 +14123,32 @@
             "at"
           ],
           "title": "VisualAnswerDTO",
+          "type": "object"
+        },
+        "VisualChoiceDTO": {
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "options": {
+              "items": {
+                "$ref": "#/$defs/VisualOptionDTO"
+              },
+              "title": "Options",
+              "type": "array"
+            },
+            "question": {
+              "title": "Question",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "question",
+            "options"
+          ],
+          "title": "VisualChoiceDTO",
           "type": "object"
         },
         "VisualOptionDTO": {
@@ -14083,6 +14212,21 @@
           "title": "By",
           "type": "string"
         },
+        "choices": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/VisualChoiceDTO"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Choices"
+        },
         "created_at": {
           "title": "Created At",
           "type": "number"
@@ -14095,6 +14239,18 @@
         "id": {
           "title": "Id",
           "type": "string"
+        },
+        "inline_html": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inline Html"
         },
         "kept": {
           "title": "Kept",

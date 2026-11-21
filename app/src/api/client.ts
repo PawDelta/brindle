@@ -454,6 +454,7 @@ export interface VisualOption {
 }
 
 export interface VisualAnswer {
+  picks?: Record<string, string> | null;
   option: string | null;
   note: string;
   at: number;
@@ -462,6 +463,8 @@ export interface VisualAnswer {
 }
 
 export interface VisualDTO {
+  choices?: { id: string; question: string; options: { id: string; label: string; detail?: string | null }[] }[] | null;
+  inline_html?: string | null;
   id: string;
   session: string;
   /* The agent that receives the answer, and whether its provider takes files. */
@@ -2157,8 +2160,8 @@ export class DaemonClient {
   }
 
   /* The person's answer to the revision on screen; a newer revision makes this a 409. */
-  answerVisual(id: string, rev: number, option: string | undefined, note: string, attachments?: string[]) {
-    return this.postInbox<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note, ...(attachments?.length ? { attachments } : {}) });
+  answerVisual(id: string, rev: number, option: string | undefined, note: string, attachments?: string[], picks?: Record<string, string>) {
+    return this.postInbox<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note, ...(attachments?.length ? { attachments } : {}), ...(picks ? { picks } : {}) });
   }
 
   /* The person won't answer the revision on screen; the agent is told, the Inbox card clears. */

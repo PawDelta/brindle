@@ -2016,6 +2016,8 @@ class DB:
             # Earlier grants did not distinguish conditional requests or artifact scope.
             self.conn.execute("UPDATE visual_grants SET remaining=0")
         visual_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visuals)")}
+        if "choices" not in visual_cols:
+            self.conn.execute("ALTER TABLE visuals ADD COLUMN choices TEXT")
         if "dismissed_rev" not in visual_cols:
             self.conn.execute("ALTER TABLE visuals ADD COLUMN dismissed_rev INTEGER NOT NULL DEFAULT 0")
         if "answered_in_chat_rev" not in visual_cols:

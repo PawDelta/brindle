@@ -5,8 +5,8 @@ Rows live in the ``visuals`` table, keyed by the session (its root agent);
 each revision's page is ``<repo>/.brindle/visuals/<session>/<id>/r<n>.html``.
 A worker publishes into its supervisor's session. The person's answer is
 bound to the revision on screen: an answer to an older revision is refused,
-never read against a newer revision's options. Only the option id and the
-person's own note go back to the supervisor, as a message from the person.
+never read against a newer revision's options. The option or inline group
+picks and the person's own note go back to the supervisor in one message.
 
 Keep copies the page to ``<repo>/.brindle/kept/visuals/<id>.html`` and a
 ``kept_visuals`` row, which outlive the session. Removing the session
@@ -25,6 +25,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import Callable
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -174,6 +175,57 @@ def _options(raw: Any) -> list[dict] | None:
     return out
 
 
+class _ChoiceMarkup(HTMLParser):
+    """Read declarative fieldsets; scripts never participate in answering."""
+
+    def __init__(self, html: str):
+        super().__init__()
+        self.groups = []
+        self.group = None
+        self.option = None
+        self.feed(html)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "fieldset" and attrs.get("data-choice"):
+            self.group = {"id": attrs["data-choice"], "question": attrs.get("data-question"), "options": []}
+            self.groups.append(self.group)
+        if tag == "button" and self.group is not None and attrs.get("data-option"):
+            self.option = {"id": attrs["data-option"], "label": ""}
+            self.group["options"].append(self.option)
+
+    def handle_data(self, data):
+        if self.option is not None:
+            self.option["label"] += data
+
+    def handle_endtag(self, tag):
+        if tag == "button":
+            self.option = None
+        if tag == "fieldset":
+            self.group = None
+
+
+def _choices(raw: Any, html: str) -> list[dict] | None:
+    if raw is None:
+        raw = _ChoiceMarkup(html).groups if isinstance(html, str) else None
+    if raw is None or raw == []:
+        return None
+    if not isinstance(raw, list) or len(raw) > MAX_OPTIONS:
+        raise ServiceError("invalid", "choices must be a list of at most 12 groups", 400)
+    out, seen = [], set()
+    for group in raw:
+        gid = group.get("id") if isinstance(group, dict) else None
+        if not isinstance(gid, str) or not OPTION_ID.fullmatch(gid) or gid in seen:
+            raise ServiceError("invalid", "each choice group needs its own option-style id", 400)
+        seen.add(gid)
+        options = _options(group.get("options"))
+        if not options:
+            raise ServiceError("invalid", "each group needs options", 400)
+        out.append({"id": gid, "question": _text(group.get("question"), "group question", MAX_QUESTION, True),
+                    "options": options})
+    return out
+
+
 # -- rows -----------------------------------------------------------------------------
 
 
@@ -181,6 +233,7 @@ def _decode(row) -> dict:
     v = dict(row)
     v["options"] = json.loads(v["options"]) if v["options"] else None
     v["answer"] = json.loads(v["answer"]) if v["answer"] else None
+    v["choices"] = json.loads(v["choices"]) if v.get("choices") else None
     return v
 
 
@@ -222,8 +275,10 @@ def to_dto(db: DB, v: dict) -> dict:
         rev=v["rev"],
         answer_agent_id=v["root_id"], accepts_files=provider.accepts_files,
         question=v["question"], options=v["options"],
+        choices=v.get("choices"),
+        inline_html=page(db, v["id"], str(v["rev"])).read_text(encoding="utf-8") if v.get("choices") else None,
         answered_in_chat=v["answered_in_chat_rev"] == v["rev"],
-        answer={k: answer[k] for k in ("option", "note", "at", "attachments") if k in answer} if answer else None,
+        answer={k: answer[k] for k in ("option", "note", "at", "attachments", "picks") if k in answer} if answer else None,
         kept=v["kept_at"] is not None, unread=v["read_rev"] < v["rev"], created_at=v["created_at"],
         holding=plans.holding_count(db, v["root_id"], v["id"]) if v["kind"] == "plan" else 0,
     ).to_json()
@@ -242,7 +297,8 @@ def _session(db: DB, caller: Agent | None) -> tuple[Agent, Workspace]:
 
 def publish(db: DB, caller: Agent | None, title: str, html: str, question: str | None = None,
             options: list[dict] | None = None, visual_id: str | None = None, kind: str = "visual",
-            extra: Callable[[Any, str, int], None] | None = None, asked: str | None = None) -> dict:
+            extra: Callable[[Any, str, int], None] | None = None, asked: str | None = None,
+            choices: list[dict] | None = None) -> dict:
     """Publish a new visual into ``caller``'s session, or (``visual_id``) a
     new revision of one of that session's visuals. A new revision is a new
     question: an answer to an earlier one is cleared. ``extra(c, id, rev)``
@@ -252,7 +308,7 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
     A supervisor's publication nothing allows yet gets one more chance: a small
     model reads the person's latest typed messages for an ask the regexes missed
     (brindle.intent), and the one message it finds grants this publication."""
-    args = (db, caller, title, html, question, options, visual_id, kind, extra, asked)
+    args = (db, caller, title, html, question, options, visual_id, kind, extra, asked, choices)
     try:
         return _publish(*args)
     except ServiceError as e:
@@ -268,22 +324,29 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
 
 def _publish(db: DB, caller: Agent | None, title: str, html: str, question: str | None,
              options: list[dict] | None, visual_id: str | None, kind: str,
-             extra: Callable[[Any, str, int], None] | None, asked: str | None) -> dict:
+             extra: Callable[[Any, str, int], None] | None, asked: str | None,
+             choices: list[dict] | None = None) -> dict:
     require_enabled()
     root, ws = _session(db, caller)
     title = _text(title, "title", MAX_TITLE, required=True)
     question = _text(question, "question", MAX_QUESTION)
     asked = _text(asked, "asked", MAX_QUESTION)
     options = _options(options)
-    if options and not question:
-        raise ServiceError("invalid", "options need the question they answer", 400)
     if not isinstance(html, str) or not html.strip():
         raise ServiceError("invalid", "html is required", 400)
     data = html.encode("utf-8")
     if len(data) > MAX_BYTES:
         raise ServiceError("too_big", f"the page is {len(data) // 1024} KB; a visual may be at most "
                            f"{MAX_BYTES // (1024 * 1024)} MB", 400)
+    choices = _choices(choices, html)
+    if choices:
+        # Group answers supersede the legacy single question, including chat folding.
+        options = None
+        question = choices[0]["question"]
+    if options and not question:
+        raise ServiceError("invalid", "options need the question they answer", 400)
     _refuse_secrets([("the page", html), ("the title", title), ("the question", question),
+                     ("choice groups", json.dumps(choices) if choices else None),
                      *((f"option {o['id']}", f"{o['label']}\n{o['detail'] or ''}") for o in options or [])])
 
     _private_dir(store_root(ws.repo_root))
@@ -309,7 +372,7 @@ def _publish(db: DB, caller: Agent | None, title: str, html: str, question: str 
         same = row is not None and row["root_id"] == root.id and row["kind"] == kind
         consented = visual_offers.authorize(
             c, root.id, kind, supervisor=supervisor, asked=asked,
-            decision=bool(question and options), visual_id=visual_id if same else None,
+            decision=bool(choices or (question and options)), visual_id=visual_id if same else None,
             answered=row["answer"] if same else None,
             consented=same and supervisor and row["consented_by"] == caller.id)
         # Only the session's supervisor earns a visual it may keep updating.
@@ -334,6 +397,7 @@ def _publish(db: DB, caller: Agent | None, title: str, html: str, question: str 
                           (title, rev, question, opts, caller.id, consented_by, now, vid))
             if extra is not None:
                 extra(c, vid, rev)
+            c.execute("UPDATE visuals SET choices=? WHERE id=?", (json.dumps(choices) if choices else None, vid))
         except BaseException:
             path.unlink(missing_ok=True)
             raise
@@ -361,7 +425,7 @@ def mark_read(db: DB, visual_id: str, rev: int | None = None) -> dict:
     # ``pending``: whether it still waits there (a question until answered, a
     # revision published since), so a client can drop the card at once when not.
     read = get(db, v["id"])
-    pending = (read["answer"] is None and read["dismissed_rev"] < read["rev"]) if read["options"] \
+    pending = (read["answer"] is None and read["dismissed_rev"] < read["rev"]) if read["options"] or read["choices"] \
         else read["read_rev"] < read["rev"]
     bus.publish(db, "visual.read", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"], pending=pending)
     return read
@@ -420,7 +484,7 @@ def _answer_attachments(db: DB, root_id: str, attachments: Any) -> tuple[list[st
 
 
 def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = None,
-           attachments: Any = None) -> dict:
+           attachments: Any = None, picks: Any = None) -> dict:
     """The person's answer to the revision on their screen (``rev``). The
     answer is claimed in the row first, so a second answer (a double click,
     another window) is refused instead of delivered twice; if the message
@@ -429,7 +493,7 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
 
     v = get(db, visual_id)
     _unlocked(v["root_id"])
-    if not v["options"]:
+    if not v["options"] and not v["choices"]:
         raise ServiceError("invalid", "this visual asks nothing to answer", 400)
     if not isinstance(rev, int) or isinstance(rev, bool):
         raise ServiceError("invalid", "rev (the revision on screen) is required", 400)
@@ -437,7 +501,15 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
         raise ServiceError("stale", f"the visual has a newer revision (r{v['rev']}); answer that one", 409,
                            rev=v["rev"])
     note = _text(note, "note", MAX_NOTE)
-    if option is None and not note:
+    if v["choices"]:
+        if option is not None or not isinstance(picks, dict) or set(picks) != {g["id"] for g in v["choices"]}:
+            raise ServiceError("invalid", "pick one option in every choice group", 400)
+        for group in v["choices"]:
+            if picks[group["id"]] not in [o["id"] for o in group["options"]]:
+                raise ServiceError("invalid", "not one of this group's options", 400)
+    elif picks is not None:
+        raise ServiceError("invalid", "this visual has no choice groups", 400)
+    if option is None and not note and not picks:
         raise ServiceError("invalid", "an option or note is required", 400)
     if option is not None and option not in {o["id"] for o in v["options"]}:
         raise ServiceError("invalid", "not one of this revision's options", 400)
@@ -446,6 +518,8 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
     names, references = _answer_attachments(db, v["root_id"], attachments)
     at = time.time()
     data = {"option": option, "note": note, "at": at, "rev": rev}
+    if picks:
+        data["picks"] = picks
     if names:
         data["attachments"] = names
     record = json.dumps(data)
@@ -461,6 +535,9 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
         raise ServiceError("answered", "this revision is already answered", 409)
     message = f"The person answered visual {v['id']} (r{rev})"
     message += f": option {option}." if option is not None else ":"
+    for group in v["choices"] or []:
+        pick = next(o for o in group["options"] if o["id"] == picks[group["id"]])
+        message += f"\n{group['question']} ({group['id']}): {pick['id']} · {pick['label']}"
     if note:
         message += f"\nTheir note: {note}"
     if references:
@@ -592,7 +669,7 @@ def dismiss(db: DB, visual_id: str, rev: Any) -> dict:
 
     v = get(db, visual_id)
     _unlocked(v["root_id"])
-    if not v["options"]:
+    if not v["options"] and not v["choices"]:
         raise ServiceError("invalid", "this visual asks nothing to dismiss", 400)
     if not isinstance(rev, int) or isinstance(rev, bool):
         raise ServiceError("invalid", "rev (the revision on screen) is required", 400)
@@ -634,8 +711,8 @@ def inbox_pending(db: DB, repo_root: str | None) -> list[dict]:
     if not enabled():
         return []
     sql = ("SELECT * FROM visuals WHERE ("
-           "(options IS NOT NULL AND answer IS NULL AND dismissed_rev < rev) OR "
-           "(options IS NULL AND read_rev < rev))"
+           "((options IS NOT NULL OR choices IS NOT NULL) AND answer IS NULL AND dismissed_rev < rev) OR "
+           "(options IS NULL AND choices IS NULL AND read_rev < rev))"
            " AND (kind <> 'plan' OR (EXISTS (SELECT 1 FROM agents a WHERE a.id=visuals.root_id"
            " AND a.dismissed_at IS NULL AND a.status <> 'done')"
            " AND EXISTS (SELECT 1 FROM plans p WHERE p.id=visuals.id"
@@ -718,7 +795,7 @@ def kept_to_dto(k: dict) -> dict:
     answer = json.loads(k["answer"]) if k["answer"] else None
     return KeptVisualDTO(
         id=k["id"], title=k["title"], from_session_name=k["from_session_name"], repo=k["repo"],
-        answer={key: answer[key] for key in ("option", "note", "at", "attachments") if key in answer} if answer else None,
+        answer={key: answer[key] for key in ("option", "note", "at", "attachments", "picks") if key in answer} if answer else None,
         kept_at=k["kept_at"],
     ).to_json()
 
