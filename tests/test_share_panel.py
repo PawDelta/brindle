@@ -14,16 +14,18 @@ from test_pro_remote_learning import login_as
 class Library:
     def __init__(self, remote):
         self.reviewers = {}
+        self.permissions = {}
         self.link = None
         self.fail = "b"
         self.people = [{"id": sub, "display_name": sub.upper(), "email": f"{sub}@example.com",
                         "teams": [{"id": "core", "name": "Core"}], "role": "member",
                         "on_plan": False, "on_plan_role": None} for sub in ("a", "b")]
         path = "/analysis-docs/doc_1/design"
+        remote.routes[f"GET {path}"] = lambda f, h: (200, self.view())
         remote.routes[f"GET {path}/people"] = lambda f, h: (200, {"people": self.people})
         remote.routes[f"GET {path}/people?q=a&team=core&role=member&on_plan=false"] = lambda f, h: (200, {"people": self.people[:1]})
         for sub in ("a", "b"):
-            remote.routes[f"PUT {path}/reviewers/{sub}"] = lambda f, h, sub=sub: self.put(sub, f)
+            remote.routes[f"PUT {path}/permissions/{sub}"] = lambda f, h, sub=sub: self.put(sub, f)
             remote.routes[f"DELETE {path}/reviewers/{sub}"] = lambda f, h, sub=sub: self.remove(sub)
         remote.routes[f"GET {path}/share-link"] = lambda f, h: (200, {"link": self.link})
         remote.routes[f"POST {path}/share-link"] = self.create_link
@@ -33,12 +35,14 @@ class Library:
         return {"rev": 1, "title": "Design", "lede": "", "ask": None,
                 "sections": [{"id": "summary", "title": "Summary", "kind": "markdown", "markdown": "A design."}], "decisions": [], "split": [],
                 "reviewers": [{"sub": sub, "required": required} for sub, required in self.reviewers.items()],
+                "permissions": self.permissions,
                 "sign_offs": [], "pending_reviewers": list(self.reviewers), "policy_reviewers": [], "ready": False}
 
     def put(self, sub, form):
         if self.fail == sub:
             return 409, {"error": "conflict"}
         self.reviewers[sub] = form["required"]
+        self.permissions[sub] = {"can_edit": False, "can_comment": True, "can_suggest": True}
         return 200, self.view()
 
     def remove(self, sub):

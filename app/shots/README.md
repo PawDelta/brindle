@@ -109,6 +109,13 @@ a teammate's reader (`panels.tsx`), the Library and the Inbox into `<dir>/curren
 improved flows drawn in `library-ux.tsx` into `<dir>/mockups`, each in both themes. `<dir>`
 defaults to `~/Documents/brindle-design-docs/library-ux`.
 
+## The organisation settings mockups
+
+`node shots/admin-settings-shots.mjs [--out <dir>] [--channel chrome]` takes the two layouts drawn
+in `admin-settings.tsx` for an organisation's Library settings (one sheet; read first, change one at
+a time), each as the admin's screen and the member's, in both themes. `<dir>` defaults to
+`~/Documents/brindle-design-docs/admin-settings`.
+
 ## Timing the wheel over a live Claude Code
 
 `npm run test:e2e -- --grep smooth` swipes a live Claude Code (the `pty`
