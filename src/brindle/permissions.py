@@ -4302,15 +4302,17 @@ _REFERENCE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
 _ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)=")
 
 
-# In a command's words (expansions resolved where they can be), what may set HOME: a HOME word
-# (HOME=x, read HOME, ${HOME:=x}, ((HOME=1))), a builtin that sets variables, runs text or makes
-# a later word a setter (alias), "." (source), IFS (it changes how words split), arithmetic (it
-# assigns what a value names: x='HOME=1'; ((x)), a[x]), or a pattern or brace (which may build a
-# name: {re,}ad, H?ME).
-_HOME_SETTERS = re.compile(
-    r"\b(?:HOME|IFS)\b|\b(?:eval|source|trap|enable|wait|coproc|select|alias|shopt|"
-    + "|".join(sorted(_VARIABLE_SETTERS))
-    + r")\b|(?:^|\s)\.(?=\s|$)|\(\(|[\[*?{]")
+# In any of a command's words (expansions resolved where they can be), what may set HOME even
+# as an argument: a HOME word (HOME=x, read HOME, ${HOME:=x}), IFS (it changes how words
+# split) or a ${...} beyond a plain reference (${x:=y}, ${!x}, ${a[x]}, whose subscript is
+# arithmetic, which assigns what a value names: x='HOME=1').
+_HOME_ANYWHERE = re.compile(r"\b(?:HOME|IFS)\b|\$\{")
+# A word that may name the command that runs, and may then set HOME: a builtin that sets
+# variables, runs text or makes a later word a setter (alias), "." (source), or a word with a
+# pattern or brace (which may build such a name: {re,}ad, rea?, a[x]=1).
+_HOME_SETTER_NAME = re.compile(
+    r"(?:eval|source|trap|enable|wait|coproc|select|alias|shopt|\.|" + "|".join(sorted(_VARIABLE_SETTERS))
+    + r")|.*[\[*?{].*")
 _SHELL_OPERATOR_CHARS = "();<>|&\n"
 # Words that open or continue a compound command: an assignment after one may not run.
 _COMPOUND_WORDS = frozenset({"if", "then", "elif", "else", "fi", "while", "until", "do", "done", "for", "case",
@@ -4338,8 +4340,9 @@ def _home_kept(command: str) -> bool:
     plain statement before it assigned a literal value. Else it may build a
     setter's name (c=a; re${c}d HOME). A literal command's arguments can't
     change this shell's HOME, so they may be only the run's (echo "$USER");
-    each substitution's own commands are checked in turn. Then no setter,
-    HOME or other way to change it (_HOME_SETTERS) may appear in the words."""
+    each substitution's own commands are checked in turn. Then no word may
+    name a setter (_HOME_SETTER_NAME), and none may change HOME as an
+    argument (_HOME_ANYWHERE)."""
     if re.search(r"\(\(|\$\[", command):
         return False    # arithmetic: it assigns what a value names
     spans = _substitution_spans(command)
@@ -4392,11 +4395,11 @@ def _home_kept(command: str) -> bool:
         unresolved.append(unknown)
         if names and _ASSIGNMENT.match(token):
             continue    # a leading assignment: the command comes after it
-        if names and unknown:
-            return False    # the command that runs is only the run's
+        if names and (unknown or _HOME_SETTER_NAME.fullmatch(resolved)):
+            return False    # the command that runs is only the run's, or may set HOME
         wrapped = wrapped or names and resolved in _NAMES_A_COMMAND
         names = wrapped
-    return not _HOME_SETTERS.search(" ".join(words))
+    return not _HOME_ANYWHERE.search(" ".join(words))
 
 
 @dataclass

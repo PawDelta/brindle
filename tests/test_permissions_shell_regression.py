@@ -76,6 +76,8 @@ OWNER_COMMAND = ("W=~/Projects/pawdelta-web; git -C $W branch --show-current; "
                  marks=pytest.mark.variant("$HOME in a value, where a push rule is in force")),
     pytest.param('W=$HOME/p; git -C $W push origin HEAD:feature; echo "$USER" "$(pwd)"', "allow", None,
                  marks=pytest.mark.variant("an argument only the run knows can't change HOME")),
+    pytest.param("W=$HOME/p; git -C $W push origin HEAD:feature; echo alias read; git log --grep=export",
+                 "allow", None, marks=pytest.mark.variant("a setter's name as an argument is only data")),
     pytest.param("D=~/p; rm -rf $D/build", "allow", None,
                  marks=pytest.mark.variant("~ in a value, where the rm rule is in force")),
     # What the substituted value names is still checked like the literal path.
