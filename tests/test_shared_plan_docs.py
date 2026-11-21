@@ -482,6 +482,7 @@ def test_ask_the_supervisor_author_gets_immediate_answer_and_questions_are_not_f
     assert plans.to_dto(db, plans.get(db, pid))["gate"]["state"] == "ready"
 
 
+@pytest.mark.variant("regression: a shared-plan question must reach the supervisor while the Library post is blocked")
 def test_a_question_on_a_shared_plan_reaches_the_supervisor_while_the_library_is_busy(db, parts, monkeypatch):
     """Regression (plan v_d6c7c4cd078e): the daemon's background sync held the
     plan's send when the person asked, so the question had no Library thread
