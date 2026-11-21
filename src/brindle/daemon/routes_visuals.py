@@ -417,6 +417,14 @@ def cancel_plan(db: DB, params: dict, body: dict) -> Any:
     return plans.to_dto(db, plans.cancel(db, params["id"], body.get("rev"), person=True))
 
 
+def stop_alongside(db: DB, params: dict, body: dict) -> Any:
+    """The person's Stop on a task running alongside an open plan (brindle.plans.stop_alongside):
+    a queued one is cancelled, a started one's workspace removed."""
+    from brindle import plans
+
+    return plans.to_dto(db, plans.stop_alongside(db, params["id"], params["task"]))
+
+
 # The design doc (brindle.plan_docs). Like decide, only the person reaches
 # these: each answers with the plan as it is now.
 
@@ -869,6 +877,7 @@ ROUTES = [
     Route("/v1/plans/{id}", plan),
     Route("/v1/plans/{id}/decide", _endpoint(decide_plan), methods=["POST"]),
     Route("/v1/plans/{id}/cancel", _endpoint(cancel_plan), methods=["POST"]),
+    Route("/v1/plans/{id}/alongside/{task}/stop", _endpoint(stop_alongside), methods=["POST"]),
     Route("/v1/plans/{id}/revisions/{n}", plan_revision),
     Route("/v1/plans/{id}/history", plan_history),
     Route("/v1/plans/{id}/revisions/{n}/changes", plan_comparison),

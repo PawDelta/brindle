@@ -1656,25 +1656,39 @@ def session_paused(db: DB, t: Task) -> bool:
 def plan_holds(db: DB, t: Task) -> bool:
     """Whether ``t`` waits on its session's planning doc (brindle.plans), or
     on brindle's offer to plan the goal first: while the person hasn't
-    approved the plan (or answered No to the offer), nothing the session
-    assigned starts, whatever wakes the task; that answer starts it (``on_resumed``).
-    Also a task its plan's cancel left held (plan_cancel_holds): it waits for
-    the supervisor's start_now or cancel_task, never for the plan."""
+    approved the plan (or answered No to the offer), the plan's own work
+    (``plan_work``) doesn't start, whatever wakes the task; that answer
+    starts it (``on_resumed``). An offer, which has no plan to tell its work
+    by yet, holds everything the session assigned. Also a task its plan's
+    cancel left held (plan_cancel_holds): it waits for the supervisor's
+    start_now or cancel_task, never for the plan."""
     if not t.caller_id:
         return False
     return db.cancelled_hold(t.id) is not None or open_plan_holds(db, t)
+
+
+def plan_work(db: DB, t: Task, plan_id: str) -> bool:
+    """Whether ``t`` is plan ``plan_id``'s own work: linked to one of its
+    split's workers (assign's plan_worker), or assigned to a milestone of
+    the session's goal, which the plan plans."""
+    linked = db.conn.execute("SELECT 1 FROM plan_tasks WHERE plan_id=? AND task_id=?", (plan_id, t.id)).fetchone()
+    return linked is not None or db.task_milestone(t.id) is not None
 
 
 def open_plan_holds(db: DB, t: Task) -> bool:
     """Whether the session's open plan (or unanswered offer to plan first) holds ``t``."""
     from brindle import autopilot, plans
 
-    return plans.holding(db, autopilot.root_of(db, t.caller_id)) is not None
+    held = plans.holding(db, autopilot.root_of(db, t.caller_id))
+    if held is None:
+        return False
+    return "id" not in held or plan_work(db, t, held["id"])
 
 
 def build_gate_refusal(db: DB, caller_id: str) -> str | None:
-    """Why ``caller_id`` may not give out new work, while its session's plan
-    is waiting on required reviewers (brindle.plans.gate); None otherwise."""
+    """Why ``caller_id`` may not give out the plan's own work, while its
+    session's plan is waiting on required reviewers (brindle.plans.gate);
+    None otherwise. Work outside the plan isn't asked (assign's outside_plan)."""
     from brindle import autopilot, plans
 
     plan = plans.gate_shut(db, autopilot.root_of(db, caller_id))

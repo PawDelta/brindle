@@ -42,7 +42,7 @@ import time
 from typing import Any
 
 from brindle import bus, doc_templates, redact, visual_offers, visuals
-from brindle.db import DB, Agent
+from brindle.db import DB, Agent, Task
 from brindle.service.errors import ServiceError
 
 MAX_MARKDOWN = 256 * 1024
@@ -505,7 +505,8 @@ def to_dto(db: DB, p: dict) -> dict:
                    state=p["state"], ask=p.get("ask"), markdown=p["markdown"], split=[],
                    verdict=p["decision"], queued=_queued(db, p["root_id"]) if p["state"] in HOLDING else 0,
                    created_at=p["created_at"], gate=gate(db, p), team_ended=_team_ended(db, p),
-                   reference=doc_templates.reference_of(db, p["id"]), **plan_docs.fields(db, p)).to_json()
+                   reference=doc_templates.reference_of(db, p["id"]), alongside=alongside(db, p["id"]),
+                   **plan_docs.fields(db, p)).to_json()
 
 
 def assignment(db: DB, caller: Agent, ref: str) -> tuple[str, str]:
@@ -519,6 +520,81 @@ def assignment(db: DB, caller: Agent, ref: str) -> tuple[str, str]:
     return pid, wid
 
 
+def _task_state(db: DB, task: Task) -> str:
+    """Where ``task`` is, as the plan's reader shows it: queued, working, in review, merged or cancelled."""
+    if task.state in ("merged", "cancelled"):
+        return task.state
+    agent = db.get_agent(task.agent_id) if task.agent_id else None
+    if agent and (agent.pipeline in ("reviewing", "ready") or (not agent.pipeline and agent.result)):
+        return "in review"
+    return "working" if agent else "queued"
+
+
+def record_alongside(db: DB, plan_id: str, task_id: str, reason: str) -> None:
+    """Task ``task_id`` was assigned outside plan ``plan_id`` for ``reason``: it runs at once and the
+    plan's reader lists it (``alongside``)."""
+    with db.tx() as c:
+        c.execute("INSERT OR IGNORE INTO plan_alongside (plan_id, task_id, reason, created_at) VALUES (?,?,?,?)",
+                  (plan_id, task_id, reason, time.time()))
+
+
+def alongside(db: DB, plan_id: str) -> list[dict]:
+    """The tasks the supervisor assigned outside plan ``plan_id`` while it was open, oldest first:
+    each one's title (its brief's first line), state, the reason given and whether Stop can act on it."""
+    out = []
+    for row in db.conn.execute("SELECT task_id, reason FROM plan_alongside WHERE plan_id=? ORDER BY created_at, rowid",
+                               (plan_id,)):
+        task = db.get_task(row["task_id"])
+        if task is None:
+            continue
+        state = _task_state(db, task)
+        out.append({"task_id": task.id, "title": _brief(task), "state": state, "reason": row["reason"],
+                     "can_stop": state not in ("merged", "cancelled")})
+    return out
+
+
+def _brief(task: Task) -> str:
+    return next((ln.strip() for ln in task.task_text.splitlines() if ln.strip()), task.id)[:120]
+
+
+def stop_alongside(db: DB, plan_id: str, task_id: str) -> dict:
+    """The person's Stop on a task running alongside plan ``plan_id``: a queued task is cancelled
+    (tasks._cancel, which tells its caller), a started one has its workspace removed
+    (workspaces.remove: its branch is kept unless merged). Never a kill. Returns the plan."""
+    from brindle import plan_docs, tasks
+
+    visuals.require_enabled()
+    p = get(db, plan_id)
+    visuals._unlocked(p["root_id"])
+    if db.conn.execute("SELECT 1 FROM plan_alongside WHERE plan_id=? AND task_id=?", (p["id"], task_id)).fetchone() is None:
+        raise ServiceError("not_found", "no such task runs alongside this plan", 404)
+    reason = f"stopped by the person from plan {p['id']}'s list of work running alongside it"
+    # _cancel reads the task again and cancels only a queued one: a task that started
+    # meanwhile falls through and is stopped as a started one.
+    if not tasks._cancel(db, task_id, reason):
+        _remove_started(db, db.get_task(task_id))
+    plan_docs._changed(db, p, p["rev"])
+    return get(db, p["id"])
+
+
+def _remove_started(db: DB, task: Task | None) -> None:
+    from brindle import workspaces
+
+    if task is None or task.state in ("merged", "cancelled"):
+        raise ServiceError("stopped", "this task has already ended", 409)
+    agent = db.get_agent(task.agent_id) if task.state == "started" and task.agent_id else None
+    ws = db.get_workspace(agent.workspace_id) if agent else None
+    if ws is None:
+        raise ServiceError("busy", "this task is starting or its workspace is gone; try again in a moment", 409)
+    if ws.id == task.caller_ws_id:
+        # isolate=false: the worker works in its supervisor's checkout, which Stop never removes.
+        raise ServiceError("shared", "this task works in its supervisor's own checkout, so Stop can't remove it", 409)
+    try:
+        workspaces.remove(db, ws)
+    except workspaces.WorkspaceError as e:
+        raise ServiceError("kept", str(e), 409) from e
+
+
 def _board(db: DB, p: dict) -> list[dict]:
     out = []
     milestones = db.milestones(p["root_id"])
@@ -528,12 +604,7 @@ def _board(db: DB, p: dict) -> list[dict]:
                                (p["id"], w["id"])).fetchone()
         task = db.get_task(link["task_id"]) if link else None
         if task:
-            agent = db.get_agent(task.agent_id) if task.agent_id else None
-            w.update(task_id=task.id, agent_id=task.agent_id)
-            w["state"] = (task.state if task.state in ("merged", "cancelled") else
-                          "in review" if agent and (agent.pipeline in ("reviewing", "ready") or
-                                                   (not agent.pipeline and agent.result)) else
-                          "working" if agent else "queued")
+            w.update(task_id=task.id, agent_id=task.agent_id, state=_task_state(db, task))
             # Only results for the named proving command count; an unrelated passing
             # check or milestone must never turn this card green.
             results = [(r["checked_at"], bool(r["ok"])) for r in db.conn.execute(
