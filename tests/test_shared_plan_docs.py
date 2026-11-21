@@ -463,8 +463,7 @@ def test_ask_the_supervisor_author_gets_immediate_answer_and_questions_are_not_f
     asyncio.run(transport())
     got = json.loads(response.body)
     assert messages(db) and got["threads"][0]["question"]
-    from brindle.pro import doc_questions as dq
-    dq.reply(db, db.get_agent("boss"), DOC, lib.threads[0]["id"], "An answer.", **net)
+    plans.reply(db, db.get_agent("boss"), pid, got["threads"][0]["id"], "An answer.")
     lib.threads.append({"id": 99, "kind": "comment", "rev": 1, "author": "teammate", "question": True,
                         "text": "Teammate private question", "status": "open", "replies": [],
                         "anchor": {"kind": "section", "section": "summary"}})
@@ -480,6 +479,42 @@ def test_ask_the_supervisor_author_gets_immediate_answer_and_questions_are_not_f
         plans.reply(db, db.get_agent("boss"), pid, threads[-1]["id"], "Not mine to answer.")
     sd.sign_off(db, pid, 1, **net)
     assert plans.to_dto(db, plans.get(db, pid))["gate"]["state"] == "ready"
+
+
+def test_a_question_on_a_shared_plan_reaches_the_supervisor_while_the_library_is_busy(db, parts, monkeypatch):
+    """Regression (plan v_d6c7c4cd078e): the daemon's background sync held the
+    plan's send when the person asked, so the question had no Library thread
+    yet and the supervisor got "could not be sent to the Library" instead of
+    the question. It goes to the plan's own supervisor first; the Library
+    copy, and the answer with it, follow on a later sync."""
+    pid, lib, net = parts
+    sd.share(db, pid, TEAM, **net)
+    lib.author = "user_1"
+    monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
+    original = sd._require_team
+    monkeypatch.setattr(sd, "_require_team", lambda store: original(net["store"]))
+    db.conn.execute("UPDATE plan_shares SET claimed_at=? WHERE plan_id=?", (time.time(), pid))   # a sync in flight
+    before = messages(db)
+
+    with TestClient(build_app(TOKEN), headers=AUTH) as client:
+        got = client.post(f"/v1/plans/{pid}/comments", json={
+            "rev": 1, "anchor": {"kind": "section", "section": "summary"}, "text": "What can I ask?",
+            "question": True})
+
+    assert got.status_code == 200
+    delivered = messages(db)[len(before):]
+    assert delivered and "What can I ask?" in delivered[-1]
+    tid = got.json()["threads"][0]["id"]
+    assert not plans.to_dto(db, plans.get(db, pid))["threads"][0]["replies"]      # no system error reply
+
+    db.conn.execute("UPDATE plan_shares SET claimed_at=NULL WHERE plan_id=?", (pid,))
+    plans.reply(db, db.get_agent("boss"), pid, tid, "Anything about this design.")
+    sd.sync(db, pid, **net)
+    assert lib.threads[0]["question"] is True
+    assert [(r["text"], r["from_supervisor"]) for r in lib.threads[0]["replies"]] == [
+        ("Anything about this design.", True)]
+    sd.sync(db, pid, **net)
+    assert len(plans.to_dto(db, plans.get(db, pid))["threads"][0]["replies"]) == 1   # it came back as itself
 
 
 def test_ask_the_supervisor_on_a_local_doc(db, parts):

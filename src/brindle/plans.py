@@ -918,8 +918,13 @@ def reply(db: DB, caller: Agent | None, plan_id: str, thread_id: Any, text: Any,
     if caller.id != root.id or p["root_id"] != root.id:
         raise ServiceError("forbidden", "only the session's supervisor answers on its plan", 403)
     thread = plan_docs._thread(db, p, thread_id)
-    if thread["question"]:
-        from brindle.pro import doc_questions, shared_docs
+    from brindle.pro import doc_questions
+
+    # A question asked here is answered here, shared or not; on a shared plan
+    # the answer goes up as the asker's supervisor's with the next sync. One
+    # asked in the Library is answered there, by the supervisor it was given to.
+    if thread["question"] and thread["author"] != plan_docs.PERSON:
+        from brindle.pro import shared_docs
 
         shared = shared_docs.link(db, plan_id)
         remote = db.conn.execute("SELECT remote_id FROM plan_share_threads WHERE plan_id=? AND local_id=?"
@@ -927,8 +932,7 @@ def reply(db: DB, caller: Agent | None, plan_id: str, thread_id: Any, text: Any,
         if shared and remote:
             doc_questions.reply(db, caller, shared["doc_id"], remote["remote_id"], text)
             return thread_id
-        if thread["author"] != plan_docs.PERSON or shared:
-            raise ServiceError("forbidden", "only the asker's supervisor answers a question", 403)
+        raise ServiceError("forbidden", "only the asker's supervisor answers a question", 403)
     if resolve and plan_docs._thread(db, p, thread_id)["kind"] != "comment":
         # refuse before replying: a failed call must leave nothing behind
         raise ServiceError("invalid", "only a comment thread is resolved; a suggestion is accepted or rejected", 400)
@@ -937,6 +941,8 @@ def reply(db: DB, caller: Agent | None, plan_id: str, thread_id: Any, text: Any,
         db.conn.execute("UPDATE plan_threads SET from_supervisor=1 WHERE id=?", (rid,))
     if resolve:
         plan_docs.resolve(db, plan_id, thread_id)
+    if thread["question"]:
+        doc_questions.sync_soon(db, plan_id)
     return rid
 
 

@@ -845,12 +845,15 @@ def _unsent(db: DB, plan_id: str) -> list:
     first: never sent, or sent and the answer never came back. With them the
     supervisor's suggestions on the live draft (plan_docs.supervise, marked
     from_supervisor), which go up as the person's, their note naming the
-    supervisor; its other threads stay here."""
+    supervisor, and its answers to the person's questions, which go up as
+    the asker's supervisor's (from_supervisor); its other threads stay here."""
     return db.conn.execute(
-        "SELECT * FROM plan_threads WHERE plan_id=? AND (author=? OR (author=? AND parent_id IS NULL"
-        " AND kind='suggestion' AND from_supervisor=1)) AND id NOT IN (SELECT local_id FROM plan_share_threads"
+        "SELECT * FROM plan_threads WHERE plan_id=? AND (author=? OR (author=? AND from_supervisor=1 AND"
+        " ((parent_id IS NULL AND kind='suggestion') OR (kind='reply' AND parent_id IN (SELECT id FROM"
+        " plan_threads WHERE plan_id=? AND author=? AND question=1)))))"
+        " AND id NOT IN (SELECT local_id FROM plan_share_threads"
         " WHERE plan_id=? AND NOT (remote_id<0 AND status=?)) ORDER BY id",
-        (plan_id, plan_docs.PERSON, plan_docs.SUPERVISOR, plan_id, SENDING)).fetchall()
+        (plan_id, plan_docs.PERSON, plan_docs.SUPERVISOR, plan_id, plan_docs.PERSON, plan_id, SENDING)).fetchall()
 
 
 def _send_thread(db: DB, plan_id: str, owner: str, head: _Head, t: Any, on: dict, replica=None) -> None:
@@ -865,6 +868,8 @@ def _send_thread(db: DB, plan_id: str, owner: str, head: _Head, t: Any, on: dict
         if parent is None:
             return
         tail, body = "/comments", {"parent": parent["remote_id"], "text": t["body"]}
+        if t["author"] == plan_docs.SUPERVISOR:     # its answer to the person's question (_unsent)
+            body["from_supervisor"] = True
     else:
         anchor = plan_docs._followed(replica, json.loads(t["anchor"]))
         gone = replica is not None and t["status"] == "accepted"
