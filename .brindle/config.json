@@ -6,9 +6,9 @@
     "uv run python scripts/check_new_tests.py --scoped",
     "uv run pytest -q -n auto -m 'not serial'",
     "uv run pytest -q -m serial",
-    "if [ -z \"$BRINDLE_BASE_BRANCH\" ] || ! git diff --quiet \"$BRINDLE_BASE_BRANCH\"...HEAD -- app; then cd app && { test -d node_modules || npm ci --silent; } && npx vitest run && npx tsc -b; fi",
+    "if [ -z \"$BRINDLE_BASE_BRANCH\" ] || ! git diff --quiet \"$BRINDLE_BASE_BRANCH\"...HEAD -- app; then cd app && { npm ls --depth=0 >/dev/null 2>&1 || npm ci --silent; } && npx vitest run && npx tsc -b; fi",
     "if [ -z \"$BRINDLE_BASE_BRANCH\" ] || ! git diff --quiet \"$BRINDLE_BASE_BRANCH\"...HEAD -- src/brindle app/src/api; then uv run python -c 'from brindle.daemon import schema; schema.write()' && npm --prefix app run gen:api >/dev/null && git diff --exit-code -- src/brindle/daemon/api-schema.json app/src/api/schema.ts; fi",
-    "if [ -z \"$BRINDLE_BASE_BRANCH\" ] || ! git diff --quiet \"$BRINDLE_BASE_BRANCH\"...HEAD -- app; then cd app && { test -d node_modules || npm ci --silent; } && CI=1 npx playwright test --project=chromium e2e/flows.e2e.ts; fi"
+    "if [ -z \"$BRINDLE_BASE_BRANCH\" ] || ! git diff --quiet \"$BRINDLE_BASE_BRANCH\"...HEAD -- app; then cd app && { npm ls --depth=0 >/dev/null 2>&1 || npm ci --silent; } && CI=1 npx playwright test --project=chromium e2e/flows.e2e.ts; fi"
   ],
   "rules": [
     "Full coverage is not a goal. Features need a main-path test, plus a failure path only when it matters; bug fixes need one regression test that fails on base and passes after. Refactors, renames, docs, config, wording and pure glue need no new tests. Extend existing tests or tables first. Never test wording, constants, defaults or mock arguments. Missing feature or regression tests and added tests catching no distinct bug are blockers."
