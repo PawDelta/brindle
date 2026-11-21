@@ -1426,6 +1426,15 @@ CREATE TABLE IF NOT EXISTS plan_cancel_holds (
     plan_id TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+-- A task the supervisor assigned outside its open plan (assign's outside_plan): it runs at once,
+-- and the plan's reader lists it, with its reason, under "Running alongside this plan".
+CREATE TABLE IF NOT EXISTS plan_alongside (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    reason TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (plan_id, task_id)
+);
 -- Which local thread or reply each Library thread or reply became, so a pull
 -- adds it once; status is the Library's as last seen. A negative remote_id is
 -- a thread with no Library thread: status 'sending' for one sent whose answer

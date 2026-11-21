@@ -23,7 +23,7 @@ from brindle.pro import auth, credentials, license
 from brindle.pro import shared_docs as sd
 from brindle.service.errors import ServiceError
 from pro_fixtures import BASE as BASE_URL, backend, claims, fixed_identity, pro_env, sign, signing_key  # noqa: F401
-from test_plans import AUTH, DECISIONS, TOKEN, messages, session  # noqa: F401 - fixture
+from test_plans import AUTH, DECISIONS, TOKEN, messages, session, work  # noqa: F401 - fixture
 from test_pro_remote_learning import login_as
 
 DOC = "doc_1"
@@ -46,7 +46,9 @@ class Library:
         self.sign_offs, self.author, self.refuse_accept = [], "u_e", False
         self.answer_status, self.refuse_suggest = 200, False     # once committed, answer this; refuse before committing
         self.refuse_vote, self.draft, self.reject_section = False, None, None
+        self.title = "Cloud workers"               # the doc's entry; the design view carries no title
         remote.routes.update({
+            f"GET {BASE}": lambda f, h: (200, {"id": DOC, "version": self.rev, "title": self.title}),
             f"GET {DESIGN}/draft": lambda f, h: (200, {"rev": self.rev, "frozen": None, "snapshot": base64.b64encode(
                 self.draft.export_snapshot()).decode()}),
             **{f"POST {DESIGN}/threads/{n}": functools.partial(self.act, n) for n in range(1, 12)},
@@ -666,6 +668,7 @@ def test_a_shared_plan_goes_to_the_library_and_what_teammates_write_comes_back(d
     sd.share(db, pid, TEAM, reviewers=[{"sub": "u_a"}, {"sub": "u_b", "required": False}], permissions=grant, **net)
     [made] = sent(backend, "POST /analysis-docs")
     assert made["scope"] == {"kind": "user", "id": "user_1"} and "folder" not in made       # the default Designs folder
+    assert made["title"] == "Cloud workers"                    # the plan's name, not a heading the Library guesses at
     assert made["design"]["sections"][0]["markdown"] == SUMMARY
     assert sent(backend, f"POST {BASE}/share")[0]["scope"] == TEAM
     assert lib.reviewers == [{"sub": "u_a", "required": True}, {"sub": "u_b", "required": False}]
@@ -1234,7 +1237,7 @@ def test_lapsed_plan_becomes_a_personal_doc(db, parts, session, backend, monkeyp
         assert got["threads"][0]["text"] == "Which VM?"
 
         # Work queued behind the doc, then the app goes away: only a current confirmation may release it.
-        assert "behind plan" in asyncio.run(mcp_server.assign("developer", "build it")) and started == []
+        assert "behind plan" in asyncio.run(mcp_server.assign("developer", "build it", **work(db))) and started == []
         monkeypatch.setattr(holds, "app_connected", lambda: False)
 
         def offline():

@@ -318,6 +318,28 @@ it("a redirected plan can be cancelled from the reader, and the same reader then
   expect(screen.getByTestId("plan-status").dataset.presentation).toBe("closed");
 });
 
+it("an open plan lists the work running alongside it, and Stop on one reads the plan again", async () => {
+  const row = { task_id: "t1", title: "bump the release version", reason: "fix the failing release build", state: "queued" as const, can_stop: true };
+  let current = doc(1, "Workers run on your machine.", { alongside: [row] });
+  const stopped: string[] = [];
+  const client: PlansClient & PlanDocClient & VisualsClient & Pick<DaemonClient, "stopAlongside"> = {
+    ...visuals, ...docWrites(() => current),
+    plan: async () => current, decidePlan: async () => current,
+    stopAlongside: async (_id, task) => {
+      stopped.push(task);
+      current = { ...current, alongside: [{ ...row, state: "cancelled", can_stop: false }] };
+      return current;
+    },
+  };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const item = await screen.findByTestId("alongside-t1");
+  expect(item.dataset.state).toBe("queued");
+  await act(async () => fireEvent.click(within(item).getByRole("button", { name: "Stop bump the release version" })));
+  expect(stopped).toEqual(["t1"]);
+  await waitFor(() => expect(screen.getByTestId("alongside-t1").dataset.state).toBe("cancelled"));
+  expect(within(screen.getByTestId("alongside-t1")).queryByRole("button")).toBeNull();
+});
+
 it("design doc writes go one at a time, a read sent before one came back can't undo it, and a reply is feedback to send", async () => {
   const base = doc(1, "Workers run on your machine.", {
     decisions: [{ id: "where", title: "Where", mine: "own", options: [{ id: "own", label: "A · Own" }, { id: "hosted", label: "B · Hosted" }] }],

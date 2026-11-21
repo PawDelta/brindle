@@ -78,6 +78,7 @@ def test_teammate_reads_writes_as_themselves_and_nothing_is_kept(db, lib, app):
 
     read = app.get(ROUTE).json()
     assert read["markdown"].startswith("Why we are doing this.") and SUMMARY in read["sections"][0]["markdown"]
+    assert read["title"] == "Cloud workers"                 # from the doc's entry: the design view has none
     assert (read["me"], read["author"], read["can_comment"], read["can_sign_off"]) == ("user_1", "u_author", True, True)
     assert read["can_edit"] is False
     lib.permissions["user_1"]["can_edit"] = True            # granted writing in the live draft
@@ -183,6 +184,26 @@ def test_a_share_link_opens_read_only_through_the_links_own_check(db, lib, app):
     asked = len(lib.calls.calls)
     bad = app.post("/v1/share-links/design", json={"token": "dsl_x/../../analysis-docs/doc_1"})
     assert bad.status_code == 400 and len(lib.calls.calls) == asked
+
+
+def test_a_link_opens_the_shared_design_with_the_accounts_own_rights_or_not_at_all(db, lib, app):
+    """The Library names the design behind a link only for someone it is shared with: then the
+    link opens the shared reader with what the Library lets this account do there, never more."""
+    token = "dsl_" + "B" * 43
+    lib.calls.routes[f"GET /share-links/{token}/design"] = lambda f, h: (200, {
+        **CONTENT, "title": "Cloud workers", "rev": 1, "can_comment": True, "can_suggest": True, "threads": [],
+        "doc_id": DOC})
+    lib.permissions["user_1"]["can_edit"] = True            # an editor through the team's share
+    read = app.post("/v1/share-links/design", json={"token": token}).json()
+    assert (read["id"], read["title"], read["can_edit"], read["can_comment"], read["can_sign_off"]) == (
+        DOC, "Cloud workers", True, True, True)
+    assert read["gate"]["waiting_on"] == ["user_1", "u_other"]
+
+    # The design itself refused to this account: the link opens nothing, as on the web.
+    lib.calls.routes[f"GET {DESIGN}"] = lambda f, h: (403, {"error": "forbidden"})
+    gone = app.post("/v1/share-links/design", json={"token": token})
+    assert (gone.status_code, gone.json()["error"]["code"]) == (404, "not_found")
+    assert not db.conn.execute("SELECT 1 FROM plan_shares").fetchone()
 
 
 def test_ask_the_supervisor_goes_by_doc_and_thread_after_the_reply(lib, app, monkeypatch):

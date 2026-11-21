@@ -12,7 +12,7 @@ from starlette.testclient import TestClient
 from brindle import agents, bus, mcp_server, plans, spawn, visual_offers
 from brindle.daemon.app import build_app
 from brindle.service.errors import ServiceError
-from test_plans import AUTH, DECISIONS, PLAN, TOKEN, messages, session  # noqa: F401 - fixture
+from test_plans import AUTH, DECISIONS, PLAN, TOKEN, messages, session, work  # noqa: F401 - fixture
 
 SUMMARY = "Workers run on a machine the customer controls. Code never passes through PawDelta."
 QUOTE = "a machine the customer controls"
@@ -110,8 +110,8 @@ def test_the_person_reviews_a_design_doc_through_the_routes(db, session, tmp_pat
          "caption": "Figure 1"},
         {"id": "flow", "title": "Flow", "kind": "svg", "markdown": drawing},
     ])["id"]
-    asyncio.run(mcp_server.assign("developer", "build it"))
-    folder = tmp_path / ".brindle" / "attachments"
+    asyncio.run(mcp_server.assign("developer", "build it", **work(db)))
+    folder =tmp_path / ".brindle" / "attachments"
     folder.mkdir(parents=True)
     (folder / "costs.png").write_bytes(b"png")
     costs = str(folder / "costs.png")
