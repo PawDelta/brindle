@@ -18,6 +18,12 @@ export interface DocSource<P extends Plan = Plan> {
   resolve(rev: number, thread: number, resolved: boolean): Promise<P>;
   suggest(rev: number, change: PlanChange, text?: string): Promise<P>;
   vote(rev: number, decision: string, option: string): Promise<P>;
+  /* Own answers on a decision (brindle/plan_answers.py): add one (and pick it), reword or take back one's own. */
+  answers?: {
+    add(rev: number, decision: string, text: string): Promise<P>;
+    edit(rev: number, answer: string, text: string): Promise<P>;
+    remove(rev: number, answer: string): Promise<P>;
+  };
   /* Reviewing someone else's design: this person's own sign-off. */
   signOff?(rev: number, version?: number): Promise<P>;
   /* Whether a failed read means this person can no longer open the doc, so it leaves the screen. */
@@ -49,6 +55,11 @@ export function planSource(client: PlansClient & PlanDocClient & Partial<PlanSha
     resolve: (_rev, thread, resolved) => client.resolvePlanThread(id, thread, resolved),
     suggest: (rev, change, text) => client.suggestPlan(id, rev, change, text),
     vote: (rev, decision, option) => client.confirmPlan(id, rev, decision, option),
+    answers: client.addPlanAnswer && client.changePlanAnswer ? {
+      add: (rev, decision, text) => client.addPlanAnswer!(id, rev, decision, text),
+      edit: (rev, answer, text) => client.changePlanAnswer!(id, rev, answer, { text }),
+      remove: (rev, answer) => client.changePlanAnswer!(id, rev, answer, { remove: true }),
+    } : undefined,
   };
 }
 
@@ -95,6 +106,11 @@ export function sharedSource(client: SharedDesignClient, id: string, repo?: stri
     resolve: (rev, thread, resolved) => send(`threads/${thread}`, { rev, action: resolved ? "resolve" : "reopen" }),
     suggest: (rev, change, text = "") => send("suggestions", { rev, ...change, text }),
     vote: (rev, decision, option) => send("votes", { rev, decision, option }),
+    answers: {
+      add: (rev, decision, text) => send("answers", { rev, decision, text }),
+      edit: (rev, answer, text) => send(`answers/${encodeURIComponent(answer)}`, { rev, text }),
+      remove: (rev, answer) => send(`answers/${encodeURIComponent(answer)}`, { rev, remove: true }),
+    },
     signOff: (rev, version) => send("sign-offs", { rev, ...(version === undefined ? {} : { version }) }),
     lost: accessGone,
   };

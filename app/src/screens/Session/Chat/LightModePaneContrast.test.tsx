@@ -1,6 +1,7 @@
 import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { groundLuminance, parseCss, toHsl } from "../../../components/textContrast";
+import { type Core, contrast, drawnColours } from "../../../test/themes";
 import { ChatPane } from "./ChatPane";
 
 const terminals = vi.hoisted(() => [] as import("@xterm/xterm").Terminal[]);
@@ -25,45 +26,6 @@ afterEach(() => {
   delete document.documentElement.dataset.theme;
   vi.unstubAllGlobals();
 });
-
-interface Core {
-  _themeService: { colors: { background: { css: string }; foreground: { css: string }; ansi: { css: string }[] } };
-  _renderService: { _renderer: { value: { _rowFactory: { createRow(...args: unknown[]): HTMLSpanElement[] }; _widthCache: unknown } } };
-}
-
-/* The colour xterm's DOM renderer draws each span of a row in: its inline colour where it set one (truecolour, or
-   adjusted for contrast), else the palette slot its xterm-fg-N class names. */
-function drawnColours(terminal: import("@xterm/xterm").Terminal, row: number): { text: string; css: string; ground: string; dim: boolean }[] {
-  const core = (terminal as unknown as { _core: Core })._core;
-  const renderer = core._renderService._renderer.value;
-  const line = (terminal.buffer.active as unknown as { _buffer: { lines: { get(i: number): unknown } } })._buffer.lines.get(row);
-  const spans = renderer._rowFactory.createRow(line, row, false, undefined, undefined, 0, false, 9, renderer._widthCache, -1, -1);
-  return spans.filter(span => span.textContent!.trim()).map(span => {
-    const style = span.getAttribute("style") ?? "";
-    const inline = /(?:^|;)\s*color:\s*([^;]+)/.exec(style)?.[1].trim();
-    const slot = /xterm-fg-(\d+)/.exec(span.className)?.[1];
-    const ground = /background-color:\s*([^;]+)/.exec(style)?.[1].trim() ?? /xterm-bg-(\d+)/.exec(span.className)?.[1];
-    return {
-      text: span.textContent!,
-      dim: span.classList.contains("xterm-dim"),
-      css: inline ?? (slot === undefined ? core._themeService.colors.foreground.css : core._themeService.colors.ansi[Number(slot)].css),
-      ground: ground === undefined ? core._themeService.colors.background.css : ground.startsWith("#") || ground.startsWith("rgb") ? ground : core._themeService.colors.ansi[Number(ground)].css,
-    };
-  });
-}
-
-function luminance(css: string): number {
-  const channels = css.startsWith("#")
-    ? [1, 3, 5].map(i => parseInt(css.slice(i, i + 2), 16))
-    : css.match(/\d+/g)!.slice(0, 3).map(Number);
-  const [r, g, b] = channels.map(c => c / 255)
-    .map(c => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4));
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
-}
-const contrast = (a: string, b: string) => {
-  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-  return (hi + 0.05) / (lo + 0.05);
-};
 
 /* Claude Code's light diff (2.1.330's colour-diff: its light theme's line and word grounds, GitHub's syntax colours,
    each token as a foreground SGR then a background SGR), in truecolour and as the 256-colour slots it sends without

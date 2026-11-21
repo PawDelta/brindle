@@ -183,10 +183,136 @@ export function Outline({ parts, placed, isOpen, decided, total, current, footer
   );
 }
 
+/* What a card does with own answers; each resolves to whether the write was saved. */
+export interface OwnAnswers {
+  add(text: string): Promise<boolean>;
+  edit(answer: string, text: string): Promise<boolean>;
+  remove(answer: string): Promise<boolean>;
+}
+
+const OWN_MAX = 500;      // brindle/plan_answers.py MAX_TEXT
+const ownHint = "flex flex-wrap items-center gap-x-1.5 text-[12px] leading-normal text-ink-3";
+const ownTag = "rounded-sm px-1.5 text-[11px] font-normal leading-[17px] text-ink-2 shadow-[inset_0_0_0_1px_var(--line-strong)]";
+const optionRow = "relative grid grid-cols-[16px_minmax(0,1fr)] gap-x-3 border-t border-line px-4 pb-3 pt-[11px]";
+
+function Mark({ chosen }: { chosen: boolean }) {
+  return (
+    <span aria-hidden className={`relative mt-[3px] size-[15px] rounded-full ${chosen ? "bg-pass-soft" : "shadow-[inset_0_0_0_1.5px_var(--line-strong)]"}`}>
+      {chosen && <span className="absolute left-[5px] top-[2.5px] h-2 w-1 rotate-45 border-b-[1.75px] border-r-[1.75px] border-solid border-pass" />}
+    </span>
+  );
+}
+
+/* The short field an own answer is typed in (the "ghost" treatment, shots/decision-other.tsx):
+   Enter saves it, Escape lets it go. Editing one's own answer offers Remove instead of Cancel. */
+function OwnAnswerField({ initial, busy, onSave, onCancel, onRemove }: {
+  initial: string; busy: boolean; onSave(text: string): void; onCancel(): void; onRemove?: () => void;
+}) {
+  const [text, setText] = useState(initial);
+  const save = (e: FormEvent) => {
+    e.preventDefault();
+    if (text.trim() && !busy) onSave(text.trim());
+  };
+  return (
+    <form onSubmit={save} data-testid="plan-answer-field"
+      className={`${optionRow} border-t-[color-mix(in_srgb,var(--branch)_45%,transparent)] bg-[color-mix(in_srgb,var(--branch)_5%,transparent)]`}>
+      <Mark chosen />
+      <span className="grid min-w-0 gap-1.5">
+        <span className="text-sm font-semibold leading-[1.45] text-ink">Your own answer</span>
+        <input autoFocus value={text} onChange={(e) => setText(e.target.value)} disabled={busy} maxLength={OWN_MAX} aria-label="Your own answer"
+          placeholder="Say what you'd do instead" onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}
+          className="w-full min-w-0 rounded-none border-0 border-b border-line-strong bg-transparent px-0 py-1 font-sans text-[13.5px] leading-[1.45] text-ink placeholder:text-ink-3 focus:border-branch focus:outline-none" />
+        <span className={`${ownHint} gap-3`}>
+          <span className="flex-1">Teammates can pick it too.</span>
+          {onRemove ? <button type="button" className={link} disabled={busy} onClick={onRemove}>Remove</button>
+            : <button type="button" className={link} disabled={busy} onClick={onCancel}>Cancel</button>}
+        </span>
+      </span>
+    </form>
+  );
+}
+
+/* A decision's own answers as option rows of their own, each with its author, and the quiet
+   "+ Your own answer" under them. Anyone picks one like an option; its author can reword or
+   take it back until someone else has picked it. */
+function OwnAnswerRows({ decision: d, open, disabled, picked, onPick, nameOf, answers }: {
+  decision: PlanDecisionDTO; open: boolean; disabled: boolean; picked: string | null;
+  onPick(option: string): void; nameOf?: (who: string) => string; answers?: OwnAnswers;
+}) {
+  const [typing, setTyping] = useState<string | null>(null);     // "new", or the id of the answer being reworded
+  const [saving, setSaving] = useState(false);
+  const own = d.answers ?? [];
+  const named = (who: string) => (who === "person" ? "You" : nameOf?.(who) ?? personName(who));
+  const done = !!picked;
+  const run = async (work: () => Promise<boolean>) => {
+    setSaving(true);
+    const saved = await work();
+    setSaving(false);
+    if (saved) setTyping(null);
+  };
+  const mine = own.filter((a) => a.author === "person").length;
+  return (
+    <>
+      {own.map((a) => {
+        if (typing === a.id && answers) {
+          return <OwnAnswerField key={a.id} initial={a.text} busy={saving || disabled} onSave={(text) => void run(() => answers.edit(a.id, text))}
+            onCancel={() => setTyping(null)} onRemove={() => void run(() => answers.remove(a.id))} />;
+        }
+        const chosen = picked === a.id;
+        const voters = d.votes?.[a.id] ?? [];
+        const yours = a.author === "person";
+        return (
+          <label key={a.id} data-testid="plan-answer" data-answer={a.id} data-author={a.author} data-chosen={chosen || undefined}
+            className={`${optionRow} transition-colors has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-branch ${open ? "cursor-pointer hover:bg-[color-mix(in_srgb,var(--ink)_4%,transparent)]" : ""}`}>
+            <input type="radio" name={`decision-${d.id}`} value={a.id} checked={chosen} disabled={!open || disabled} onChange={() => onPick(a.id)} className="absolute m-0 size-px opacity-0" />
+            <Mark chosen={chosen} />
+            <span className="grid min-w-0 gap-[3px]">
+              <span className={`flex flex-wrap items-center gap-[9px] text-sm leading-[1.45] ${done && !chosen ? "font-medium text-ink-3" : done ? "font-semibold text-ink" : "font-medium text-ink"}`}>
+                ‘{a.text}’
+                {yours && <span className={ownTag}>Your answer</span>}
+                {voters.length > 0 && (
+                  <span className="ml-auto inline-flex flex-wrap items-center gap-1" data-votes={voters.length} title={`Picked by ${voters.map(named).join(", ")}`}>
+                    {voters.map((v) => <Avatar key={v} who={v === "person" ? "person" : nameOf?.(v) ?? "A teammate"} small />)}
+                  </span>
+                )}
+              </span>
+              <span className={ownHint}>
+                <Avatar who={yours ? "person" : nameOf?.(a.author) ?? "A teammate"} small />
+                <span>{`Written by ${yours ? "you" : named(a.author)}`}</span>
+                {yours && open && answers && !a.locked && (
+                  <>
+                    <span aria-hidden>·</span>
+                    <button type="button" className={link} disabled={disabled || saving} onClick={(e) => { e.preventDefault(); setTyping(a.id); }}>Edit</button>
+                  </>
+                )}
+              </span>
+            </span>
+          </label>
+        );
+      })}
+      {typing === "new" && answers && (
+        <OwnAnswerField initial="" busy={saving || disabled} onSave={(text) => void run(() => answers.add(text))} onCancel={() => setTyping(null)} />
+      )}
+      {open && answers && typing !== "new" && mine < 5 && own.length < 20 && (
+        <div className="border-t border-dashed border-line px-4 py-2.5">
+          <button type="button" data-testid="plan-add-answer" disabled={disabled} onClick={() => setTyping("new")}
+            className="inline-flex cursor-pointer items-center gap-2 border-0 bg-transparent p-0 font-sans text-[13px] text-ink-3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45">
+            <span aria-hidden className="grid size-[15px] place-items-center rounded-full font-mono text-[12px] leading-none shadow-[inset_0_0_0_1.5px_var(--line)]">+</span>
+            Your own answer
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
 /* A decision, where its question comes up: picking an option is the person's answer. Sap marks
    one that still needs them; once picked, the card goes quiet and a tick stays. */
-export function DecisionCard({ decision: d, n, of, open, disabled = false, picked, onPick, onComment, nameOf }: {
+export function DecisionCard({ decision: d, n, of, open, disabled = false, picked, onPick, onComment, nameOf, answers }: {
   decision: PlanDecisionDTO;
+  /* Own answers (brindle/plan_answers.py): add one (it becomes the pick), reword or take back one's own.
+     Without it the card offers none; answers already on the card still show and can be picked. */
+  answers?: OwnAnswers;
   /* A voter as the card names them ("You", "David"). */
   nameOf?: (who: string) => string;
   n: number;
@@ -248,6 +374,7 @@ export function DecisionCard({ decision: d, n, of, open, disabled = false, picke
             </label>
           );
         })}
+        <OwnAnswerRows decision={d} open={open} disabled={disabled} picked={picked} onPick={onPick} nameOf={nameOf} answers={answers} />
       </div>
       {(d.challenge || onComment) && (
         <div className="flex items-baseline justify-between gap-4 border-t border-line px-4 pb-[11px] pt-2.5">

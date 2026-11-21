@@ -115,6 +115,15 @@ def _can_sign(view: dict, me: str, author: Any) -> bool:
     return me == author or bool(view.get("policy_reviewers")) or any(isinstance(r, dict) and r.get("sub") == me for r in people)
 
 
+def _answers(view: dict, decision: str, cast: dict[str, list[str]], me: str) -> list[dict]:
+    """A decision's own answers (brindle.plan_answers), each locked once someone else picked it."""
+    from brindle import plan_answers
+
+    return [{"id": a["id"], "text": mask(a["text"])[:plan_answers.MAX_TEXT], "author": _who(a["author"], me),
+             "at": _at(a.get("at")), "locked": any(s != a["author"] for s in cast.get(a["id"], []))}
+            for d, a in plan_answers._theirs(view.get("decisions")) if d == decision]
+
+
 def _dto(doc_id: str, view: dict, me: str, *, review: bool = True, names: dict | None = None) -> dict:
     if not isinstance(view.get("rev"), int):
         raise RuntimeError("the Library's answer has no revision")
@@ -124,7 +133,8 @@ def _dto(doc_id: str, view: dict, me: str, *, review: bool = True, names: dict |
     for d in content["decisions"]:
         cast = {option: [str(s) for s in subs] for option, subs in votes.get(d["id"], {}).items() if isinstance(subs, list)}
         decisions.append({**d, "votes": {option: [_who(s, me) for s in subs] for option, subs in cast.items()},
-                          "confirmed": next((option for option, subs in cast.items() if me in subs), None)})
+                          "confirmed": next((option for option, subs in cast.items() if me in subs), None),
+                          "answers": _answers(view, d["id"], cast, me)})
     history = [r for r in view.get("revisions") or [] if isinstance(r, dict) and isinstance(r.get("rev"), int)
                and r.get("source") in REVISION_SOURCES]
     author = history[0].get("author") if history else view.get("author")
@@ -144,6 +154,7 @@ def _dto(doc_id: str, view: dict, me: str, *, review: bool = True, names: dict |
         can_edit=_can(view, me, "can_edit"),     # may write in its live draft (the reader's Editing)
         can_comment=_can(view, me, "can_comment"), can_suggest=_can(view, me, "can_suggest"),
         can_sign_off=review and _can_sign(view, me, author),
+        access_request=view.get("access_request"),
         signed_off=any(isinstance(s, dict) and s.get("sub") == me and s.get("rev") == view["rev"]
                        for s in view.get("sign_offs") or [])).to_json()
 
@@ -187,6 +198,16 @@ def _text(text: Any) -> str:
 def read(doc_id: str, *, client=None, store=None) -> dict:
     """The design as this account may read it now."""
     return _ask(doc_id, "GET", "", None, client, store)
+
+
+def request_access(doc_id: str, role: Any, sub: str | None = None, *, action: str = "grant", client=None, store=None) -> dict:
+    """Ask as the signed-in reader, or grant a request as its author; the Library checks both."""
+    if role not in ("comment", "edit"):
+        raise ServiceError("invalid", "request comment or edit access", 400)
+    if action not in ("grant", "decline"):
+        raise ServiceError("invalid", "grant or decline the access request", 400)
+    tail = "/access-requests" + (f"/{quote(sub, safe='')}/{action}" if sub is not None else "")
+    return _ask(doc_id, "POST", tail, {"role": role}, client, store)
 
 
 def people(doc_id: str, filters: dict, *, client=None, store=None) -> dict:
@@ -270,6 +291,39 @@ def act(doc_id: str, thread: int, rev: Any, action: Any, *, client=None, store=N
 
 def vote(doc_id: str, rev: Any, decision: Any, option: Any, *, client=None, store=None) -> dict:
     return _ask(doc_id, "POST", "/votes", {"rev": _rev(rev), "decision": decision, "option": option}, client, store)
+
+
+def add_answer(doc_id: str, rev: Any, decision: Any, text: Any, *, client=None, store=None) -> dict:
+    """This account's own answer on a decision, and its pick of it (brindle.plan_answers)."""
+    from brindle import plan_answers
+
+    rev, text = _rev(rev), plan_answers._text(text)
+    answer_id = plan_answers.new_id()
+    client, store = ad._session(client, store)
+    ad.api("POST", sd._path(doc_id, "/answers"), {"rev": rev, "decision": decision, "id": answer_id, "text": text},
+           client=client, store=store)
+    return vote(doc_id, rev, decision, answer_id, client=client, store=store)
+
+
+def _answer_id(answer_id: Any) -> str:
+    from brindle import plan_answers
+
+    if not isinstance(answer_id, str) or not plan_answers.ID.fullmatch(answer_id):
+        raise ServiceError("invalid", "name one of the answers on this doc", 400)
+    return answer_id
+
+
+def edit_answer(doc_id: str, rev: Any, answer_id: Any, text: Any, *, client=None, store=None) -> dict:
+    """Reword this account's own answer; the Library refuses once someone else picked it (409 picked)."""
+    from brindle import plan_answers
+
+    return _ask(doc_id, "PUT", f"/answers/{_answer_id(answer_id)}", {"rev": _rev(rev), "text": plan_answers._text(text)},
+                client, store)
+
+
+def remove_answer(doc_id: str, rev: Any, answer_id: Any, *, client=None, store=None) -> dict:
+    return _ask(doc_id, "DELETE", f"/answers/{_answer_id(answer_id)}?{urlencode({'rev': _rev(rev)})}", None,
+                client, store)
 
 
 def sign_off(doc_id: str, rev: Any, *, client=None, store=None) -> dict:

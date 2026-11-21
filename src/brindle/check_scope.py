@@ -33,8 +33,11 @@ the single tests (node ids) that executed the functions the change edits, plus
 the branch's own and namesake test files. More than ``scoped_checks_max_tests``
 tests run only the most specific to the change (``coverage_map.rank``), the
 branch's own and namesake tests first, after a one-line note. A missing or
-stale map runs the check in full; a change no test executes skips it. The
-session checkout's check after brindle merges origin into it
+stale map runs the check in full; a change no test executes skips it.
+Coverage mode also replaces a trailing ``tests`` root with the selected
+targets. Marker and keyword filters discard whole selected files that
+collect no matching tests; filtered checks run in full for conftest changes.
+The session checkout's check after brindle merges origin into it
 (``session_sync.run_checks``) is narrowed the same way, to what the merge
 brought in, and so is the run before a PR (``gates.pr_checked``), to what the
 branch changes since it left the PR's base (``pr_diff``): CI runs the full
@@ -129,12 +132,26 @@ def pytest_selectors(cmd: str) -> bool | None:
 def inferred(cmd: str, mode: str | None) -> CheckScope | None:
     """The scope ``scoped_checks: "infer"`` gives ``cmd``: pytest on the
     affected tests when it is a plain pytest command that picks no tests
-    itself (appending targets would not narrow it), else None."""
-    if mode in (None, "infer", "coverage") and pytest_selectors(cmd) is False:
+    itself, else None. Coverage mode also replaces a trailing ``tests`` root."""
+    candidate = _without_tests_root(cmd) if mode == "coverage" else cmd
+    if mode in (None, "infer", "coverage") and pytest_selectors(candidate) is False:
         if mode == "coverage":   # a conftest's fixtures run inside each test's coverage context
-            return CheckScope([p for p in INFER_FULL_WHEN if p != "**/conftest.py"], coverage=True)
+            full_when = INFER_FULL_WHEN if _filters(cmd) else [p for p in INFER_FULL_WHEN if p != "**/conftest.py"]
+            return CheckScope(full_when, coverage=True)
         return CheckScope(INFER_FULL_WHEN)
     return None
+
+
+def _without_tests_root(cmd: str) -> str:
+    """A trailing full-suite root can be replaced by coverage targets.
+    Explicit files and other directories keep their caller-chosen scope."""
+    if pytest_selectors(cmd) is True:
+        toks = shlex.split(cmd)
+        if toks[-1] in ("tests", "tests/", "./tests", "./tests/"):
+            candidate = shlex.join(toks[:-1])
+            if pytest_selectors(candidate) is False:
+                return candidate
+    return cmd
 
 
 def _changes_checks(ws: Workspace, base: str, path: str) -> bool:
@@ -332,6 +349,15 @@ def _by_coverage(ws: Workspace, cmd: str, scope: CheckScope, changed: list[str],
     files = {f for f in collectable(root, sorted({coverage_map.test_file(n) for n in nodes}))
              if f not in whole and (root / f).is_file()}
     tests = sorted(whole | {n for n in nodes if coverage_map.test_file(n) in files})
+    if _filters(cmd):
+        # Whole files (own, namesake or script tests) may contain no test matching this check.
+        # Collect with the check's filters before deciding whether there is anything to run.
+        selected: set[str] = set()
+        for t in tests:
+            collected = _collected(ws, cmd, t) if "::" not in t else None
+            if collected is None or collected:
+                selected.add(t)
+        tests = sorted(selected)
     if not tests:
         return None
     note = ""
@@ -376,7 +402,7 @@ def _by_coverage(ws: Workspace, cmd: str, scope: CheckScope, changed: list[str],
         tests = _most_specific(tests, first, ranked, max_tests, keep={t for t in own if is_test_file(t)},
                                size=size, split=split)
         note = "printf '%s\\n' " + shlex.quote(COVERAGE_CAP_NOTE.format(n=total, max=max_tests)) + "; "
-    run = f"{note}{cmd} {_quoted(tests)}"
+    run = f"{note}{_without_tests_root(cmd)} {_quoted(tests)}"
     # A marker or keyword filter may leave none of the selected tests (pytest's exit 5): nothing of it to run.
     return f"{run} || [ $? -eq 5 ]" if _filters(cmd) else run
 
