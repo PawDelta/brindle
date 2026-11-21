@@ -74,6 +74,8 @@ OWNER_COMMAND = ("W=~/Projects/pawdelta-web; git -C $W branch --show-current; "
                  marks=pytest.mark.variant("the owner's reported command: ~ in a value, redirect and && echo")),
     pytest.param("W=$HOME/p; git -C $W push origin HEAD:feature", "allow", None,
                  marks=pytest.mark.variant("$HOME in a value, where a push rule is in force")),
+    pytest.param('W=$HOME/p; git -C $W push origin HEAD:feature; echo "$USER" "$(pwd)"', "allow", None,
+                 marks=pytest.mark.variant("an argument only the run knows can't change HOME")),
     pytest.param("D=~/p; rm -rf $D/build", "allow", None,
                  marks=pytest.mark.variant("~ in a value, where the rm rule is in force")),
     # What the substituted value names is still checked like the literal path.
@@ -111,6 +113,15 @@ def test_a_variable_assigned_a_home_path_is_checked_as_its_value(tmp_path, comma
                  marks=pytest.mark.variant("an expansion inside a command name")),
     pytest.param('c=re; n=HO; command -p ${c}ad ${n}ME; git commit -m "$(gh api $HOME)"', id="wrapper-option",
                  marks=pytest.mark.variant("a computed command name after a wrapper's option")),
+    pytest.param('git commit -m "$(c=re; a=ad; n=HO; m=ME; $c$a $n$m <<< blocked; gh api $HOME)"',
+                 id="inside-a-substitution",
+                 marks=pytest.mark.variant("a computed setter inside a substitution given as an argument")),
+    pytest.param('c=$(printf re)ad; n=$(printf HO)ME; cat <($c -r $n <<< blocked; gh api $HOME)',
+                 id="process-substitution",
+                 marks=pytest.mark.variant("a process substitution's first word names a command")),
+    pytest.param('shopt -s expand_aliases; c=$(printf re)ad; alias r=$c\nr $(printf HO)ME <<< blocked; '
+                 'git commit -m "$(gh api $HOME)"', id="alias",
+                 marks=pytest.mark.variant("an alias makes a literal word a setter")),
     pytest.param('{re,}ad {HO,}ME; git commit -m "$(gh api $HOME)"', id="braces",
                  marks=pytest.mark.variant("brace expansion builds a setter and HOME")),
 ])
