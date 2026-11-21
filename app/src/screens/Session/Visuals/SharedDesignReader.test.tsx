@@ -57,6 +57,22 @@ it("reconciles a sent access request with a later decline without remounting", a
   expect(screen.getByRole("button", { name: "Ask to comment" }).hasAttribute("disabled")).toBe(false);
 });
 
+it("keeps a successful access request pending when the teammate directory arrives", async () => {
+  let resolvePeople!: (people: { people: [] }) => void;
+  const people = new Promise<{ people: [] }>((resolve) => { resolvePeople = resolve; });
+  const viewer: SharedDesign = { ...design, can_comment: false, can_suggest: false, can_sign_off: false };
+  const client: SharedDesignClient = {
+    sharedDesign: async () => viewer,
+    writeSharedDesign: async () => ({ ...viewer, access_request: { role: "comment", status: "pending" } }),
+    libraryPeople: () => people,
+  };
+  await act(async () => { render(<SharedDesignReader client={client} docId="doc_1" onBack={() => {}} />); });
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Ask to comment" })));
+  expect(screen.getByRole("button", { name: "Comment access requested" }).hasAttribute("disabled")).toBe(true);
+  await act(async () => resolvePeople({ people: [] }));
+  expect(screen.getByRole("button", { name: "Comment access requested" }).hasAttribute("disabled")).toBe(true);
+});
+
 it("a teammate signs off through the Library, keeps a draft across a stale write, and loses the doc with their access", async () => {
   vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
   const nextRead = () => act(async () => { vi.advanceTimersByTime(30_000); });
