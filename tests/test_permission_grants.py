@@ -288,7 +288,7 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
 @pytest.mark.parametrize("approved, siblings", [
     pytest.param("git log --oneline -5", [("git diff HEAD~1 | head -50", "allow"), ("git log -1 && git reset --hard", "deny")],
                  marks=pytest.mark.variant("family approval must still reject the disallowed sibling")),
-    ("ls -la src | head", [("cd src && grep -rn foo . | wc -l", "allow"), ("ls && cd $DIR && cat secret.txt", "ask")]),
+    ("ls -la src | head", [("cd src && grep -rn foo . | wc -l", "allow"), ("ls && cd $DIR && cat secret.txt", "deny")]),
     ("uv run pytest tests/test_a.py", [("uv run pytest tests/test_b.py", "allow"), ("uv run rm -rf build", "ask"),
                                        ("cd / && uv run pytest", "ask"), ("uv run pytest --basetemp=src", "ask"),
                                        ("uv run pytest -k @args.txt", "ask")]),

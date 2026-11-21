@@ -456,7 +456,14 @@ def parts_decision(req: Request, parts: list[permissions.ShellPart], found: perm
         (group, sub), *files = part_classes(req, part, rules, checks)
         ruled = None if part.expanded else permissions._part_decision(at, part.words, checks, rules,
                                                                     unresolved=part.unresolved)
-        answers.append(ruled if ruled is not None and ruled.rule is not None else fallback(group, sub))
+        if ruled is not None and ruled.rule is not None:
+            answers.append(ruled)
+        else:
+            baseline = fallback(group, sub)
+            # Runtime code's baseline ask cannot by itself require the person.
+            # Denies still win, and readable redirections get their own answers.
+            if not part.opaque or baseline.decision == "deny":
+                answers.append(baseline)
         for (kind, path), (group, sub) in zip([*(("write", p) for p in part.writes),
                                                *(("read", p) for p in part.reads)], files):
             file = replace(at, kind=kind, command=None, path=path)

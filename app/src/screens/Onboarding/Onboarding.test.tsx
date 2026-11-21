@@ -342,7 +342,11 @@ describe("Onboarding", () => {
     const daemon = new FakeDaemon({ account: SIGNED_IN, providers: freshProviders() });
     let failing = true;
     launchWith(daemon, () => (failing ? refusal(500, "internal", "the engine hit an error") : null));
+    const starting = screen.getByRole("status", { name: "Starting brindle" });
+    expect(starting.textContent).toBe(within(starting).getByRole("img").textContent);
+    expect(starting.querySelector(".onb-bar > i")).toBeTruthy();
     const failed = await screen.findByTestId("starting-failed");
+    expect(failed.getAttribute("role")).toBe("alert");
     expect(failed.textContent).toContain("the engine hit an error");
     expect(sidebar()).toBeNull();
     failing = false;
