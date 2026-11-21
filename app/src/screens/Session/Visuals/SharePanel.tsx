@@ -50,7 +50,8 @@ const list = (names: string[]) => names.length < 2 ? names.join("") : `${names.s
 
 type Person = { sub: string; name: string; access: ShareAccessLevel | null; signOff: "required" | "optional" | null };
 type Work = { key: string; label: string; run(): Promise<Plan> };
-type Busy = Record<string, { state: "saving" | "failed"; retry?: Work }>;
+/* A write out now, or one the Library refused, kept so Try again sends the same one. */
+type Busy = Record<string, { state: "saving" | "failed"; refused?: Work }>;
 
 export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onClose, children, signOff, teams = [], directory = [], owned = false, previewRules }: {
   plan: Plan; target?: SharePeopleTarget; nameOf(sub: string): string; writes: Writes;
@@ -167,7 +168,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
         answered.current = await work.run();
         if (mounted.current) setBusy((old) => { const next = { ...old }; delete next[work.key]; return next; });
       } catch {
-        if (mounted.current) setBusy((old) => ({ ...old, [work.key]: { state: "failed", retry: work } }));
+        if (mounted.current) setBusy((old) => ({ ...old, [work.key]: { state: "failed", refused: work } }));
       } finally {
         flight.current.delete(work.key);
         out.current--;
@@ -222,7 +223,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     const b = busy[key];
     if (!b) return null;
     return b.state === "saving" ? <span className="st"><i className="spin" />Saving…</span>
-      : <><span className="st bad">{b.retry?.label ?? label}</span><button className="sp-btn q end" data-testid={`share-try-${key}`} onClick={() => b.retry && run(b.retry)}>Try again</button></>;
+      : <><span className="st bad">{b.refused?.label ?? label}</span><button className="sp-btn q end" data-testid={`share-try-${key}`} onClick={() => b.refused && run(b.refused)}>Try again</button></>;
   };
 
   const personRow = (p: Person) => {
