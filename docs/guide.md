@@ -1017,7 +1017,9 @@ Where brindle can't tell what will run, it doesn't guess: a program or code only
 the run knows (`$X`, `eval "$X"`, `python3 -c "$X"`), a program fed what it will
 run (`... | sh`, `... | xargs`, `python3 - <<EOF`), or syntax it doesn't read. Under
 Autonomous the agent is told to run the parts as separate commands, and you get no
-prompt; under other presets it asks. The `shell/unchecked` setting overrides this:
+prompt; syntax checks that would ask under other presets instead return a deny
+with rewrite guidance to the agent, for workers and supervisors alike. The
+`shell/unchecked` setting overrides this:
 deny always refuses, and allow runs them, the dangerous opt-in.
 
 This reads what's written; it isn't a sandbox. A program allowed alone can do what
@@ -1036,7 +1038,9 @@ file. Precedence: a deny wins, then an ask, then an allow, then the preset's
 setting for what no rule covers (ask, allow or deny). A deny or ask also
 catches a part of a compound command however it's spelled (spacing, quotes,
 assignments, redirects, `$(...)`, patterns the shell expands); when brindle
-can't read the syntax and a deny or ask could match it, it asks.
+can't read the syntax and a deny or ask could match it, it returns the command to
+the agent to rewrite, then applies the normal allow, ask or deny rules to the plain
+command.
 Every preset denies explicit Git credential retrieval (`git credential fill`, credential helpers with `get`) and `gh auth token` / `gh auth git-credential`; normal `git push` and `git fetch` still follow their usual rules.
 
 Add your own with `brindle permissions allow|deny KIND MATCH` (kinds: `read`,

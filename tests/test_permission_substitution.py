@@ -11,7 +11,7 @@ from brindle import permission_groups, permissions
                  marks=pytest.mark.variant("reported assignment reuses substitution output in a later command")),
     pytest.param('git stash drop -q "$(git stash list --format=\'%gd %gs\' | tee out | cut -d\' \' -f1)"',
                  "ask", marks=pytest.mark.variant("bypass: a write hidden inside a substitution pipeline")),
-    pytest.param('git stash drop -q "$(git stash list --format=\'%gd %gs\' | grep tag', "ask",
+    pytest.param('git stash drop -q "$(git stash list --format=\'%gd %gs\' | grep tag', "deny",
                  marks=pytest.mark.variant("an unclosed substitution must remain unreadable")),
     pytest.param('git stash $ACTION "$(git stash list --format=\'%gd %gs\' | cut -d\' \' -f1)"', "ask",
                  marks=pytest.mark.variant("bypass: a saved literal variable spelling cannot authorize its expansion")),

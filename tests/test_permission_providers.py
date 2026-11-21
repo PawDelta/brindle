@@ -245,7 +245,9 @@ def test_native_dispatch_enforces_saved_rules_with_workspace_identity(db, ws, mo
     for mode in ("bypassPermissions", "default"):
         policy.mode = mode
         policy.rules = [("Bash", None)]
-        assert permission_decision(db, agent.id, ws, "Bash", {"command": command}) == decision
+        # Malformed redirection returns to the agent even when the real command asks.
+        expected = "deny" if command == "deploy prod >" else decision
+        assert permission_decision(db, agent.id, ws, "Bash", {"command": command}) == expected
         assert loop._execute(ToolCall("call", "Bash", {"command": "deploy prod"})).is_error
         assert loop._execute(ToolCall("redirect", "Bash", {"command": command})).is_error
     assert not ran

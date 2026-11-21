@@ -55,13 +55,15 @@ commands joined only by ``&&``, ``;`` or ``|`` is allowed when an allow rule
 covers every part (word by word, as the shell will run it, with quoted or
 escaped characters treated literally) and nothing else can run or write
 (see compound_parts); a deny on any part denies it. Anything unknown or
-unparseable is ask. Anything longer (substitutions, assignments, loops,
-conditionals, [[ ]], heredocs as data) is read as the simple commands it runs
+unparseable is checked against shell/unchecked below. Longer commands
+(substitutions, assignments, loops, conditionals, [[ ]], heredocs as data)
+are read as the simple commands they run
 (read_parts), each decided as if run alone: it gets no more power than its
 parts run one by one, and a part that's denied or asks does so at any depth.
 What the reader can't tell (a program only the run knows, an eval, a program
 fed what it will run, syntax it doesn't read) gets shell/unchecked's answer
-(brindle.permission_groups.unverifiable).
+(brindle.permission_groups.unverifiable); an unresolved syntax ask returns
+to the agent as a deny with rewrite guidance.
 
 Where rules come from (``source``): ``preset`` (seeded by the chosen preset),
 ``repo`` (``<repo>/.brindle/permissions.json``: only its deny rules are used,
@@ -3627,6 +3629,11 @@ def _decide(req: Request, *, checks: list[str] | None, rules: list[Rule], unmatc
     if syntax and alone and unchecked == "allow" and unread and not any(isinstance(e, _DenyMayCover) for e in unread):
         return Decision("allow", f"brindle can't check it, and the {permission_groups.UNVERIFIABLE} setting runs "
                                  f"such commands", ruled.rule if ruled else None)
+    if syntax:
+        # A syntax ask is work for the agent, before any real approval can be
+        # requested. Keep the marker internal until all parts and settings
+        # have been checked, so readable commands retain their normal rules.
+        return Decision("deny", SHELL_SYNTAX_GUIDANCE, ruled.rule if ruled else None, asks)
     if ruled is not None:
         return Decision("ask", ruled.reason + "; asking the user", ruled.rule, ruled.asks)
     if req.kind == "bash" and req.command and simple_argv(req.command) is None:
@@ -4058,12 +4065,14 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
 
 
 SHELL_SYNTAX_RULE = "d-shell-syntax"
+SHELL_SYNTAX_GUIDANCE = ("brindle can't check this shell syntax. Split it into plain commands, name the files "
+                         "instead of using a pattern, or avoid $(...) whose inner command writes; then try again.")
 
 
 def _syntax_ask(req: Request) -> Decision:
     # A bound ask keeps unsupported shell syntax from falling to an allow
     # (the unmatched setting, a profile's allowed_tools or the CLI's own).
-    # An unchecked command may do anything: it is approved once at a time.
+    # _decide returns an unresolved syntax ask to the agent as a deny with guidance.
     return Decision("ask", "shell syntax cannot be checked safely",
                     Rule("bash", req.command, "exact", "ask", "preset", id=SHELL_SYNTAX_RULE,
                          limits={"life": "once"}))

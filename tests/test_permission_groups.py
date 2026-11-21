@@ -62,20 +62,19 @@ DESTRUCTIVE_DENIED = {"shell": {"baseline": "allow", "subcategories": {"destruct
     pytest.param("permissive", {}, lambda ws: bash(ws, "mkdir -p src/x && curl -sS https://example.com"), "ask",
                  [("files", "write-worktree"), ("network", "fetch")],
                  marks=pytest.mark.variant("a fetch keeps a mixed file/network command asking")),                # the strictest part
-    # Escapes inside backticks remain unverified (shell/unchecked): it asks, but where commands
-    # run unasked, the agent is told to split it.
+    # Escapes inside backticks remain unverified (shell/unchecked): the agent must rewrite them.
     pytest.param("autonomous", {}, lambda ws: bash(ws, "echo `\\whoami`"), "deny",
                  [("shell", "other"), ("shell", "readonly"), ("shell", "readonly")],
                  marks=pytest.mark.variant("unreadable backticks stay denied where unmatched commands run")),   # unreadable: other, and its parts
-    pytest.param("standard", {}, lambda ws: bash(ws, "echo `\\whoami`"), "ask",
+    pytest.param("standard", {}, lambda ws: bash(ws, "echo `\\whoami`"), "deny",
                  [("shell", "other"), ("shell", "readonly"), ("shell", "readonly")],
-                 marks=pytest.mark.variant("unreadable backticks ask under Standard")),
+                 marks=pytest.mark.variant("unreadable backticks return to the agent under Standard")),
     pytest.param("standard", {"shell": {"subcategories": {"unchecked": "deny"}}}, lambda ws: bash(ws, "echo `\\whoami`"), "deny",
                  [("shell", "other"), ("shell", "readonly"), ("shell", "readonly")],
                  marks=pytest.mark.variant("an explicit unchecked deny wins over the Standard baseline")),
     pytest.param("autonomous", {}, lambda ws: bash(ws, "rm -rf $DIR"), "deny", [("shell", "destructive")],
                  marks=pytest.mark.variant("an unknown rm target may name a protected directory")),   # $DIR may be ~
-    pytest.param("permissive", {}, lambda ws: bash(ws, "python3 - <<'EOF'\nprint(1)\nEOF"), "ask", [("shell", "other")] * 5,
+    pytest.param("permissive", {}, lambda ws: bash(ws, "python3 - <<'EOF'\nprint(1)\nEOF"), "deny", [("shell", "other")] * 5,
                  marks=pytest.mark.variant("a Python heredoc must not inherit the read-only shell allowance")),
     # eval of literal words is the command they make.
     pytest.param("autonomous", {}, lambda ws: bash(ws, "eval 'git push --force origin x'"), "deny", [("git", "push-protected")],
@@ -159,8 +158,8 @@ def test_a_table_stored_before_unverifiable_existed_gets_its_presets_answer_and_
     # With no table at all, where unmatched actions run; an eval of what only the run knows
     # is unverifiable even with no rule that could have asked.
     assert decide(bash(ws, 'eval "$X"'), rules=[], unmatched="allow", saved=[]).decision == "deny"
-    # Where a command would ask anyway, it still asks.
-    assert decide(bash(ws, 'eval "$X"'), rules=[], unmatched="ask", saved=[]).decision == "ask"
+    # An unreadable command returns to the agent even where unmatched actions ask.
+    assert decide(bash(ws, 'eval "$X"'), rules=[], unmatched="ask", saved=[]).decision == "deny"
 
 
 def test_a_pattern_whose_listing_runs_past_the_budget_is_unknown(monkeypatch, tmp_path):
