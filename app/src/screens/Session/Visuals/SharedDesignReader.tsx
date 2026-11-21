@@ -24,12 +24,17 @@ const COLUMN_MODES = MODES.filter((m) => m.id !== "editing");
 
 /* Who wrote and voted, by name where the org's directory knows them. */
 function named(doc: SharedDesign, directory: LibraryPerson[]): SharedDesign {
-  const names = { ...Object.fromEntries(directory.map((p) => [p.sub, p.display_name || p.email || "A teammate"])), ...doc.teammate_names };
-  const name = (who: string) => who === "person" ? null : names[who] ?? "A teammate";
+  const names = { ...doc.teammate_names };
+  for (const person of directory) {
+    const saved = names[person.sub];
+    names[person.sub] = person.display_name || (saved !== "A teammate" && saved) || person.email || "A teammate";
+  }
+  const name = (who: string, label?: string | null) => who === "person" ? null
+    : (names[who] !== "A teammate" && names[who]) || (label !== "A teammate" && label) || "A teammate";
   return {
     ...doc,
     teammate_names: names,
-    threads: doc.threads?.map((t) => ({ ...t, author_name: t.author_name ?? name(t.author), replies: t.replies?.map((r) => ({ ...r, author_name: r.author_name ?? name(r.author) })) })),
+    threads: doc.threads?.map((t) => ({ ...t, author_name: name(t.author, t.author_name), replies: t.replies?.map((r) => ({ ...r, author_name: name(r.author, r.author_name) })) })),
   };
 }
 

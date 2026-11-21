@@ -190,9 +190,11 @@ it("asks immediately in the thread without turning the question into a change re
 it("design doc reader", async () => {
   // An emoji leads each section: the engine's offsets count it as one character, the screen as two.
   const summary = "🚀 Workers run on a **machine** the customer controls.";
+  const voter = "64680428-2b70-4a42-839b-1b1e05b51ca4";
   let plan: Plan = { id: visual.id, session: "boss", title: "Cloud workers", rev: 1, state: "open", markdown: "…", lede: "", queued: 0, created_at: 1, split: [], reference: "DES-0042",
+    teammate_names: { [voter]: "David Chen" },
     sections: [{ id: "summary", title: "Summary", markdown: summary }, { id: "api", title: "API sketch", markdown: 'POST 🚀 with a "token" in the body.' }],
-    decisions: [{ id: "where", title: "Where cloud workers run", mine: "own", options: [{ id: "own", label: "A · Your own server" }, { id: "hosted", label: "B · PawDelta-hosted" }] }],
+    decisions: [{ id: "where", title: "Where cloud workers run", mine: "own", votes: { own: [`teammate:${voter}`, "teammate:unknown"] }, options: [{ id: "own", label: "A · Your own server" }, { id: "hosted", label: "B · PawDelta-hosted" }] }],
     threads: [{ id: 1, kind: "suggestion", rev: 1, author: "supervisor", text: "Tokens end up in logs.", status: "open", at: 1, before: '"token"', after: '"lease"',
       anchor: { kind: "text", section: "api", start: 14, end: 21, quote: '"token"', state: "current" } }] };
   const calls: unknown[][] = [];
@@ -278,6 +280,9 @@ it("design doc reader", async () => {
 
   // A supervisor's recommendation does not count as the person's selection.
   const section = () => within(screen.getByTestId("plan-doc")).getByRole("region", { name: /Where cloud workers run/ });
+  expect(within(section()).getByTitle("David Chen").textContent).toBe("DC");
+  expect(within(section()).getByTitle("A teammate").textContent).toBe("AT");
+  expect(section().innerHTML).not.toContain(voter);
   expect(decision.getAttribute("data-next")).toBe("true");
   const approve = () => within(screen.getByTestId("plan-verdict")).getByTestId("plan-build") as HTMLButtonElement;
   expect(approve().disabled).toBe(true);

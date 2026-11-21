@@ -145,8 +145,14 @@ async function openPlan(client: PlansClient & PlanDocClient & VisualsClient) {
 }
 
 it("saves each pick as it is made, a change back included: reopened, the doc keeps it, counts it decided, says who picked what, and Approve sends it", async () => {
-  const { client, confirms, verdicts } = pickEngine({ teammate_names: { "dana.okafor": "Dana Okafor" }, decisions: spine().decisions.map((d) => (d.id === "store" ? { ...d, votes: { a: ["teammate:dana.okafor"] } } : d)) });
+  const known = "64680428-2b70-4a42-839b-1b1e05b51ca4";
+  const unknown = "81790428-2b70-4a42-839b-1b1e05b51ca4";
+  const { client, confirms, verdicts } = pickEngine({ teammate_names: { [known]: "Dana Okafor" }, decisions: spine().decisions.map((d) => (d.id === "store" ? { ...d, votes: { a: [`teammate:${known}`, `teammate:${unknown}`] } } : d)) });
   let card = await openPlan(client);
+  expect(within(card("store")).getByTitle("Dana Okafor").textContent).toBe("DO");
+  expect(within(card("store")).getByTitle("A teammate").textContent).toBe("AT");
+  expect(card("store").innerHTML).not.toContain(known);
+  expect(card("store").innerHTML).not.toContain(unknown);
   for (const option of [0, 1, 0]) await act(async () => fireEvent.click(radios(card("store"))[option]));
   expect(confirms).toEqual([[1, "store", "a"], [1, "store", "b"], [1, "store", "a"]]);
 
@@ -156,7 +162,7 @@ it("saves each pick as it is made, a change back included: reopened, the doc kee
   expect(card("store").dataset.state).toBe("decided");
   expect(radios(card("store")).map((r) => r.checked)).toEqual([true, false]);
   expect(screen.getByTestId("plan-next").dataset.left).toBe("2");
-  expect(within(card("store")).getByTestId("plan-picks").textContent).toBe("You: A table · Dana Okafor: A table");
+  expect(within(card("store")).getByTestId("plan-picks").textContent).toBe("You: A table · Dana Okafor: A table · A teammate: A table");
 
   await act(async () => fireEvent.click(radios(card("loud"))[0]));
   await act(async () => fireEvent.click(radios(card("reach"))[1]));
@@ -209,6 +215,8 @@ it("an author's pick on a shared plan, still waiting on a reviewer, reaches a te
   const doc = await screen.findByTestId("plan-doc");
   const store = doc.querySelector<HTMLElement>("[data-testid=plan-decision][data-decision=store]")!;
   await waitFor(() => expect(within(store).getByTestId("plan-picks").textContent).toBe("You: A table · Dana Okafor: A queue"));
+  expect(within(store).getByTitle("Dana Okafor").textContent).toBe("DO");
+  expect(store.innerHTML).not.toContain("u_author");
   expect(store.dataset.state).toBe("decided");
   expect(screen.getByTestId("plan-next").dataset.left).toBe("2");
 });

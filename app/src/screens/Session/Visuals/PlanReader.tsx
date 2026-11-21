@@ -501,7 +501,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const nameOf = (who: string) => {
     const sub = who.replace(/^teammate:/, "");
     const member = directory.find((p) => p.sub === sub);
-    return plan.teammate_names?.[sub] || member?.display_name || member?.email || "A teammate";
+    const saved = plan.teammate_names?.[sub];
+    return member?.display_name || (saved !== "A teammate" && saved) || member?.email || "A teammate";
   };
   // A person in a sentence: "You", or their name's first word ("dana.okafor@…" → "Dana").
   const firstName = (who: string) => {
@@ -1366,7 +1367,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                     <span id={`plan-title-decision-${d.id}`}>{`Decision · ${d.title}`}</span>
                     <span className={aside}>{`decision ${i + 1} of ${plan.decisions.length}${mine ? ` · ${mine}` : ""}`}</span>
                   </h3>
-                  <Decision decision={d} chosen={chosen(d)} open={open && !busy} onPick={(o) => void pickOption(d.id, o)} />
+                  <Decision decision={d} chosen={chosen(d)} open={open && !busy} onPick={(o) => void pickOption(d.id, o)} nameOf={nameOf} />
                   <p className="flex max-w-[70ch] flex-wrap items-baseline gap-x-2 font-sans text-[12.5px] leading-normal text-ink-3">
                     {d.challenge && <span>{`${d.mine ? "Against its own pick: " : ""}${d.challenge}`}</span>}
                     {commentButton(() => comment({ kind: "decision", decision: d.id }, decisionName(d.id)))}

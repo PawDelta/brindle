@@ -233,7 +233,7 @@ export function DecisionCard({ decision: d, n, of, open, disabled = false, picke
                   {/* A shared doc's votes: who picked this option. */}
                   {(d.votes?.[o.id]?.length ?? 0) > 0 && (
                     <span className="ml-auto inline-flex items-center gap-1" data-votes={d.votes![o.id].length} title={`Voted for by ${d.votes![o.id].map((who) => who === "person" ? "You" : nameOf?.(who) ?? "A teammate").join(", ")}`}>
-                      {d.votes![o.id].map((v) => <Avatar key={v} who={v} small />)}
+                      {d.votes![o.id].map((v) => <Avatar key={v} who={v === "person" ? "person" : nameOf?.(v) ?? "A teammate"} small />)}
                     </span>
                   )}
                 </span>

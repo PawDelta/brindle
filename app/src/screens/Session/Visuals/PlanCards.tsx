@@ -101,7 +101,7 @@ const optionRow = "grid grid-cols-[14px_minmax(0,1.15fr)_minmax(0,1.5fr)_minmax(
 /* A decision's alternatives as a table: one row each, the picked one marked, the supervisor's pick
    "recommended", the trade-offs as + and − lines, the files it would touch, and who voted for it.
    A row is a radio: the person's selection is sent with their verdict. */
-export function Decision({ decision: d, chosen, open, onPick }: { decision: PlanDecisionDTO; chosen: string | null; open: boolean; onPick(option: string): void }) {
+export function Decision({ decision: d, chosen, open, onPick, nameOf }: { decision: PlanDecisionDTO; chosen: string | null; open: boolean; onPick(option: string): void; nameOf?(who: string): string }) {
   return (
     <div role="radiogroup" aria-label={d.title} className="-mx-2.5 grid font-sans text-[13px] leading-normal">
       <div aria-hidden className={`${optionRow} border-line-strong pb-1.5 pt-1 text-[11px] font-medium uppercase tracking-[0.08em] text-ink-3`}>
@@ -147,7 +147,7 @@ export function Decision({ decision: d, chosen, open, onPick }: { decision: Plan
               {o.touches?.map((f) => <code key={f} className="rounded-sm bg-surface-2 px-1 font-mono text-[11.5px] text-ink-2">{f}</code>)}
             </span>
             <span className="flex min-h-5 items-center gap-1 text-ink-3" data-votes={votes.length}>
-              {votes.length ? votes.map((v) => <Avatar key={v} who={v} small />) : "none"}
+              {votes.length ? votes.map((v) => <Avatar key={v} who={v === "person" ? "person" : nameOf?.(v) ?? "A teammate"} small />) : "none"}
             </span>
           </div>
         );

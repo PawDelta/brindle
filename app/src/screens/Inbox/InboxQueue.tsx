@@ -19,7 +19,7 @@
    marks it read on every machine. */
 
 import { useEffect, useReducer, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
-import type { DaemonClient } from "../../api/client";
+import type { DaemonClient, LibraryPerson } from "../../api/client";
 import type { OpenUrl } from "../../api/open";
 import type { InboxItemDTO, PersonDTO, PlanThreadDTO, SharedDesignDTO } from "../../api/schema";
 import { CheckIcon, ChevronRightIcon, ClockIcon, FileIcon, GearIcon, LockIcon } from "../../components/icons";
@@ -195,7 +195,21 @@ function metaOf(row: Row, ctx: QueueContext): ReactNode[] {
   }
 }
 
-export function InboxQueue({ items, synced, fresh, actions, client, refresh, ctx, waitingExtra, waitingExtraCount = 0 }: InboxQueueProps) {
+export function InboxQueue({ items: receivedItems, synced, fresh, actions, client, refresh, ctx, waitingExtra, waitingExtraCount = 0 }: InboxQueueProps) {
+  const [members, setMembers] = useState<{ client: DaemonClient; people: LibraryPerson[] } | null>(null);
+  useEffect(() => {
+    let active = true;
+    client.libraryPeople().then((got) => { if (active) setMembers({ client, people: got.people }); }, () => {});
+    return () => { active = false; };
+  }, [client]);
+  const directory = members?.client === client ? members.people : [];
+  const namedPerson = (person: PersonDTO | null | undefined) => {
+    if (!person) return person;
+    const member = directory.find((p) => p.sub === person.sub);
+    return { ...person, name: member?.display_name || (person.name !== "A teammate" && person.name) || member?.email || null };
+  };
+  const items = receivedItems.map((item) => ({ ...item, from_person: namedPerson(item.from_person),
+    signoff: item.signoff && { ...item.signoff, waiting: item.signoff.waiting?.map((person) => namedPerson(person)!) } }));
   const [, redraw] = useReducer((n: number) => n + 1, 0);
   useEffect(() => onTriage(redraw), []);
   const [tab, setTab] = useState("all");
