@@ -24,6 +24,7 @@ def proposed(db, tmp_path, monkeypatch):
     return plans.propose(db, root, "# Test plan\n\n## Goal\n\nKeep the document readable.")["id"]
 
 
+@pytest.mark.variant("regression: a closed session's plan card must leave the Inbox")
 def test_closing_session_removes_plan_inbox_card(db, proposed):
     assert proposed in {i.visual_id for i in inbox.items(db, None)}
     db.set_status("boss", "paused")
