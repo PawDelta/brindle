@@ -635,7 +635,11 @@ def inbox_pending(db: DB, repo_root: str | None) -> list[dict]:
         return []
     sql = ("SELECT * FROM visuals WHERE ("
            "(options IS NOT NULL AND answer IS NULL AND dismissed_rev < rev) OR "
-           "(options IS NULL AND read_rev < rev))")
+           "(options IS NULL AND read_rev < rev))"
+           " AND (kind <> 'plan' OR (EXISTS (SELECT 1 FROM agents a WHERE a.id=visuals.root_id"
+           " AND a.dismissed_at IS NULL AND a.status <> 'done')"
+           " AND EXISTS (SELECT 1 FROM plans p WHERE p.id=visuals.id"
+           " AND p.state IN ('open','redirected','writing'))))")
     args = []
     if repo_root is not None:
         sql += " AND repo_root=?"
