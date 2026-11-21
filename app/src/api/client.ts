@@ -35,6 +35,10 @@ import type {
   ProviderConnectionDTO,
   RepoDTO,
   SharedDesignDTO,
+  DesignShareLinkDTO,
+  ShareLinkSettingsDTO,
+  SharePeopleDTO,
+  SharePersonDTO,
   RoutingDTO,
   SavedActionDTO,
   SessionDTO,
@@ -857,16 +861,10 @@ export interface TrackerLink {
 }
 
 /* A design's share link: who it opens for under the org's policy now (`off`: the org turned links off). */
-export type ShareLinkScope = { scope: "org" } | { scope: "team"; team: string };
-
-export interface DesignShareLink {
-  available: boolean;
-  scoped?: boolean;
-  access?: "anyone" | "org" | "off";
-  reason?: string;
-  link: { url: string; created_at: number | null; access: "anyone" | "org" | "off";
-    scope?: { kind: "org" | "team"; org_id: string; team: string | null } | null } | null;
-}
+export type ShareLinkScope = ShareLinkSettingsDTO;
+export type DesignShareLink = DesignShareLinkDTO;
+export type SharePerson = SharePersonDTO;
+export type PeopleQuery = { q?: string; team?: string; role?: string; on_plan?: string };
 
 export interface DesignWorkItems {
   items: TrackerLink[];
@@ -2358,6 +2356,30 @@ export class DaemonClient {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/reviewers`, { reviewers });
   }
 
+  planPeople(id: string, query: PeopleQuery = {}) {
+    return this.get<SharePeopleDTO>(`/plans/${encodeURIComponent(id)}/people`, query);
+  }
+
+  setPlanReviewer(id: string, sub: string, required: boolean) {
+    return this.put<Plan>(`/plans/${encodeURIComponent(id)}/reviewers/${encodeURIComponent(sub)}`, { required });
+  }
+
+  removePlanReviewer(id: string, sub: string) {
+    return this.delete<Plan>(`/plans/${encodeURIComponent(id)}/reviewers/${encodeURIComponent(sub)}`, {});
+  }
+
+  designPeople(id: string, query: PeopleQuery = {}, repo?: string) {
+    return this.get<SharePeopleDTO>(`/library/designs/${encodeURIComponent(id)}/people`, { ...query, repo });
+  }
+
+  setDesignReviewer(id: string, sub: string, required: boolean, repo?: string) {
+    return this.put<SharedDesign>(`/library/designs/${encodeURIComponent(id)}/reviewers/${encodeURIComponent(sub)}`, { required, ...(repo ? { repo } : {}) });
+  }
+
+  removeDesignReviewer(id: string, sub: string, repo?: string) {
+    return this.delete<SharedDesign>(`/library/designs/${encodeURIComponent(id)}/reviewers/${encodeURIComponent(sub)}${repo ? `?repo=${encodeURIComponent(repo)}` : ""}`, {});
+  }
+
   /* Bring back what teammates wrote; what changed reaches the reader as an event. */
   syncPlan(id: string) {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/sync`, {});
@@ -2426,6 +2448,10 @@ export class DaemonClient {
     return this.post<DesignShareLink>(`/library/designs/${encodeURIComponent(doc)}/share-link`, { ...(repo ? { repo } : {}), ...scope });
   }
 
+  updateDesignShareLink(doc: string, settings: ShareLinkScope, repo?: string) {
+    return this.put<DesignShareLink>(`/library/designs/${encodeURIComponent(doc)}/share-link`, { ...settings, ...(repo ? { repo } : {}) });
+  }
+
   revokeDesignShareLink(doc: string, repo?: string) {
     return this.delete<DesignShareLink>(`/library/designs/${encodeURIComponent(doc)}/share-link${repo ? `?repo=${encodeURIComponent(repo)}` : ""}`, {});
   }
@@ -2438,6 +2464,10 @@ export class DaemonClient {
 
   copyPlanShareLink(id: string, repo?: string, scope?: ShareLinkScope) {
     return this.post<DesignShareLink>(`/plans/${encodeURIComponent(id)}/share-link`, { ...(repo ? { repo } : {}), ...scope });
+  }
+
+  updatePlanShareLink(id: string, settings: ShareLinkScope, repo?: string) {
+    return this.put<DesignShareLink>(`/plans/${encodeURIComponent(id)}/share-link`, { ...settings, ...(repo ? { repo } : {}) });
   }
 
   revokePlanShareLink(id: string, repo?: string) {

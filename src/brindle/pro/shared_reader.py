@@ -20,12 +20,13 @@ from __future__ import annotations
 import hashlib
 import re
 from typing import Any
+from urllib.parse import quote, urlencode
 
 from brindle import plan_docs, plans
 from brindle.pro import analysis_docs as ad
 from brindle.pro import shared_docs as sd
 from brindle.redact import mask
-from brindle.service.dto import SharedDesignDTO
+from brindle.service.dto import SharedDesignDTO, SharePeopleDTO
 from brindle.service.errors import ServiceError
 
 THREAD_ACTIONS = ("resolve", "reopen")
@@ -181,6 +182,21 @@ def _text(text: Any) -> str:
 def read(doc_id: str, *, client=None, store=None) -> dict:
     """The design as this account may read it now."""
     return _ask(doc_id, "GET", "", None, client, store)
+
+
+def people(doc_id: str, filters: dict, *, client=None, store=None) -> dict:
+    """Search only people the Library says can already read this design."""
+    client, store = ad._session(client, store)
+    ad.require_entitlement(store)
+    query = urlencode({k: v for k, v in filters.items() if k in ("q", "team", "role", "on_plan")})
+    got = ad.api("GET", sd._path(doc_id, "/people") + (f"?{query}" if query else ""), client=client, store=store)
+    return SharePeopleDTO.model_validate(got).model_dump()
+
+
+def reviewer(doc_id: str, sub: str, required: bool | None, *, client=None, store=None) -> dict:
+    """Change one person without replacing anyone else's invitation."""
+    return _ask(doc_id, "DELETE" if required is None else "PUT", f"/reviewers/{quote(sub, safe='')}",
+                None if required is None else {"required": required}, client, store)
 
 
 def timeline(doc_id: str, *, client=None, store=None) -> dict:
