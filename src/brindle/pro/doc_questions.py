@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import time
 
 from brindle import agents, identity_lock, plan_docs, plans, spawn
@@ -16,6 +17,8 @@ from brindle.db import Agent, DB, Workspace
 from brindle.pro import analysis_docs as ad
 from brindle.pro import shared_docs as sd
 from brindle.service.errors import ServiceError
+
+log = logging.getLogger(__name__)
 
 UNAVAILABLE = "Your supervisor couldn't start on this machine. Check your provider and sign-in, then ask again."
 
@@ -222,26 +225,34 @@ def reply(db: DB, caller: Agent | None, doc_id: str, thread_id: int, text: str, 
 
 
 def ask_plan(db: DB, plan_id: str, thread_id: int) -> None:
-    """The local plan reader's question has been saved; send it now."""
+    """The local plan reader's question has been saved; send it now.
+
+    It goes to the plan's own session root, shared or not: its supervisor is
+    messaged, never replaced by a new one, and never waits on the Library. On
+    a shared plan the Library copy follows: this sync sends it if it can, and
+    otherwise the daemon's background pass does (an unsent thread is sent on
+    every sync), as it does the supervisor's answer."""
     p = plans.get(db, plan_id)
-    shared = sd.link(db, plan_id)
-    if shared:
-        sd.sync(db, plan_id)
-        row = db.conn.execute("SELECT remote_id FROM plan_share_threads WHERE plan_id=? AND local_id=?"
-                              " AND remote_id>0", (plan_id, thread_id)).fetchone()
-        if row:
-            dispatch(db, shared["doc_id"], row["remote_id"], repo_root=p["visual"]["repo_root"])
-            return
-        raise ServiceError("unavailable", "the question could not be sent to the Library", 503)
-    # The plan's own session root: its supervisor is messaged, never replaced by a new one.
     root = db.get_agent(p["root_id"])
     why = _unreachable(root)
     if why:
         plan_docs.comment(db, plan_id, text=why, parent=thread_id, author="system")
+    else:
+        thread = plan_docs._thread(db, p, thread_id)
+        agents.send_message(db, root.id, f"Your person asks on plan {plan_id}, thread #{thread_id}: {thread['body']}\n"
+                            "Answer now with reply_plan_thread. This is not a change request or permission to build.")
+    sync_soon(db, plan_id)
+
+
+def sync_soon(db: DB, plan_id: str) -> None:
+    """Send a shared plan's new question or answer to the Library now if it
+    can go; a failure leaves it for the daemon's next background sync."""
+    if not sd.link(db, plan_id):
         return
-    thread = plan_docs._thread(db, p, thread_id)
-    agents.send_message(db, root.id, f"Your person asks on plan {plan_id}, thread #{thread_id}: {thread['body']}\n"
-                        "Answer now with reply_plan_thread. This is not a change request or permission to build.")
+    try:
+        sd.sync(db, plan_id)
+    except Exception:  # noqa: BLE001 - offline or refused: the background pass sends it later
+        log.info("shared plan %s: question thread not synced yet, the next sync sends it", plan_id, exc_info=True)
 
 
 def after_reply(*, thread_id: int, plan_id: str | None = None, doc_id: str | None = None,
