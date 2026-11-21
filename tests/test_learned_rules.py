@@ -236,15 +236,19 @@ def test_a_claude_call_that_times_out_leaves_nothing_it_started_running(tmp_path
     import subprocess
     import sys
 
-    from brindle import providers
+    from brindle import providers, spawn
     from brindle.native import runner
 
     pidfile = tmp_path / "helper.pid"
     cli = tmp_path / "claude"
-    cli.write_text(f"#!{sys.executable}\nimport os, signal\nhelper = os.fork()\nif helper == 0:\n"
+    cli.write_text(f"#!{sys.executable}\nimport os, signal, sys\n"
+                   "if sys.argv[1:] == ['__warm__']: sys.exit(0)\n"
+                   "helper = os.fork()\nif helper == 0:\n"
                    "    signal.pause()\n"
                    f"open({str(pidfile)!r}, 'w').write(str(helper))\nsignal.pause()\n")
     cli.chmod(0o755)
+    # Let macOS assess the new executable before the timed call.
+    spawn.read([str(cli), "__warm__"]).check_returncode()
     monkeypatch.setattr(providers, "claude_binary", lambda *a, **k: str(cli))
     monkeypatch.setattr(runner, "probe", lambda ep, **k: (False, ""))
     monkeypatch.setattr(learned_rules, "CALL_TIMEOUT", 0.5)

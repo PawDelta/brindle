@@ -21,7 +21,7 @@ import time
 import pytest
 import typer
 
-from brindle import agents, cli, cull, tmux, workspaces
+from brindle import agents, cli, cull, spawn, tmux, workspaces
 from brindle.db import Agent
 from test_cull import alive, launch_as, proc_cleanup  # noqa: F401 (fixture)
 
@@ -36,8 +36,11 @@ def fake_tmux(tmp_path, monkeypatch):
         bin_.mkdir(exist_ok=True)
         log = tmp_path / "tmux.log"
         script = bin_ / "tmux"
-        script.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\n{body}\n')
+        script.write_text('#!/bin/sh\n[ "$1" = __warm__ ] && exit 0\n'
+                          f'echo "$@" >> "{log}"\n{body}\n')
         script.chmod(0o755)
+        # Let macOS assess the new executable before the timed calls.
+        spawn.read([str(script), "__warm__"]).check_returncode()
         monkeypatch.setenv("PATH", f"{bin_}{os.pathsep}{os.environ['PATH']}")
         return log
     return make
