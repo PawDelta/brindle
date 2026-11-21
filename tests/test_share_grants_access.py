@@ -17,12 +17,15 @@ class AccessLibrary(Library):
         super().__init__(remote)
         self.author = "user_1"
         self.actor = self.author
+        self.revoke_before_grant = False
+        self.revoked = False
         self.scopes = [{"kind": "user", "id": self.author}]
         self.members = {("group", "t_1"): {"reviewer", "viewer"}, ("org", "org_1"): {"reviewer", "viewer"}}
         remote.routes.update({
             f"GET {BASE}": lambda f, h: self.metadata(),
             f"GET {DESIGN}": lambda f, h: self.read(),
             f"PUT {DESIGN}/reviewers/reviewer": self.put_reviewer,
+            f"PUT {DESIGN}/permissions/reviewer": self.put_role,
         })
 
     def readable(self):
@@ -34,7 +37,16 @@ class AccessLibrary(Library):
                                    or self.permissions.get(self.actor, {}).get(flag, False))
 
     def read(self):
-        return (200, self.view()) if self.readable() else (404, {"error": "not_found"})
+        answer = (200, self.view()) if self.readable() else (404, {"error": "not_found"})
+        # The client can receive a snapshot just before another editor revokes a grant.
+        self.revoke_edit()
+        return answer
+
+    def revoke_edit(self):
+        if self.revoke_before_grant:
+            self.permissions.pop("viewer", None)
+            self.revoke_before_grant = False
+            self.revoked = True
 
     def metadata(self):
         return (200, {"id": DOC, "title": self.title, "scope": self.scopes[0], "scopes": list(self.scopes)})
@@ -46,6 +58,15 @@ class AccessLibrary(Library):
 
     def put_reviewer(self, form, headers):
         self.reviewers = [{"sub": "reviewer", "required": form["required"]}]
+        return self.read()
+
+    def put_role(self, form, headers):
+        self.revoke_edit()
+        role = form.get("role", "view")
+        self.permissions["reviewer"] = {"can_edit": role == "edit", "can_comment": role != "view",
+                                        "can_suggest": role in ("edit", "reviewer")}
+        self.reviewers = ([{"sub": "reviewer", "required": form.get("required", True)}]
+                          if role == "reviewer" else [])
         return self.read()
 
     def comment(self, form, headers):
@@ -102,3 +123,26 @@ def test_share_viewer_reads_but_cannot_edit_after_role_change(access):
     read = app.get(f"/v1/shared-designs/{DOC}")
     assert read.status_code == 200 and not read.json()["can_edit"]
     assert not read.json()["can_comment"] and not read.json()["can_suggest"]
+
+
+@pytest.mark.parametrize("target", ["plan", "library"])
+@pytest.mark.variant("another editor revokes edit after the old snapshot is read but before the reviewer grant commits")
+def test_reviewer_invite_does_not_restore_an_interleaved_revoked_edit(access, target):
+    pid, library, app = access
+    assert app.post(f"/v1/plans/{pid}/share", json={"scope": TEAM}).status_code == 200
+    library.permissions["viewer"] = {"can_edit": True}
+    library.actor = "viewer"
+    assert app.get(f"/v1/shared-designs/{DOC}").json()["can_edit"]
+    library.actor = library.author
+    library.revoke_before_grant = True
+    base = f"/v1/plans/{pid}" if target == "plan" else f"/v1/library/designs/{DOC}"
+    invited = app.put(f"{base}/reviewers/reviewer", json={"required": False})
+    assert invited.status_code == 200, invited.json()
+    assert library.revoked
+    library.actor = "viewer"
+    read = app.get(f"/v1/shared-designs/{DOC}")
+    assert read.status_code == 200 and not read.json()["can_edit"]
+    library.actor = "reviewer"
+    reviewer = app.get(f"/v1/shared-designs/{DOC}").json()
+    assert reviewer["can_comment"] and reviewer["can_sign_off"]
+    assert not reviewer["gate"]["reviewers"][0]["required"]
