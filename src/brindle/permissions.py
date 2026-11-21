@@ -4337,8 +4337,8 @@ def _home_unchanged(command: str) -> bool:
     return _home_kept((_OUTERMOST.get() or command).replace("\\\n", ""))
 
 
-def _home_kept(command: str) -> bool:
-    """Whether ``command`` surely leaves HOME as it found it, read from its
+def _home_kept(command: str, variable: str = "HOME") -> bool:
+    """Whether ``command`` leaves HOME (or PWD) free of explicit setters, read from its
     words as the shell sees them (quotes gone). A word that may name the
     command that runs (each simple command's first, or any after a wrapper
     such as command -p) must resolve to literal text: $HOME, or a variable a
@@ -4351,7 +4351,7 @@ def _home_kept(command: str) -> bool:
     if re.search(r"\(\(|\$\[", command):
         return False    # arithmetic: it assigns what a value names
     spans = _substitution_spans(command)
-    if spans is None or not all(_home_kept(inner) for _, _, inner, _ in spans):
+    if spans is None or not all(_home_kept(inner, variable) for _, _, inner, _ in spans):
         return False
     for start, end, _, _ in reversed(spans):
         command = command[:start] + _RUN_ONLY + command[end:]
@@ -4363,7 +4363,7 @@ def _home_kept(command: str) -> bool:
         tokens = list(lexer)
     except ValueError:
         return False
-    known = {"HOME": _HOME_STAND_IN}
+    known = {variable: _HOME_STAND_IN}
     definite = True    # every statement so far surely ran, in this shell
     words: list[str] = []
     assigned: list[tuple[str, str | None]] = []    # this command's leading assignments (value None: unknown)
@@ -4420,7 +4420,8 @@ def _home_kept(command: str) -> bool:
             return False    # the command that runs is only the run's, or may set HOME
         wrapped = wrapped or names and resolved in _NAMES_A_COMMAND | {"time"}
         names = wrapped
-    return not _HOME_ANYWHERE.search(" ".join(words))
+    anywhere = _HOME_ANYWHERE if variable == "HOME" else re.compile(r"\b(?:PWD|IFS)\b|\$\{")
+    return not anywhere.search(" ".join(words))
 
 
 @dataclass
@@ -5296,6 +5297,7 @@ class ShellPart:
     patterned: list[bool] = field(default_factory=list)
     dotglob: bool = False    # a pattern selects dot entries where it runs (_PartReader.options)
     loop: tuple = ()        # read snapshots must be safe for every command of each enclosing loop
+    preceded_by_write: bool = False    # a later snapshot cannot assume earlier writes left its matches intact
 
 
 class _Unverifiable(ValueError):
@@ -5563,7 +5565,7 @@ class _PartReader:
             raise ValueError("unreadable syntax")
         if not chained:
             self.cwd = self.settled
-        part = ShellPart([], line, self.cwd, loop=self.loop)
+        part = ShellPart([], line, self.cwd, loop=self.loop, preceded_by_write=self.wrote)
         self.expanded = self.tilde = False
         program: str | None = None
         runner_unknown, env_assignments = False, False
@@ -5754,6 +5756,11 @@ class _PartReader:
         for inner in word.substitutions:
             self.inner(inner)
         raw = word.raw
+        if (self.cwd is not None and any(ref[2] == "PWD" for ref in word.refs)
+                and _home_kept((_OUTERMOST.get() or self.req.command or "").replace("\\\n", ""), "PWD")):
+            # PWD follows this part's cwd, including a successful cd chain. Never
+            # trust it if any command may assign it, even in a nested script.
+            raw = _Flattener(self.cwd).text(word, {"PWD": ("lit", self.cwd)})
         text = re.sub(r"\\.", "", _unquoted(raw))
         if word.substitutions or re.search(r"\$[\w{(@*#?!$-]", text):    # "^$": a $ before a quote is literal
             return [raw], False, None
@@ -5974,11 +5981,11 @@ def _patterns_may_restrict(rule: Rule, part: ShellPart) -> bool:
 
 
 def _snapshot_read(req: Request, part: ShellPart, path_denies: list[Rule]) -> bool:
-    """A bounded glob snapshot for reads and explicit pytest invocations.
+    """A bounded glob snapshot for reads, tests and git path operations.
 
-    Read snapshots may race with new files; writers still need the stronger
+    Snapshots may race with new files; other writers still need the stronger
     pattern proof. Unknown expansions, redirects and unknown working directories
-    never qualify. Both the written and expanded invocation must be a read.
+    never qualify. Both the written and expanded invocation must qualify.
     """
     if (part.unknown or part.assigned or part.writes or part.reads or part.cwd is None or len(part.words) > 500
             or any("**" in word for word in part.written) or part.loop):
@@ -5992,9 +5999,43 @@ def _snapshot_read(req: Request, part: ShellPart, path_denies: list[Rule]) -> bo
             args = args[2:]
         if args and args[0] == "pytest":
             return True
+        if _snapshot_git(words):
+            return True
         return words[0] != "tee" and _readonly_part(req, words)
 
     return reading(part.written) and reading(part.words) and _reads_clear(req, part.words, path_denies)
+
+
+def _snapshot_git(words: list[str]) -> bool:
+    """Git reads or stages named paths; never infer a subcommand from a glob.
+
+    Conflict checkout is deliberately limited to its explicit side and path
+    operands. Other writes still need the stronger pattern proof.
+    """
+    if words[:2] in (["git", "ls-files"], ["git", "add"]):
+        args = words[2:]
+    elif words[:3] in (["git", "checkout", "--theirs"], ["git", "checkout", "--ours"]):
+        args = words[3:]
+    else:
+        return False
+    if args[:1] == ["--"]:
+        args = args[1:]
+    return bool(args) and all(not arg.startswith("-") for arg in args)
+
+
+def _snapshot_places(req: Request, part: ShellPart, path_denies: list[Rule]) -> list[ShellPart]:
+    """Check a read after cd in every possible cwd, including where cd failed."""
+    if (part.cwd is not None or not part.places or len(part.places) > _FLAT_LIMIT
+            or part.preceded_by_write or part.loop or part.assigned or part.writes or part.reads):
+        return [part]
+    variants = []
+    for place in part.places:
+        at = replace(req, cwd=place, command=part.line)
+        found = shell_parts(at)
+        if found is None or len(found) != 1 or not _snapshot_read(at, found[0], path_denies):
+            return [part]
+        variants += found
+    return variants
 
 
 @_whole_command
@@ -6030,6 +6071,7 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
         if snapshots is not None and all(loop_readonly(part) for part in snapshots if part.loop):
             parts = snapshots
     path_denies = [r for r in rules if r.kind == "read" and r.decision == "deny" and r.match_type != "tracked"]
+    parts = [variant for part in parts for variant in _snapshot_places(req, part, path_denies)]
     write_denies = any(r.kind in ("write", "edit") and r.decision == "deny" for r in rules)
     found = None
     for part in parts:
@@ -6050,6 +6092,13 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
         matched = _matching_restriction(texts, checks, restrictions, spans)
         if matched is not None and matched.decision == "deny":
             return parts, matched
+        if part.globs and not part.unknown and _snapshot_git(part.written):
+            # An explicit -- makes these pathspecs, but does not exempt their
+            # expanded files from read denies (including staging a private file).
+            denied = next((rule for rule in path_denies if not _reads_clear(at, part.words, [rule])), None)
+            if denied is not None:
+                return parts, Decision("deny", f"denied by {denied.source} rule {denied.id} ({denied.describe()})",
+                                       denied)
         # An unmatched pattern (an API URL's ? too) needs no expansion proof
         # when neither its unchanged words nor a possible expansion can match
         # a restriction: a matching file can appear before the command runs. The
