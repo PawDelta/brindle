@@ -1,7 +1,8 @@
 /* Settings › Library: the person's own switches for their Library of approved plans
    (GET /analysis-docs/switches), each set with PUT /analysis-docs/switches.
    The `store` switch is the Library location: This Mac (off) or brindle servers (on);
-   changing it moves the plans there. A switch their organisation enforces is shown
+   changing it moves the plans there, and the engine turns the switches that need the
+   servers on (servers) or off (This Mac) in the same update; the reply carries them all. A switch their organisation enforces is shown
    locked, with the org's value, and can't be changed here. Without the analysis_docs
    plan, or an engine without the route, the section isn't shown. */
 
