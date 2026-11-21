@@ -2305,6 +2305,12 @@ export class DaemonClient {
     return this.postInbox<Plan>(`/plans/${encodeURIComponent(id)}/cancel`, { rev });
   }
 
+  /* Stop a task running alongside an open plan (brindle/plans.py stop_alongside): a queued one is
+     cancelled, a started one's workspace removed; a 409 once it has ended. */
+  stopAlongside(id: string, task: string) {
+    return this.postInbox<Plan>(`/plans/${encodeURIComponent(id)}/alongside/${encodeURIComponent(task)}/stop`, {});
+  }
+
   /* The design doc's writes (brindle/plan_docs.py). Each names the revision on screen where the
      engine checks it (a newer one is a 409) and answers with the plan as it is now. */
   commentPlan(id: string, rev: number, anchor: PlanAnchor, text: string, question = false) {

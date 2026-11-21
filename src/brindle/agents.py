@@ -942,8 +942,10 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
                           "offers for 24 hours. The Visuals setting controls offers only. "
                           "Plan only when asked: call propose_plan only after the person explicitly asked "
                           "for a planning doc or said yes to brindle's offer to plan a big goal first, "
-                          "never because a request looks large. While that offer or a plan is open, "
-                          "your assign calls queue until the person answers it; a redirect arrives as "
+                          "never because a request looks large. While that offer is open, your assign "
+                          "calls queue until the person answers it. While a plan is open, its own work "
+                          "(plan_worker or a goal milestone) queues until they approve it; give any "
+                          "other assign an outside_plan reason and it starts at once. A redirect arrives as "
                           "their comments: revise with propose_plan(plan_id=...).")
     # The profile's rule packs: their text joins the prompt here, for every
     # provider; their mechanical rules are checked by brindle.rule_checks.

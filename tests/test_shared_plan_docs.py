@@ -23,7 +23,7 @@ from brindle.pro import auth, credentials, license
 from brindle.pro import shared_docs as sd
 from brindle.service.errors import ServiceError
 from pro_fixtures import BASE as BASE_URL, backend, claims, fixed_identity, pro_env, sign, signing_key  # noqa: F401
-from test_plans import AUTH, DECISIONS, TOKEN, messages, session  # noqa: F401 - fixture
+from test_plans import AUTH, DECISIONS, TOKEN, messages, session, work  # noqa: F401 - fixture
 from test_pro_remote_learning import login_as
 
 DOC = "doc_1"
@@ -1237,7 +1237,7 @@ def test_lapsed_plan_becomes_a_personal_doc(db, parts, session, backend, monkeyp
         assert got["threads"][0]["text"] == "Which VM?"
 
         # Work queued behind the doc, then the app goes away: only a current confirmation may release it.
-        assert "behind plan" in asyncio.run(mcp_server.assign("developer", "build it")) and started == []
+        assert "behind plan" in asyncio.run(mcp_server.assign("developer", "build it", **work(db))) and started == []
         monkeypatch.setattr(holds, "app_connected", lambda: False)
 
         def offline():
