@@ -197,10 +197,12 @@ def test_only_an_org_admin_is_offered_an_override(monkeypatch, role, offered):
     from brindle.daemon import routes_actions as actions
 
     monkeypatch.setattr(actions, "_docs_entitlement", lambda repo: SimpleNamespace(org_id=ORG, sub="u_me", role=role))
-    monkeypatch.setattr(actions, "docs_api", lambda method, path: {"members": []})
+    person = {"sub": "u_david", "email": "david@example.test", "first_name": "David", "last_name": "Jones", "name": "Dave"}
+    monkeypatch.setattr(actions, "docs_api", lambda method, path: {"members": [person]})
     with TestClient(build_app(TOKEN), headers=AUTH) as app:
         people = app.get("/v1/library/people").json()
     assert (people["admin_org"], people["me"]) == (offered, "u_me")
+    assert people["people"] == [person]
 
 
 def test_an_admin_waives_the_revision_on_screen_through_the_daemon_under_the_librarys_number(db, shared):

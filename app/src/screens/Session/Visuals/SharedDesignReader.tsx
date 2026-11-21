@@ -16,6 +16,7 @@ import { sharedSource } from "./docSource";
 import { ReaderBar } from "./DocBar";
 import { DesignDoc, MODES, useDoc, type Mode, type Teammate } from "./PlanReader";
 import type { Work } from "./WorkPanel";
+import { displayName } from "./PlanCards";
 
 /* How often a design open here is read again: what teammates wrote, and whether it can still be opened. */
 const READ_EVERY_MS = 30_000;
@@ -25,9 +26,10 @@ const COLUMN_MODES = MODES.filter((m) => m.id !== "editing");
 /* Who wrote and voted, by name where the org's directory knows them. */
 function named(doc: SharedDesign, directory: LibraryPerson[]): SharedDesign {
   const name = (who: string) => directory.find((p) => p.sub === who)?.email || who;
+  const voterName = (who: string) => displayName(directory.find((p) => p.sub === who.replace(/^teammate:/, ""))) || who;
   return {
     ...doc,
-    decisions: doc.decisions.map((d) => ({ ...d, votes: d.votes && Object.fromEntries(Object.entries(d.votes).map(([option, subs]) => [option, subs.map(name)])) })),
+    decisions: doc.decisions.map((d) => ({ ...d, votes: d.votes && Object.fromEntries(Object.entries(d.votes).map(([option, subs]) => [option, subs.map(voterName)])) })),
     threads: doc.threads?.map((t) => ({ ...t, author: name(t.author), replies: t.replies?.map((r) => ({ ...r, author: name(r.author) })) })),
   };
 }
@@ -73,7 +75,7 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
     <>
       <BackButton onBack={onBack} label={backLabel} />
       <span className="mx-1 h-5 w-px bg-line" aria-hidden />
-      <h2 className="min-w-0 truncate text-[13px] font-semibold">{title ?? shown?.title ?? "Design doc"}</h2>
+      <h2 title={title ?? shown?.title} className="min-w-0 truncate text-[13px] font-semibold">{title ?? shown?.title ?? "Design doc"}</h2>
     </>
   );
   return (

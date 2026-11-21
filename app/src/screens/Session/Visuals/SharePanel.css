@@ -19,10 +19,10 @@
 .share-panel .tok{border:1px solid var(--line-strong);border-radius:2px;padding:0 6px;font-size:12px;line-height:18px;color:var(--ink);white-space:nowrap}
 .share-panel .tok span{color:var(--ink-3);margin-left:5px}
 .share-panel .rows{margin:6px -14px 0}
-.share-panel .r{display:flex;align-items:center;gap:8px;height:32px;padding:0 14px;min-width:0}
+.share-panel .r{display:flex;flex-wrap:wrap;align-items:center;gap:8px;min-height:32px;padding:4px 14px;min-width:0}
 .share-panel .sec>.r{margin:0 -14px}
 .share-panel .r.act{background:var(--surface-2)}
-.share-panel .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
+.share-panel .nm{flex:1;min-width:40px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
 .share-panel .nm em{font-style:normal;color:var(--ink-3);font-size:12px;margin-left:7px}
 .share-panel .r.dim .nm,.share-panel .r.dim .av{opacity:.55}
 .share-panel .av{flex:none;width:20px;height:20px;border-radius:50%;background:color-mix(in srgb,var(--ink) 11%,transparent);color:var(--ink-2);font:600 9px/20px var(--font-mono);text-align:center;font-style:normal}
@@ -54,5 +54,11 @@
 .share-panel .sp-btn:disabled{opacity:.45;cursor:default}
 .share-panel .end{margin-right:-8px}
 .share-panel .grow{flex:1;min-width:0}
+.share-panel .sec,.share-panel .hint,.share-panel .mi{min-width:0;overflow-wrap:anywhere}
+.share-panel .mi{height:auto;min-height:28px}
+.share-panel .fld{flex-wrap:wrap}
+.share-panel .tok{max-width:100%;white-space:normal;overflow-wrap:anywhere}
+.share-panel .lab{height:auto;min-height:24px;flex-wrap:wrap}
+.share-panel .foot{height:auto;min-height:28px;flex-wrap:wrap;overflow-wrap:anywhere}
 .share-panel .ic{width:14px;height:14px;flex:none;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
 .share-panel .ic.sm{width:11px;height:11px}

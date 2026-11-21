@@ -52,11 +52,11 @@ import { SharePanel } from "./SharePanel";
 import { Policies } from "./DocPolicies";
 import type { LiveClient } from "./DocEditor";
 import { DocPresence, type LiveCapability } from "./DocPresence";
-import { DocStatus, type StatusReviewer } from "./DocStatus";
+import { DocStatus } from "./DocStatus";
 import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } from "./DocText";
 import { ExportButton } from "./ExportButton";
 import { ShareLinkPanel, planLinkTarget, useShareLink, type ShareLinkTarget } from "./ShareLink";
-import { Alongside, Decision, Tasks, overlaps, passChip, personName, shortName } from "./PlanCards";
+import { Alongside, Decision, Tasks, displayName, overlaps, passChip, personName, shortName, useAccount } from "./PlanCards";
 import { Annotated, DecisionCard, MarginNote, Menu, ModeMenu, Outline, Tick, decisionsInOrder, docLayout, menuNote, menuRow, menuTitle, onSpine, placeDecisions, spineParts } from "./PlanDesignDoc";
 import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
@@ -269,7 +269,7 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
     <>
       <BackButton onBack={onBack} asking={asking} label={backLabel} />
       <span className="mx-1 h-5 w-px bg-line" aria-hidden />
-      <h2 className="min-w-0 truncate text-[13px] font-semibold">{visual.title}</h2>
+      <h2 title={visual.title} className="min-w-0 truncate text-[13px] font-semibold">{visual.title}</h2>
     </>
   );
   const badges = shown?.state === "approved" && (
@@ -481,6 +481,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const sharing: PlanSharingClient | undefined = client?.sharePlan && client.setPlanReviewers && client.syncPlan && client.signOffPlan && client.overridePlanPolicy && client.libraryPeople && client.docScopes ? (client as PlanSharingClient) : undefined;
   const [authorDirectory, setDirectory] = useState<LibraryPerson[]>([]);
   const directory = teammate?.directory ?? authorDirectory;
+  const account = useAccount();
   const [adminOrg, setAdminOrg] = useState<string | null>(null);
   const [me, setMe] = useState<string | null>(null);
   const [scopes, setScopes] = useState<DocScope[]>([]);
@@ -498,7 +499,13 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (shared && plan.state !== "approved") sharing?.syncPlan(plan.id).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per doc, when it is known to be shared
   }, [plan.id, shared]);
-  const nameOf = (sub: string) => directory.find((p) => p.sub === sub)?.email || sub;
+  const nameOf = (sub: string) => {
+    const id = sub.replace(/^teammate:/, "");
+    const ownName = id === (teammate?.me ?? me) && account?.signed_in ? displayName(account) : "";
+    return ownName || displayName(directory.find((p) => p.sub === id)) || sub;
+  };
+  const namedDecision = (d: PlanDecisionDTO): PlanDecisionDTO => ({ ...d,
+    votes: d.votes && Object.fromEntries(Object.entries(d.votes).map(([option, voters]) => [option, voters.map(nameOf)])) });
   // A person in a sentence: "You", or their name's first word ("dana.okafor@…" → "Dana").
   const firstName = (who: string) => {
     if (who === "person" || (!!me && who === me) || who === teammate?.me) return "You";
@@ -939,7 +946,6 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     : teammate ? "Its author builds it once every required reviewer signs off"
     : !open ? (plan.state === "approved" ? "Its workers are building it" : "The supervisor is revising it")
     : gate ? "Build starts when every required reviewer signs off" : "Nothing is built until you sign off";
-  const statusReviewers: StatusReviewer[] = signers.map((r) => ({ key: r.sub!, who: r.you ? "person" : nameOf(r.sub!), name: r.you ? "You" : firstName(r.sub!), required: r.required, signed: r.status === "signed_off" }));
   const changedAt = Math.max(plan.created_at, ...(plan.revisions ?? []).map((r) => r.at));
   const byline = `by ${teammate ? (teammate.author ? personName(nameOf(teammate.author)) : "its author") : "you and your supervisor"} · changed ${ago(changedAt)}`;
 
@@ -962,8 +968,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const canShare = !!gate || (!!sharing && plan.state !== "approved" && scopes.some((s) => s.kind !== "user" && s.can_share !== false));
   // The link: Pro and up (the daemon says `available`), for whoever may edit the design.
   const linked = shareLink && link.state?.available ? { target: shareLink, state: link.state } : null;
-  const shareMenu = (canShare || linked) && <button type="button" className={`${button} text-xs ${sharingOpen ? "!border-transparent bg-branch-soft text-branch" : ""}`}
-    aria-expanded={sharingOpen} onClick={() => setSharingOpen((o) => !o)}>Share</button>;
+  const shareMenu = (canShare || linked) && <button type="button" aria-label="Share" title="Share" className={`${button} size-7 shrink-0 !p-1.5 ${sharingOpen ? "!border-transparent bg-branch-soft text-branch" : ""}`}
+    aria-expanded={sharingOpen} onClick={() => setSharingOpen((o) => !o)}><svg className="size-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden><circle cx="6" cy="5" r="2.5" /><path d="M1.5 14v-2a4.5 4.5 0 019 0v2M11 3a2.5 2.5 0 010 5m2 6v-2a4 4 0 00-1-2.5" /></svg></button>;
   const sharePeople = (!teammate || plan.can_edit) && plan.state !== "approved" ? source.people : undefined;
   const ownReviewer = signers.find((r) => r.you && r.status !== "signed_off");
   const sharePanel = (canShare || linked) && <SharePanel plan={plan} target={sharePeople}
@@ -1098,7 +1104,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const body = (s: PlanSectionDTO) => (s.kind === "mermaid" || s.kind === "svg" ? <Diagram section={s} figure={figures.get(s.id) ?? 1} /> : textBody(s.id, s.title));
     const cards = (at: string) => (placed.get(at) ?? []).map((d) => (
       <Annotated key={d.id} notes={notesFor(`decision:${d.id}`)}>
-        <DecisionCard decision={d} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} disabled={busy} picked={open ? drafted(d) ?? null : chosen(d)} nameOf={firstName}
+        <DecisionCard decision={namedDecision(d)} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} disabled={busy} picked={open ? drafted(d) ?? null : chosen(d)} nameOf={firstName}
           onPick={(o) => void pickOption(d.id, o)} onComment={canComment ? () => comment({ kind: "decision", decision: d.id }, decisionName(d.id)) : undefined} />
       </Annotated>
     ));
@@ -1128,12 +1134,12 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         </span>
       </>
     );
-    // In team review the status line also says who signs and where each stands.
+    // In team review the status line says what sign-off waits for.
     const reviewed = !!gate || !!teammate;
     const status = reviewed ? (
       <div className="mt-3.5 grid gap-1.5">
         <DocStatus stage={stage} presentation={closed ? "closed" : undefined} tone={frozen ? "branch" : plan.state === "approved" || gate?.state === "ready" ? "pass" : "sap"} line={statusLine}
-          reviewers={statusReviewers} frozen={!!frozen} byline={byline} workItem={workItem} state={plan.state} held={policyHeld ? "policy" : undefined} />
+          byline={byline} workItem={workItem} state={plan.state} held={policyHeld ? "policy" : undefined} />
         {gateNotes}
       </div>
     ) : (
@@ -1195,7 +1201,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             {historical ? <DocHistoryComparison key={historical.comparison.revision.rev} comparison={historical.comparison} onClose={historical.close} /> : (
               <article className={`pb-[84px] pl-[68px] pt-12 max-[900px]:pb-16 max-[900px]:pl-[46px] max-[900px]:!pr-[22px] max-[900px]:pt-8 ${noted ? "pr-6 max-[1180px]:pr-[68px]" : "pr-[68px]"}`}>
                 <div className={`font-serif text-[15.5px] leading-[1.68] text-ink-2 ${noted ? "w-[min(660px,100%_-_292px)] max-[1180px]:mx-auto max-[1180px]:w-[min(660px,100%)]" : "mx-auto w-[min(660px,100%)]"}`}>
-                  <h1 className="m-0 font-serif text-[31px] font-semibold leading-[1.16] tracking-[-0.012em] text-ink [text-wrap:balance]">{plan.title}</h1>
+                  <h1 className="m-0 min-w-0 [overflow-wrap:anywhere] font-serif text-[31px] font-semibold leading-[1.16] tracking-[-0.012em] text-ink [text-wrap:balance]">{plan.title}</h1>
                   {status}
                   {plan.team_ended && <p className="m-0 mt-2 font-sans text-[12.5px] text-ink-2" data-testid="plan-team-ended">Your Team plan ended, so this is now a personal design doc.</p>}
                   {textPlan.lede && (
@@ -1326,16 +1332,15 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         <div ref={doc} className="relative min-h-0 min-w-0 flex-1 overflow-auto" data-testid="plan-doc" data-mode={historical ? "viewing" : mode} onMouseUp={historical ? undefined : pick} onKeyUp={historical ? undefined : pick} onClick={historical ? undefined : followAnchor}>
           {historical ? <DocHistoryComparison key={historical.comparison.revision.rev} comparison={historical.comparison} onClose={historical.close} /> : <article className="flex flex-col gap-5 pb-10 pl-14 pr-12 pt-7 font-serif text-[15px] leading-[1.65] text-ink-2">
             <div className="grid gap-3 font-sans">
-              <h1 className="m-0 font-serif text-[28px] font-semibold leading-[1.2] tracking-[-0.01em] text-ink">
+              <h1 className="m-0 min-w-0 [overflow-wrap:anywhere] font-serif text-[28px] font-semibold leading-[1.2] tracking-[-0.01em] text-ink">
                 {plan.title} <DocReference reference={plan.reference} className="ml-1 font-sans" />
               </h1>
               <DocStatus stage={stage} presentation={closed ? "closed" : undefined} tone={frozen ? "branch" : plan.state === "approved" || gate?.state === "ready" ? "pass" : "sap"} line={statusLine}
-                reviewers={statusReviewers} frozen={!!frozen} byline={byline} workItem={workItem}
+                byline={byline} workItem={workItem}
                 brief={!!plan.ask} briefOpen={briefOpen} onBrief={() => setBriefOpen((o) => !o)}
                 state={plan.state} held={policyHeld ? "policy" : undefined} />
               {plan.team_ended && <p className="m-0 text-[12.5px] text-ink-2" data-testid="plan-team-ended">Your Team plan ended, so this is now a personal design doc.</p>}
               {gateNotes}
-              {!chrome && reviewersPanel}
               {plan.ask && briefOpen && (
                 <p id="plan-ask" className="m-0 flex flex-wrap items-baseline gap-x-2 border-l-2 border-line-strong pl-3 text-[12.5px] text-ink-2" data-testid="plan-ask">
                   <span className="text-ink-3">What the supervisor understood:</span>
@@ -1364,7 +1369,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                     <span id={`plan-title-decision-${d.id}`}>{`Decision · ${d.title}`}</span>
                     <span className={aside}>{`decision ${i + 1} of ${plan.decisions.length}${mine ? ` · ${mine}` : ""}`}</span>
                   </h3>
-                  <Decision decision={d} chosen={chosen(d)} open={open && !busy} onPick={(o) => void pickOption(d.id, o)} />
+                  <Decision decision={namedDecision(d)} chosen={chosen(d)} open={open && !busy} onPick={(o) => void pickOption(d.id, o)} />
                   <p className="flex max-w-[70ch] flex-wrap items-baseline gap-x-2 font-sans text-[12.5px] leading-normal text-ink-3">
                     {d.challenge && <span>{`${d.mine ? "Against its own pick: " : ""}${d.challenge}`}</span>}
                     {commentButton(() => comment({ kind: "decision", decision: d.id }, decisionName(d.id)))}

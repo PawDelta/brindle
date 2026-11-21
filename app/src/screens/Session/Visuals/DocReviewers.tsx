@@ -10,6 +10,7 @@ import type { PlanGateRowDTO } from "../../../api/schema";
 import { button, field, main, quiet } from "../../../components/ui";
 import type { PlanSharingClient } from "./client";
 import { PolicyPreview, Policies } from "./DocPolicies";
+import { Avatar } from "./PlanCards";
 
 const STATUS: Record<PlanGateRowDTO["status"], { text: string; tone: string }> = {
   signed_off: { text: "✓ signed off", tone: "text-pass" },
@@ -85,6 +86,7 @@ export function Reviewers({ plan, client, directory, adminOrg, me, scopes, busy,
               const key = r.sub ?? r.name ?? "";
               return (
                 <span key={key} className="inline-flex flex-wrap items-center gap-1.5" data-testid={`plan-reviewer-${key}`} data-status={r.status} data-required={r.required}>
+                  {r.sub && <Avatar who={nameOf(r.sub)} />}
                   <span className="text-ink">{r.sub ? (r.you ? "You" : nameOf(r.sub)) : r.name}</span>
                   <span className="text-[11px] text-ink-3">{r.required ? "required" : "optional"}</span>
                   <span className={STATUS[r.status].tone}>{r.changes_by?.length ? `changes requested by ${r.changes_by.map(nameOf).join(", ")}` : r.met_by?.length ? `✓ met by ${r.met_by.map(nameOf).join(", ")}` : STATUS[r.status].text}</span>
