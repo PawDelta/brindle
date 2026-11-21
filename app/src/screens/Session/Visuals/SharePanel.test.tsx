@@ -42,7 +42,7 @@ function library(start: Partial<ShareAccess> = {}, signed: string[] = []) {
       state.shared = true;
       state.people = [...state.people.filter((p) => p.sub !== sub), { sub, name: null, access, sign_off: signOff ? "required" : null }];
     }),
-    change: (sub, access, signOff) => write(`change ${sub} ${access} ${signOff}`, sub, () => { Object.assign(person(sub), { access, sign_off: signOff ? "required" : null }); }),
+    change: (sub, access) => write(`change ${sub} ${access}`, sub, () => { person(sub).access = access; }),
     signOff: (sub, must) => write(`signOff ${sub} ${must}`, sub, () => { person(sub).sign_off = must ? "required" : null; }),
     revoke: (sub) => write(`revoke ${sub}`, sub, () => { state.people = state.people.filter((p) => p.sub !== sub); }),
     revokeScope: (scope) => write(`revokeScope ${scope.kind}:${scope.id}`, scope.id, () => { state.scopes = state.scopes.filter((s) => s.id !== scope.id); }),
@@ -104,7 +104,7 @@ it("adds a person at the access chosen, and changes sign-off without touching th
   await choose("lena", "Must sign off");
   await choose("sam", "Must sign off");
   await choose("lena", "View");
-  expect(lib.calls.slice(1)).toEqual(["signOff lena false", "signOff sam true", "change lena view false"]);
+  expect(lib.calls.slice(1)).toEqual(["signOff lena false", "signOff sam true", "change lena view"]);
   expect([row("lena").dataset.access, row("lena").dataset.signOff]).toEqual(["view", "none"]);
   expect([row("sam").dataset.access, row("sam").dataset.signOff]).toEqual(["comment", "required"]);
   expect(screen.getByText("The build starts when sam signs off.")).toBeTruthy();

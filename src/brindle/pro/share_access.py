@@ -6,16 +6,14 @@ Every write changes one person or one scope with the Library's own atomic
 operation, never by reading and resending the permission map, so two editors
 sharing at once can't undo each other:
 
-- ``POST /analysis-docs/{id}/share`` with a user scope invites one person, with
-  a role (view, comment or edit);
-- ``PUT /design/permissions/{sub}`` changes that person's role;
-- ``PUT``/``DELETE /design/reviewers/{sub}`` says whether the build waits for
-  their sign-off, which is kept apart from their access;
+- ``POST /analysis-docs/{id}/share`` with a user scope invites one person with
+  their access (view, comment or edit) and sign-off (none or required);
+- ``PUT /design/permissions/{sub}`` changes that person's access or sign-off;
+  the one not sent is kept as it is, in the same transaction;
 - ``DELETE /analysis-docs/{id}/share/user/{sub}`` stops sharing with them, and
   ``DELETE /analysis-docs/{id}/share/{group|org}/{id}`` with a team or the org.
 
-The Library gives a role other than ``reviewer`` no reviewer assignment, so a
-change of access is followed by the sign-off the person had.
+The Library gives anyone who signs off at least comment and suggest.
 
 A plan on this machine is uploaded by its first share (shared_docs.ensure_doc);
 a design someone else shared is changed by an editor of it, by its doc id.
@@ -83,31 +81,34 @@ def read(call: Call, names: dict[str, str] | None = None) -> dict:
     return summary(call("GET", ""), call("GET", "/design"), names)
 
 
-def _signer(sub: str) -> str:
-    return f"/design/reviewers/{quote(sub, safe='')}"
+def _person(sub: str) -> str:
+    return f"/design/permissions/{quote(sub, safe='')}"
+
+
+def _must(raw: Any) -> str:
+    if not isinstance(raw, bool):
+        raise ServiceError("invalid", "sign_off is true or false", 400)
+    return "required" if raw else "none"
 
 
 def invite(call: Call, sub: Any, access: Any, sign_off: Any) -> dict | None:
-    """Give one person the plan, at ``access``; the design view after it."""
-    sub, role = _sub(sub), _access(access)
-    design = call("POST", "/share", {"scope": {"kind": "user", "id": sub}, "role": role}).get("design")
-    return call("PUT", _signer(sub), {"required": True}) if sign_off is True else design
+    """Give one person the plan at ``access``, with or without sign-off, in
+    one Library transaction: read access never shows before the sign-off it
+    comes with. The design view after it."""
+    sub, access = _sub(sub), _access(access)
+    return call("POST", "/share", {"scope": {"kind": "user", "id": sub}, "access": access,
+                                   "sign_off": _must(sign_off)}).get("design")
 
 
-def change(call: Call, sub: Any, access: Any, sign_off: Any) -> dict:
-    """One person's access; their sign-off is set again after it, since a role
-    takes any reviewer assignment away."""
-    sub, role = _sub(sub), _access(access)
-    design = call("PUT", f"/design/permissions/{quote(sub, safe='')}", {"role": role})
-    return call("PUT", _signer(sub), {"required": True}) if sign_off is True else design
+def change(call: Call, sub: Any, access: Any) -> dict:
+    """One person's access. Sign-off isn't sent, so the Library keeps it as
+    it is, in the same transaction: a refusal leaves both as they were."""
+    return call("PUT", _person(_sub(sub)), {"access": _access(access)})
 
 
 def sign_off(call: Call, sub: Any, must: Any) -> dict:
     """Whether the build waits for this person, leaving their access alone."""
-    sub = _sub(sub)
-    if not isinstance(must, bool):
-        raise ServiceError("invalid", "must is true or false", 400)
-    return call("PUT", _signer(sub), {"required": True}) if must else call("DELETE", _signer(sub))
+    return call("PUT", _person(_sub(sub)), {"sign_off": _must(must)})
 
 
 def revoke(call: Call, sub: Any) -> dict | None:

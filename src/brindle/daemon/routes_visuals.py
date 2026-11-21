@@ -627,8 +627,7 @@ def plan_person_invite(db: DB, params: dict, body: dict) -> Any:
 def plan_person_put(db: DB, params: dict, body: dict) -> Any:
     from brindle.pro import share_access as sa
 
-    return _access_write(db, params["id"], lambda call: sa.change(
-        call, params["sub"], body.get("access"), _get(body, "sign_off", bool, default=False)))
+    return _access_write(db, params["id"], lambda call: sa.change(call, params["sub"], body.get("access")))
 
 
 def plan_person_sign_off(db: DB, params: dict, body: dict) -> Any:
@@ -804,8 +803,8 @@ def design_person_invite(db: DB, params: dict, body: dict) -> Any:
 def design_person_put(db: DB, params: dict, body: dict) -> Any:
     from brindle.pro import share_access as sa
 
-    return _design_access_write(params["id"], _get(body, "repo"), lambda call: sa.change(
-        call, params["sub"], body.get("access"), _get(body, "sign_off", bool, default=False)))
+    return _design_access_write(params["id"], _get(body, "repo"),
+                                lambda call: sa.change(call, params["sub"], body.get("access")))
 
 
 def design_person_sign_off(db: DB, params: dict, body: dict) -> Any:

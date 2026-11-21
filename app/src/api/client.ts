@@ -2426,8 +2426,9 @@ export class DaemonClient {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/people`, { sub, access, sign_off: signOff });
   }
 
-  setPlanPersonAccess(id: string, sub: string, access: ShareAccessLevel, signOff: boolean) {
-    return this.put<Plan>(`/plans/${encodeURIComponent(id)}/people/${encodeURIComponent(sub)}`, { access, sign_off: signOff });
+  /* One person's access; the Library keeps their sign-off as it is, in the same write. */
+  setPlanPersonAccess(id: string, sub: string, access: ShareAccessLevel) {
+    return this.put<Plan>(`/plans/${encodeURIComponent(id)}/people/${encodeURIComponent(sub)}`, { access });
   }
 
   setPlanPersonSignOff(id: string, sub: string, must: boolean) {
@@ -2455,8 +2456,8 @@ export class DaemonClient {
     return this.post<SharedDesign>(`/library/designs/${encodeURIComponent(id)}/people`, { sub, access, sign_off: signOff, ...(repo ? { repo } : {}) });
   }
 
-  setDesignPersonAccess(id: string, sub: string, access: ShareAccessLevel, signOff: boolean, repo?: string) {
-    return this.put<SharedDesign>(`/library/designs/${encodeURIComponent(id)}/people/${encodeURIComponent(sub)}`, { access, sign_off: signOff, ...(repo ? { repo } : {}) });
+  setDesignPersonAccess(id: string, sub: string, access: ShareAccessLevel, repo?: string) {
+    return this.put<SharedDesign>(`/library/designs/${encodeURIComponent(id)}/people/${encodeURIComponent(sub)}`, { access, ...(repo ? { repo } : {}) });
   }
 
   setDesignPersonSignOff(id: string, sub: string, must: boolean, repo?: string) {

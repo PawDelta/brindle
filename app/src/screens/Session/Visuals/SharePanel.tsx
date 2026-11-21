@@ -20,7 +20,8 @@ export interface SharePeopleTarget {
   access(): Promise<ShareAccess>;
   /* Give one person the plan; for a plan nobody has yet, this is its first share. */
   invite(sub: string, access: ShareAccessLevel, signOff: boolean): Promise<Plan>;
-  change(sub: string, access: ShareAccessLevel, signOff: boolean): Promise<Plan>;
+  /* Their access only: the Library keeps their sign-off as it is, in the same write. */
+  change(sub: string, access: ShareAccessLevel): Promise<Plan>;
   signOff(sub: string, must: boolean): Promise<Plan>;
   revoke(sub: string): Promise<Plan>;
   revokeScope(scope: Scope): Promise<Plan>;
@@ -260,7 +261,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
       {menu === key && target && level && <div className="menu" role="menu" data-testid={`share-menu-${p.sub}`}>
         <div className="ml">{firstWord(p.name)} can</div>
         {LEVELS.map((l) => <button key={l.id} className="mi" role="menuitemradio" aria-checked={level === l.id}
-          onClick={() => level !== l.id && run(personWork(p.sub, "Couldn't change", (t) => t.change(p.sub, l.id, must)))}>{l.name}<span className="mx">{l.hint}{level === l.id && <ShareCheck />}</span></button>)}
+          onClick={() => level !== l.id && run(personWork(p.sub, "Couldn't change", (t) => t.change(p.sub, l.id)))}>{l.name}<span className="mx">{l.hint}{level === l.id && <ShareCheck />}</span></button>)}
         <button className="mi box" role="menuitemcheckbox" aria-checked={must} onClick={() => run(personWork(p.sub, "Couldn't change", (t) => t.signOff(p.sub, !must)))}>
           <i className={`bx ${must ? "on" : ""}`} aria-hidden>{must && <ShareCheck />}</i><span className="grow">Must sign off<span className="mx"> · the build waits for {firstWord(p.name)}</span></span></button>
         <button className="mi sep" role="menuitem" onClick={() => run(personWork(p.sub, "Couldn't stop sharing", (t) => t.revoke(p.sub)))}>Stop sharing</button>
