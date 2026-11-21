@@ -42,6 +42,7 @@ MAX_KEYS = 200                      # per POST /me/inbox/read
 
 _lock = threading.Lock()
 _seen: dict[str, list[dict]] = {}      # account sub -> the feed rows as last read
+_read_versions: dict[str, int] = {}   # acknowledgements since a feed request began
 
 
 def group(kind: str) -> str:
@@ -108,6 +109,8 @@ def poll(db: DB, *, client=None, store=None) -> bool:
         if signed is None:
             return False
         client, sub, token = signed
+        with _lock:
+            version = _read_versions.get(sub, 0)
         status, body = client.call("GET", FEED, None, token=token)
     except Exception:  # noqa: BLE001 - offline or refused: keep what we have; the next pass tries again
         log.debug("brindle: couldn't read the team inbox", exc_info=True)
@@ -116,6 +119,9 @@ def poll(db: DB, *, client=None, store=None) -> bool:
         return False
     rows = _rows(body)
     with _lock:
+        # A feed captured before a successful read must not undo its acknowledgement.
+        if version != _read_versions.get(sub, 0):
+            return False
         changed = _seen.get(sub) != rows
         _seen[sub] = rows
     if changed:
@@ -171,6 +177,7 @@ def mark_read(db: DB, keys: list[str], *, client=None, store=None) -> list[str]:
         read = body.get("read") if isinstance(body, dict) else None
         marked.update(k for k in (read if isinstance(read, list) else []) if isinstance(k, str))
     with _lock:
+        _read_versions[sub] = _read_versions.get(sub, 0) + 1
         for r in _seen.get(sub, []):
             if r["key"] in marked:
                 r["read"] = True
@@ -216,3 +223,4 @@ def items(sub: str | None) -> list[InboxItemDTO]:
 def clear() -> None:
     with _lock:
         _seen.clear()
+        _read_versions.clear()
