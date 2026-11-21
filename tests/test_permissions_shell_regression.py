@@ -120,10 +120,15 @@ def test_replayed_shell_constructs_keep_restrictions(tmp_path, command, protecte
 
 
 def test_shell_replay_recovers_full_source_without_guessing_truncated_requests(tmp_path):
+    import importlib.util
     import json
     import sqlite3
+    from pathlib import Path
 
-    from scripts.replay_shell_syntax import recover
+    spec = importlib.util.spec_from_file_location(
+        "replay_shell_syntax", Path(__file__).resolve().parent.parent / "scripts/replay_shell_syntax.py")
+    replay = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(replay)
 
     command = "printf 'first\nsecond'"
     req = permissions.Request("claude", "bash", "Bash", command=command)
@@ -140,7 +145,7 @@ def test_shell_replay_recovers_full_source_without_guessing_truncated_requests(t
     db = sqlite3.connect(":memory:")
     db.execute("CREATE TABLE permission_requests (agent_id TEXT, tool_use_id TEXT, request TEXT)")
     try:
-        found = recover(db, rows, [tmp_path], 0, float("inf"))
+        found = replay.recover(db, rows, [tmp_path], 0, float("inf"))
     finally:
         db.close()
     assert list(found) == [1]
