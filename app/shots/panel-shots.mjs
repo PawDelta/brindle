@@ -94,7 +94,8 @@ function measure() {
     if (el.matches("svg path, svg circle, svg polyline, svg line") && visible(el, el.getBoundingClientRect())) {
       for (const css of new Set([style.stroke, style.fill])) if (css !== "none") record(el, css, "ui", el.closest("button")?.getAttribute("aria-label") ?? "icon");
     }
-    if (el.matches("button, input, select, [role=tab]") && visible(el, el.getBoundingClientRect())) {
+    // Search fields and link selectors paint their boundary on a containing div/label.
+    if (el.matches("button, input, select, [role=tab], :has(> input, > select, > textarea)") && visible(el, el.getBoundingClientRect())) {
       for (const side of ["Top", "Right", "Bottom", "Left"]) {
         if (parseFloat(style[`border${side}Width`]) && style[`border${side}Style`] !== "none") record(el, style[`border${side}Color`], "ui", `border-${side.toLowerCase()}`);
       }
@@ -110,14 +111,18 @@ try {
   browser = await chromium.launch({ ...(args.includes("--channel") ? { channel: option("--channel") } : {}) });
   // An executable check of the auditor itself, before collecting production evidence.
   const calibration = await browser.newPage();
-  await calibration.setContent('<body style="margin:0;background:white"><div style="opacity:.5"><span id="alpha" style="color:rgba(0,0,0,.5)">Alpha</span></div><div style="background:black;opacity:.5"><span id="group" style="color:white">Group</span></div><span id="large" style="color:black;font-size:24px">Large</span></body>');
+  await calibration.setContent('<body style="margin:0;background:white"><div style="opacity:.5"><span id="alpha" style="color:rgba(0,0,0,.5)">Alpha</span></div><div style="background:black;opacity:.5"><span id="group" style="color:white">Group</span></div><span id="large" style="color:black;font-size:24px">Large</span><div id="search-boundary" style="border-bottom:1px solid rgb(192,192,192)"><input aria-label="Search" style="border:0;background:transparent"></div><label id="select-boundary" style="display:inline-block;border-bottom:1px solid black"><select aria-label="Audience" style="border:0;background:transparent"><option>Team</option></select></label></body>');
   const checks = await calibration.evaluate(measure);
   const alpha = checks.find((p) => p.selector === "#alpha");
   const group = checks.find((p) => p.selector === "#group");
   const large = checks.find((p) => p.selector === "#large");
+  const searchBoundary = checks.find((p) => p.selector === "#search-boundary" && p.text === "border-bottom");
+  const selectBoundary = checks.find((p) => p.selector === "#select-boundary" && p.text === "border-bottom");
   if (alpha?.foreground !== "rgb(191, 191, 191)" || alpha.background !== "rgb(255, 255, 255)" || Math.abs(alpha.ratio - 1.84) > .02
     || group?.foreground !== "rgb(255, 255, 255)" || group.background !== "rgb(128, 128, 128)" || Math.abs(group.ratio - 3.98) > .02
-    || large?.ratio !== 21 || large.threshold !== 3) throw new Error("Contrast calibration failed");
+    || large?.ratio !== 21 || large.threshold !== 3
+    || searchBoundary?.foreground !== "rgb(192, 192, 192)" || searchBoundary.background !== "rgb(255, 255, 255)" || searchBoundary.pass !== false || searchBoundary.threshold !== 3
+    || selectBoundary?.ratio !== 21 || selectBoundary.threshold !== 3) throw new Error("Contrast calibration failed");
   await calibration.close();
   mkdirSync(out, { recursive: true });
   const results = { method: "Computed DOM colors, alpha and ancestor group opacity composited in sRGB; WCAG 2 contrast; DOM xterm renderer includes its own contrast adjustment. Native select popup options are outside the page and excluded. UI borders are measured against their inner background.", renders: [] };
