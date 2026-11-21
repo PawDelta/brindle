@@ -82,7 +82,7 @@ import { visualLink } from "../screens/Session/Visuals/client";
 import { VISUAL_LINK, VisualLinkContext } from "../screens/Session/Visuals/link";
 import { message } from "../screens/Session/Visuals/chrome";
 import { scrollByWheel } from "./terminalScroll";
-import { TextContrast } from "./textContrast";
+import { recontrastBuffer, TextContrast } from "./textContrast";
 import { currentAppTheme, useAppTheme } from "./useAppTheme";
 
 type AppTheme = ReturnType<typeof currentAppTheme>;
@@ -469,8 +469,14 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
     live.current.themeChanged = (theme) => {
       if (gone || theme === told) return;
       told = theme;
-      // Not attached yet: tmux reads the colours as they are then.
-      if (attached) pty.write(`\x1b[?997;${theme === "dark" ? 1 : 2}n`);
+      // Drain writes made in the old palette before lifting retained cells; refresh the active pen too, so plain
+      // text continued after the switch uses the new ground. The callback runs after xterm has parsed both.
+      term.write(lift.refresh(), () => {
+        if (gone || theme !== told) return;
+        recontrastBuffer(term, lifted.current);
+        // Not attached yet: tmux reads the colours as they are then.
+        if (attached) pty.write(`\x1b[?997;${theme === "dark" ? 1 : 2}n`);
+      });
     };
     // What goes to the pane, in the order the person made it: a ⌘V holds its place while the clipboard is read,
     // and what's typed after waits behind it.

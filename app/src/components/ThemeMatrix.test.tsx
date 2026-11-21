@@ -1,6 +1,8 @@
 /* The theme matrix: every surface that draws in the app's colours, fresh in each theme and switched while live, both ways.
    A change to any theme path must keep all 16 cells (4 surfaces x 4 columns) passing. Codex reads its colours only at its
    start, so its pane's xterm.js follows the app's palette, not Codex's own colours (an accepted exception). */
+/* Launch-side Claude configuration is exercised in tests/test_providers.py (auto, migration and personal overrides)
+   and tests/test_auth_failure_handling.py (agent_env's COLORFGBG). Here the real terminal answers its OSC 11 query. */
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import type { Terminal } from "@xterm/xterm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -105,25 +107,37 @@ const ROWS: Record<string, Row> = {
 async function ptyCell(live: Pty, start: Theme, to: Theme | null) {
   const { term, written, fromTmux } = live;
   await fromTmux(ATTACH);
+  expect(written.at(-1)).toBe(asGround(PTY[start].ground));
   // Text already on screen in the start theme, drawn in a grey (slot 246).
   await fromTmux("\x1b[2J\x1b[H\x1b[38;5;246mfaint");
-  const mark = written.length;
-  if (to) {
-    document.documentElement.dataset.theme = to;
-    await waitFor(() => expect(written.slice(mark)).toEqual([REPORT[to]]));
+  // Switch back on the same terminal too: preserve the former ProviderSurface round-trip cases.
+  for (const shown of to ? [start, to, start] : [start]) {
+    const switched = document.documentElement.dataset.theme !== shown;
+    const mark = written.length;
+    if (switched) {
+      document.documentElement.dataset.theme = shown;
+      await waitFor(() => expect(written.slice(mark)).toEqual([REPORT[shown]]));
+    }
+    const ground = PTY[shown];
+    await fromTmux(ASK);
+    expect(term.options.theme).toMatchObject({ background: ground.ground, foreground: ground.ink });
+    const palette = term.options.theme!;
+    expect([palette.brightBlack, palette.green, palette.brightYellow, palette.red, palette.magenta, palette.blue, palette.yellow, palette.cyan]).toEqual(
+      shown === "light"
+        ? ["#4c615e", "#06744f", "#9b4724", "#a63e3a", "#6350b3", "#2d69b5", "#86572a", "#1a756d"]
+        : ["#889a90", "#34d399", "#e8875a", "#f08c88", "#a99be0", "#6ea8fe", "#d7af87", "#5ccfc4"],
+    );
+    expect(term.options.minimumContrastRatio).toBe(ground.floor);
+    expect(written.slice(mark)).toEqual([...(switched ? [REPORT[shown]] : []), asGround(ground.ground)]);
+    // Retained text and text continued without an SGR both read against the new ground.
+    await fromTmux(" more");
+    const drawn = drawnColours(term, 0);
+    expect(drawn.map(d => d.text).join("")).toMatch(/^faint(?: more)+$/);
+    for (const d of drawn) expect(contrast(d.css, d.ground), d.text).toBeGreaterThanOrEqual(4.5);
+    // textContrast mode: light consumes faint into a lifted colour; dark leaves it to xterm's renderer.
+    await fromTmux("\x1b7\r\n\x1b[0;2mmode\x1b[0m\x1b8");
+    expect(term.buffer.active.getLine(1)!.getCell(0)!.isDim() !== 0).toBe(shown === "dark");
   }
-  const shown = to ?? start;
-  const ground = PTY[shown];
-  await fromTmux(ASK);
-  expect(term.options.theme).toMatchObject({ background: ground.ground, foreground: ground.ink });
-  expect(term.options.minimumContrastRatio).toBe(ground.floor);
-  expect(written.slice(mark)).toEqual([...(to ? [REPORT[to]] : []), asGround(ground.ground)]);
-  // The text on screen before the switch, and text continued after it with no SGR of its own, both reach 4.5:1 on the
-  // ground the pane ends up with (lifted in light by the stream, by xterm.js's floor in dark).
-  await fromTmux(" more");
-  const drawn = drawnColours(term, 0);
-  expect(drawn.map(d => d.text).join("")).toBe("faint more");
-  for (const d of drawn) expect(contrast(d.css, d.ground), d.text).toBeGreaterThanOrEqual(4.5);
 }
 
 /* The colour a tint (an rgba) lies over a ground to, as the page shows it. */
@@ -142,7 +156,9 @@ function diffCell(start: Theme, to: Theme | null) {
   const add = screen.getByText("+const a = 2;");
   const remove = screen.getByText("-const a = 1;");
   expect(add.className).toContain("text-pass");
+  expect(add.className).toContain("bg-pass-soft");
   expect(remove.className).toContain("text-sap");
+  expect(remove.className).toContain("bg-sap-soft");
   if (to) document.documentElement.dataset.theme = to;
   const shown = to ?? start;
   for (const [ink, tint, expected] of [["--pass", "--pass-soft", DIFF[shown].add], ["--sap", "--sap-soft", DIFF[shown].remove]] as const) {
@@ -156,6 +172,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  xterms.length = 0;
   vi.unstubAllGlobals();
   delete document.documentElement.dataset.theme;
 });
