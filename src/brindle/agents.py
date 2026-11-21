@@ -4507,6 +4507,10 @@ def close(db: DB, agent_id: str, panes: dict[str, bool] | None = None) -> Agent:
 
         procs.stop([agent.id])  # anything left running after its window went
     db.update_agent(agent.id, dismissed_at=time.time())
+    if agent.parent_id is None:
+        from brindle import plans
+
+        plans.close_with_session(db, agent.id)
     bus.publish_agent(db, "agent.closed", agent.id)
     return agent
 

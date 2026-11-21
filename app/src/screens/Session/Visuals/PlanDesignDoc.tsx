@@ -205,8 +205,8 @@ export function DecisionCard({ decision: d, n, of, open, disabled = false, picke
   const whoPicked = picksLine(d, nameOf);
   return (
     <section id={`plan-decision-${d.id}`} role="radiogroup" aria-labelledby={`plan-q-${d.id}`} data-testid="plan-decision" data-decision={d.id} data-state={waiting ? "open" : "decided"}
-      className={`relative mb-1.5 mt-[26px] scroll-mt-16 rounded-md border border-l-2 font-sans transition-colors duration-200 ${waiting ? "border-[color-mix(in_srgb,var(--sap)_42%,transparent)] border-l-sap bg-[color-mix(in_srgb,var(--sap)_5%,transparent)]" : "border-line border-l-line-strong"}`}>
-      <div className="flex items-center justify-between gap-3 px-4 pt-3">
+      className={`relative min-w-0 [overflow-wrap:anywhere] mb-1.5 mt-[26px] scroll-mt-16 rounded-md border border-l-2 font-sans transition-colors duration-200 ${waiting ? "border-[color-mix(in_srgb,var(--sap)_42%,transparent)] border-l-sap bg-[color-mix(in_srgb,var(--sap)_5%,transparent)]" : "border-line border-l-line-strong"}`}>
+      <div className="flex flex-wrap items-center justify-between gap-3 px-4 pt-3">
         <p className="m-0 text-[11px] font-medium uppercase leading-[1.3] tracking-[0.08em] text-ink-3">{`Decision ${n} of ${of}`}</p>
         {waiting ? <span className={`${pill} text-sap`}>Needs your pick</span>
           : done ? <Tick>Decided{open && <span className="font-normal text-ink-3">· change it any time before you approve</span>}</Tick> : null}
@@ -226,21 +226,21 @@ export function DecisionCard({ decision: d, n, of, open, disabled = false, picke
               <span aria-hidden className={`relative mt-[3px] size-[15px] rounded-full ${chosen ? "bg-pass-soft" : "shadow-[inset_0_0_0_1.5px_var(--line-strong)]"}`}>
                 {chosen && <span className="absolute left-[5px] top-[2.5px] h-2 w-1 rotate-45 border-b-[1.75px] border-r-[1.75px] border-solid border-pass" />}
               </span>
-              <span>
+              <span className="min-w-0">
                 <span className={`flex flex-wrap items-center gap-[9px] text-sm leading-[1.45] ${done && !chosen ? "font-medium text-ink-3" : done ? "font-semibold text-ink" : "font-medium text-ink"}`}>
                   {o.label}
                   {d.mine === o.id && <span className="rounded-sm px-1.5 text-[11px] font-normal leading-[17px] text-ink-2 shadow-[inset_0_0_0_1px_var(--line-strong)]" data-testid="plan-recommended">Recommended</span>}
                   {/* A shared doc's votes: who picked this option. */}
                   {(d.votes?.[o.id]?.length ?? 0) > 0 && (
-                    <span className="ml-auto inline-flex items-center gap-1" data-votes={d.votes![o.id].length} title={`Voted for by ${d.votes![o.id].map(personName).join(", ")}`}>
+                    <span className="ml-auto inline-flex flex-wrap items-center gap-1" data-votes={d.votes![o.id].length} title={`Voted for by ${d.votes![o.id].map(personName).join(", ")}`}>
                       {d.votes![o.id].map((v) => <Avatar key={v} who={v} small />)}
                     </span>
                   )}
                 </span>
                 {(pros.length > 0 || cons.length > 0 || o.detail) && (
                   <span className={`mt-[3px] grid gap-px text-[13px] leading-normal ${done && !chosen ? "text-ink-3" : "text-ink-2"}`}>
-                    {pros.map((p, i) => <span key={`p${i}`} className="grid grid-cols-[12px_1fr] gap-1"><span aria-hidden className="font-mono text-ink-3">+</span>{p}</span>)}
-                    {cons.map((c, i) => <span key={`c${i}`} className="grid grid-cols-[12px_1fr] gap-1"><span aria-hidden className="font-mono text-ink-3">−</span>{c}</span>)}
+                    {pros.map((p, i) => <span key={`p${i}`} className="grid grid-cols-[12px_minmax(0,1fr)] gap-1"><span aria-hidden className="font-mono text-ink-3">+</span>{p}</span>)}
+                    {cons.map((c, i) => <span key={`c${i}`} className="grid grid-cols-[12px_minmax(0,1fr)] gap-1"><span aria-hidden className="font-mono text-ink-3">−</span>{c}</span>)}
                     {!pros.length && !cons.length && o.detail && <span>{o.detail}</span>}
                   </span>
                 )}
@@ -265,9 +265,9 @@ export function DecisionCard({ decision: d, n, of, open, disabled = false, picke
 function Who({ who, children }: { who: string; children?: ReactNode }) {
   const name = personName(who);
   return (
-    <div className="flex items-center gap-[7px] text-xs text-ink-3">
-      <span aria-hidden className="inline-grid size-[18px] flex-none place-items-center rounded-full bg-surface-2 font-mono text-[9px] font-semibold leading-none text-ink-2 shadow-[0_0_0_1px_var(--line-strong)]">{name[0]?.toUpperCase()}</span>
-      <b className="font-medium text-ink">{name}</b>
+    <div className="flex min-w-0 items-center gap-[7px] text-xs text-ink-3">
+      <Avatar who={who} />
+      <b title={name} className="min-w-0 truncate font-medium text-ink">{name}</b>
       {children}
     </div>
   );
@@ -287,7 +287,7 @@ export function MarginNote({ thread: t, busy, canJudge, canReply, canResolve, ac
     setReplying(false);
   };
   return (
-    <div className={`grid gap-[5px] border-l pb-0.5 pl-[13px] pt-px font-sans text-[12.5px] leading-normal text-ink-2 ${lit ? "border-branch" : "border-line-strong"}`}
+    <div className={`grid min-w-0 [overflow-wrap:anywhere] gap-[5px] border-l pb-0.5 pl-[13px] pt-px font-sans text-[12.5px] leading-normal text-ink-2 ${lit ? "border-branch" : "border-line-strong"}`}
       data-testid={`thread-${t.id}`} data-status={t.status} data-kind={t.kind} data-question={t.question || undefined} aria-label={suggestion ? "Suggestion" : "Comment thread"} role="note"
       onMouseEnter={() => onHover(true)} onMouseLeave={() => onHover(false)}>
       <Who who={t.author}><span>{suggestion ? `suggests · ${ago(t.at)}` : ago(t.at)}</span></Who>
