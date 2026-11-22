@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import sh
-from brindle import autopilot, check_scope, codemap, gates, session_sync, workspaces
+from brindle import autopilot, check_scope, codemap, gates, git, session_sync, workspaces
 from brindle.db import Agent
 
 PYTEST = "uv run pytest -q"
@@ -512,3 +512,108 @@ def test_capped_selection_keeps_max_tests_with_tests_that_exist(repo, monkeypatc
 
     run = check_scope.command(ws, cmd, check_scope.CheckScope(coverage=True), (base, [path]), max_tests=max_tests)
     assert run.startswith("printf") and shlex.split(run.rsplit(f"; {cmd}", 1)[-1]) == ran
+
+
+def test_coverage_reach_tokenises_each_file_once_and_caches_scope(repo, brindle_home, monkeypatch):
+    """Readers.of(), conftest_tests() and tests_of_tables() tokenise each file at most
+    once per walk instead of compiling and scanning \\b(a|b|...)\\b over every file on
+    each worklist round, and check_scope.command() caches clean-commit scopes on disk."""
+    import re as stdlib_re
+
+    from brindle import coverage_map
+
+    # Build a repo of 20 files with a 5-hop import chain, a class attribute, a DDL table and a conftest fixture.
+    files = {
+        "pkg/__init__.py": "",
+        "pkg/m0.py": "VAL = 1\n\n\nclass Box:\n    tag = VAL\n",
+        "pkg/m1.py": "from pkg.m0 import VAL\nA = VAL\n",
+        "pkg/m2.py": "from pkg.m1 import A\nB = A\n",
+        "pkg/m3.py": "from pkg.m2 import B\nC = B\n",
+        "pkg/m4.py": "from pkg.m3 import C\n\n\ndef use(x):\n    return C + x.tag\n",
+        "pkg/db.py": 'SCHEMA = """\nCREATE TABLE items (id TEXT);\n"""\n',
+        "tests/conftest.py": "import pytest\n\n\n@pytest.fixture\ndef fx():\n    return 1\n",
+        "tests/test_use.py": "def test_u(fx):\n    return 'widgets'\n",
+    }
+    for i in range(11):
+        files[f"pkg/filler_{i:02}.py"] = f"def f_{i}():\n    return {i}\n"
+    for name, text in files.items():
+        (repo / name).parent.mkdir(parents=True, exist_ok=True)
+        (repo / name).write_text(text)
+    sh("git add -A && git commit -qm base", repo)
+    base = sh("git rev-parse HEAD", repo)
+
+    (repo / "pkg/m0.py").write_text("VAL = 2\n\n\nclass Box:\n    tag = VAL\n")
+    (repo / "pkg/db.py").write_text('SCHEMA = """\nCREATE TABLE items (id TEXT);\nCREATE TABLE widgets (id TEXT);\n"""\n')
+    (repo / "tests/conftest.py").write_text("import pytest\n\n\n@pytest.fixture\ndef fx():\n    return 2\n")
+    sh("git commit -qam edit", repo)
+    sha = sh("git rev-parse HEAD", repo)
+
+    known = {name: {q: [] for q in coverage_map.line_scopes(text)} for name, text in files.items()}
+    known["pkg/m4.py"]["use"] = [0]
+    data = {"version": coverage_map.VERSION, "check": PYTEST, "commit": base, "built": time.time(),
+            "tests": ["tests/test_use.py::test_u"], "cases": [1], "files": known}
+
+    # Count both dynamic \b(...)\b regex scans (base) and word tokenisations (fixed).
+    word_regex_scans = [0]
+    tokenises = [0]
+
+    class _CountedPattern:
+        def __init__(self, pat):
+            self._pat = pat
+
+        def search(self, text):
+            word_regex_scans[0] += 1
+            return self._pat.search(text)
+
+    class _ReProxy:
+        escape = staticmethod(stdlib_re.escape)
+
+        @staticmethod
+        def compile(pattern, *a, **kw):
+            compiled = stdlib_re.compile(pattern, *a, **kw)
+            if isinstance(pattern, str) and pattern.startswith(r"\b("):
+                return _CountedPattern(compiled)
+            return compiled
+
+    monkeypatch.setattr(coverage_map, "re", _ReProxy)
+    if hasattr(coverage_map, "_file_words"):
+        real_fw = coverage_map._file_words
+
+        def counted_fw(text):
+            tokenises[0] += 1
+            return real_fw(text)
+
+        monkeypatch.setattr(coverage_map, "_file_words", counted_fw)
+
+    got = coverage_map.targets(repo, data, coverage_map.changed_since(repo, data))
+    tracked = git.paths(["ls-files", "*.py"], repo)
+    assert got == {"tests/test_use.py::test_u", "tests/test_use.py"}
+    assert word_regex_scans[0] == 0
+    assert 0 < tokenises[0] <= len(tracked)
+
+    # Scope cache: repeated calls for the same clean (sha, cmd) reuse the cached command.
+    mp = coverage_map.map_path(repo, PYTEST)
+    mp.parent.mkdir(parents=True, exist_ok=True)
+    mp.write_text(json.dumps(data))
+    ws = SimpleNamespace(path=str(repo), repo_root=str(repo))
+    scope = check_scope.inferred(PYTEST, "coverage")
+    diff = (base, ["pkg/m0.py", "pkg/db.py", "tests/conftest.py"])
+    target_calls = [0]
+    real_targets = coverage_map.targets
+
+    def counted_targets(*a, **kw):
+        target_calls[0] += 1
+        return real_targets(*a, **kw)
+
+    monkeypatch.setattr(coverage_map, "targets", counted_targets)
+    first = check_scope.command(ws, PYTEST, scope, diff, sha=sha)
+    second = check_scope.command(ws, PYTEST, scope, diff, sha=sha)
+    assert first == second and first == f"{PYTEST} tests/test_use.py"
+    assert target_calls[0] == 1
+
+    # A new commit invalidates the scope cache.
+    (repo / "pkg/m0.py").write_text("VAL = 3\n\n\nclass Box:\n    tag = VAL\n")
+    sh("git commit -qam edit2", repo)
+    sha2 = sh("git rev-parse HEAD", repo)
+    third = check_scope.command(ws, PYTEST, scope, diff, sha=sha2)
+    assert third == first and target_calls[0] == 2
