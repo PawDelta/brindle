@@ -206,6 +206,17 @@ def test_assign_reply_names_the_pick_and_stores_the_weight(db, repo, boss, monke
     [t] = db.list_tasks(str(repo), state="started")
     assert t.weight == "medium" and t.profile == "dev.claude-sonnet"
 
+    from brindle import spawn
+
+    monkeypatch.setattr(spawn, "_load", lambda: 14.0)
+    monkeypatch.setattr(spawn, "_cores", lambda: 10)
+    queued = asyncio.run(mcp_server.assign(
+        agent_profile="developer-sonnet", task="do B", branch="feat-b"))
+    [pending] = db.list_tasks(str(repo), state="pending")
+    assert pending.id in queued and pending.agent_id is None
+    assert "dev.claude-sonnet" in queued and "Claude Sonnet (" in queued
+    assert "developer-sonnet" not in queued
+
 
 def test_learning_outcomes_carry_the_weight(db, repo, boss, monkeypatch):
     monkeypatch.setattr(agents, "spawn", fake_spawn)

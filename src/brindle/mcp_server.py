@@ -24,7 +24,7 @@ from brindle import agents, autopilot, coordinator, cost_estimate, git, history,
 from brindle.pro import brief_learning
 from brindle.config import load_repo_config, normalize_weight
 from brindle.db import DB, Agent, Task, Workspace, migrated_by_newer, migration_incompatibility
-from brindle.profiles import list_profiles
+from brindle.profiles import list_profiles, load_profile
 from brindle.view import last_activity
 
 MAX_DIFF_CHARS = 60_000
@@ -1104,6 +1104,7 @@ async def handoff(
             return str(e)
         except routing_goal.GoalError as e:
             return f"Not started: {e}"
+        profile = load_profile(profile, ws.repo_root).name
         refused = _policy_refusal(db, caller, ws, profile, task, "handoff", files, weight, branch)
         if refused:
             return refused
@@ -1296,6 +1297,7 @@ async def assign(
             return str(e)
         except routing_goal.GoalError as e:
             return f"Not started: {e}"
+        profile = load_profile(profile, ws.repo_root).name
         refused = _policy_refusal(db, caller, ws, profile, task, "assign", files, route_weight, branch)
         if refused:
             return refused
