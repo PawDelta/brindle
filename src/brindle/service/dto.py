@@ -163,6 +163,10 @@ class AgentDTO(_DTO):
     tokens: str | None = None
     # The model its transcript last ran on (the usage meter names it); absent until it has run.
     model: str | None = None
+    # The job size its task was routed as (light, medium, heavy, advanced); absent for a supervisor or reviewer.
+    weight: str | None = None
+    # Its model as a person reads it (brindle.model_names): "Claude Opus", or the provider's family before it has run.
+    model_display: str | None = None
     # Title of the milestone current when the worker was assigned; absent for a supervisor or when none.
     milestone: str | None = None
     unread: int | None = None
@@ -922,6 +926,7 @@ class RoutingProfileDTO(_DTO):
     maker: str | None = None
     tool: str | None = None
     effort: str | None = None
+    builtin: bool = False    # one of brindle's own profiles; any other is the person's custom agent
     installed: bool
     signed_in: bool
     excluded: bool

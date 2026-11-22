@@ -171,6 +171,7 @@ export interface AgentDTO {
   milestone?: string | null;
   mode: string;
   model?: string | null;
+  model_display?: string | null;
   parent_id?: string | null;
   pending?: number | null;
   profile: string;
@@ -182,6 +183,7 @@ export interface AgentDTO {
   tmux_server?: string | null;
   tokens?: string | null;
   unread?: number | null;
+  weight?: string | null;
   window?: string | null;
 }
 /**
@@ -1569,6 +1571,7 @@ export interface RoutingLockDTO {
  */
 export interface RoutingProfileDTO {
   allowed?: boolean;
+  builtin?: boolean;
   cost_tier: string;
   display?: string | null;
   effort?: string | null;

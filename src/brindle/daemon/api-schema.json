@@ -343,6 +343,18 @@
           "default": null,
           "title": "Model"
         },
+        "model_display": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Display"
+        },
         "parent_id": {
           "anyOf": [
             {
@@ -446,6 +458,18 @@
           ],
           "default": null,
           "title": "Unread"
+        },
+        "weight": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Weight"
         },
         "window": {
           "anyOf": [
@@ -11210,6 +11234,11 @@
               "title": "Allowed",
               "type": "boolean"
             },
+            "builtin": {
+              "default": false,
+              "title": "Builtin",
+              "type": "boolean"
+            },
             "cost_tier": {
               "title": "Cost Tier",
               "type": "string"
@@ -11737,6 +11766,11 @@
         "allowed": {
           "default": true,
           "title": "Allowed",
+          "type": "boolean"
+        },
+        "builtin": {
+          "default": false,
+          "title": "Builtin",
           "type": "boolean"
         },
         "cost_tier": {
@@ -14640,6 +14674,18 @@
               "default": null,
               "title": "Model"
             },
+            "model_display": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Model Display"
+            },
             "parent_id": {
               "anyOf": [
                 {
@@ -14743,6 +14789,18 @@
               ],
               "default": null,
               "title": "Unread"
+            },
+            "weight": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Weight"
             },
             "window": {
               "anyOf": [
