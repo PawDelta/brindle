@@ -357,7 +357,9 @@ spec="brindle"
 [ -n "${BRINDLE_VERSION:-}" ] && spec="brindle==$BRINDLE_VERSION"
 [ -n "${BRINDLE_SOURCE:-}" ] && spec="$BRINDLE_SOURCE"
 step "installing $spec"
-uv tool install --upgrade --python '>=3.11' "$spec"
+# Below 3.15 until loro (a dependency) ships wheels for it: otherwise uv picks the newest
+# CPython and builds loro from source, which needs Rust and a C linker.
+uv tool install --upgrade --python '>=3.11,<3.15' "$spec"
 
 bin_dir="$(uv tool dir --bin 2>/dev/null || echo "$HOME/.local/bin")"
 # The app finds brindle wherever uv put it; the providers come in the first launch's own step.

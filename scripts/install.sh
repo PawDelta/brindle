@@ -49,7 +49,9 @@ spec="brindle"
 # BRINDLE_SOURCE=/path/to/checkout installs that instead of PyPI (scripts/smoke_install.sh).
 [ -n "${BRINDLE_SOURCE:-}" ] && spec="$BRINDLE_SOURCE"
 step "installing $spec"
-uv tool install --upgrade --python '>=3.11' "$spec"
+# Below 3.15 until loro (a dependency) ships wheels for it: uv otherwise picks the
+# newest CPython and builds loro from source, which needs Rust and a C linker.
+uv tool install --upgrade --python '>=3.11,<3.15' "$spec"
 
 bin_dir="$(uv tool dir --bin 2>/dev/null || echo "$HOME/.local/bin")"
 case ":$PATH:" in
