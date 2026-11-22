@@ -201,7 +201,6 @@ def test_a_new_test_that_never_ran_is_not_a_pass_worth_committing(tmp_path, monk
     assert gate.scoped_redundant("x", [new, skipped_twin]) == ([], [skipped_twin], [new])
 
 
-@pytest.mark.slow("Runs real pytest with xdist and coverage twice to detect duplicates across files")
 def test_a_duplicate_in_another_file_is_found_by_the_scoped_run_worth_committing(tmp_path, monkeypatch):
     (tmp_path / "scripts").mkdir()
     (tmp_path / "tests").mkdir()
