@@ -6,13 +6,16 @@
 //! quit included), brings that one to the front and exits.
 //!
 //! Restarting into an installed update (`relaunch`) asks LaunchServices for
-//! the new instance (`open -n`) instead of spawning it as a child, as Tauri's
+//! the new instance (`open`) instead of spawning the app as a child, as Tauri's
 //! `restart` does: a child is in this instance's coalition, and LaunchServices
 //! keeps an exited app whose coalition still has members in the Dock as
-//! "exited-with-subordinates", with its subordinates (here the new app itself,
-//! and anything else started as a child) killed when that icon is quit. The new
-//! instance is told to wait for this one to exit (`--after-exit-of <pid>`,
-//! `wait_for_exit`) before it claims the app's one place.
+//! "exited-with-subordinates", with its subordinates killed when that icon is
+//! quit. Nor `open -n` while this instance lives: that second instance gets a
+//! Dock tile of its own and keeps it. Instead a short-lived headless helper
+//! (this executable with `--reopen-after-exit-of <pid> <bundle>`, never
+//! reaching any app set-up) waits for this one to exit (`wait_for_exit`), runs
+//! a plain `open <bundle>`, and exits. `--after-exit-of <pid>` is still
+//! honoured for relaunches started by older apps.
 
 #![cfg_attr(not(target_os = "macos"), allow(dead_code))]
 
@@ -24,7 +27,10 @@ use std::process::Command;
 use tauri::{AppHandle, Runtime};
 
 /// The argument the relaunched instance gets, followed by the pid to outlive.
+/// Kept for instances relaunched by an older app (`open -n ... --args --after-exit-of <pid>`).
 pub const AFTER_EXIT_FLAG: &str = "--after-exit-of";
+/// The headless relaunch helper's argument: `<pid> <bundle>` follow (`reopen_after_exit`).
+pub const REOPEN_FLAG: &str = "--reopen-after-exit-of";
 /// The claim's lock file, in brindle's home.
 const LOCK: &str = "app.lock";
 /// How long `wait_for_exit` waits at most: an instance that doesn't exit by then is dealt with by `claim`.
@@ -99,20 +105,49 @@ pub fn take_place(home: &Path, exe: Option<&Path>) -> Place {
     }
 }
 
-/// The command that launches the bundle of `exe` again through LaunchServices,
-/// as a new instance that first waits for `pid` (this one) to exit; None
-/// outside a bundle.
+/// The command that launches the bundle of `exe` again once `pid` (this
+/// instance) has exited; None outside a bundle. It runs `exe` itself as a
+/// headless helper (`REOPEN_FLAG`, see `reopen_after_exit`) that waits for the
+/// exit and only then asks LaunchServices for the bundle with a plain `open`.
+/// Never `open -n`: a second instance started while this one still lives gets
+/// a Dock tile of its own, apart from the person's pinned one, and keeps it.
 pub fn relaunch_command(exe: &Path, pid: u32) -> Option<Command> {
     let bundle = bundle_of(exe)?;
-    let mut cmd = Command::new("/usr/bin/open");
-    cmd.arg("-n").arg(bundle).arg("--args").arg(AFTER_EXIT_FLAG).arg(pid.to_string());
+    let mut cmd = Command::new(exe);
+    cmd.arg(REOPEN_FLAG).arg(pid.to_string()).arg(bundle);
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     Some(cmd)
 }
 
+/// The command that opens `bundle` through LaunchServices as the one instance:
+/// no `-n`, so it takes the app's usual Dock tile.
+pub fn reopen_command(bundle: &Path) -> Command {
+    let mut cmd = Command::new("/usr/bin/open");
+    cmd.arg(bundle);
+    cmd
+}
+
+/// The relaunch helper (`relaunch_command`), handled first thing in the app's
+/// entry point, before any Tauri or AppKit set-up, so it never gets a Dock tile:
+/// for `args` (the process's, program name first) of the form
+/// `<exe> REOPEN_FLAG <pid> <bundle>`, `wait(pid)` until the old instance has
+/// exited, and return the `open <bundle>` to run before this process exits.
+/// None for any other launch, which goes on to start the app.
+pub fn reopen_after_exit(args: &[String], wait: impl FnOnce(u32)) -> Option<Command> {
+    let [_, flag, pid, bundle, ..] = args else { return None };
+    if flag != REOPEN_FLAG {
+        return None;
+    }
+    let pid = pid.parse().ok()?;
+    wait(pid);
+    Some(reopen_command(Path::new(bundle)))
+}
+
 /// Restart the app into the bundle at its path (the update installed there):
-/// on macOS through LaunchServices (`relaunch_command`), so the new instance
-/// is in a coalition of its own and this one leaves nothing behind in the
-/// Dock; elsewhere, or outside a bundle, Tauri's restart.
+/// on macOS through the relaunch helper (`relaunch_command`), which opens the
+/// bundle through LaunchServices once this instance has exited, so the new
+/// instance is in a coalition of its own and keeps the person's Dock tile;
+/// elsewhere, or outside a bundle, Tauri's restart.
 pub fn relaunch<R: Runtime>(app: &AppHandle<R>) {
     #[cfg(target_os = "macos")]
     if let Some(mut cmd) = std::env::current_exe().ok().and_then(|exe| relaunch_command(&exe, std::process::id())) {
@@ -179,13 +214,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn the_relaunch_reopens_the_bundle_without_open_n_after_the_old_instance_exits() {
+        let exe = "/Applications/brindle.app/Contents/MacOS/brindle-desktop";
+        let cmd = relaunch_command(Path::new(exe), 4242).unwrap();
+        // The helper is this executable, not `open -n` (a second Dock tile).
+        assert_eq!(cmd.get_program(), exe);
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_str().unwrap().to_string()).collect();
+        assert_eq!(args, [REOPEN_FLAG, "4242", "/Applications/brindle.app"]);
+        assert!(!args.iter().any(|a| a == "-n"));
+        assert!(relaunch_command(Path::new("/Users/me/brindle/target/debug/brindle-desktop"), 4242).is_none());
+
+        // The helper, given those arguments: waits for that pid, then a plain `open <bundle>`.
+        let argv: Vec<String> = std::iter::once(exe.to_string()).chain(args).collect();
+        let mut waited = None;
+        let open = reopen_after_exit(&argv, |pid| waited = Some(pid)).expect("helper mode");
+        assert_eq!(waited, Some(4242));
+        assert_eq!(open.get_program(), "/usr/bin/open");
+        assert_eq!(open.get_args().collect::<Vec<_>>(), ["/Applications/brindle.app"]);
+        // Any other launch, the old flag included, goes on to start the app, waiting for nothing.
+        for argv in [vec![exe], vec![exe, AFTER_EXIT_FLAG, "4242"], vec![exe, REOPEN_FLAG, "x", "/Applications/brindle.app"]] {
+            let argv: Vec<String> = argv.into_iter().map(String::from).collect();
+            assert!(reopen_after_exit(&argv, |_| panic!("waited outside helper mode")).is_none());
+        }
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
-    fn the_relaunch_is_launchservices_and_waits_for_the_old_instance() {
-        let cmd = relaunch_command(Path::new("/Applications/brindle.app/Contents/MacOS/brindle-desktop"), 4242).unwrap();
-        assert_eq!(cmd.get_program(), "/usr/bin/open");
-        assert_eq!(cmd.get_args().collect::<Vec<_>>(), ["-n", "/Applications/brindle.app", "--args", AFTER_EXIT_FLAG, "4242"]);
-        assert!(relaunch_command(Path::new("/Users/me/brindle/target/debug/brindle-desktop"), 4242).is_none());
+    fn waiting_for_exit_returns_once_the_old_instance_is_gone() {
 
         // The old instance: a process that lives until its stdin closes.
         let mut old = Command::new("/bin/cat").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).spawn().unwrap();

@@ -257,6 +257,20 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // The relaunch helper (instance::relaunch): before anything else, so it never sets up
+    // the app or gets a Dock tile. It waits for the old instance (and a pausing daemon of
+    // its) to exit, opens the bundle as the one instance, and ends.
+    #[cfg(target_os = "macos")]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        let open = instance::reopen_after_exit(&args, |pid| {
+            instance::wait_for_exit(pid);
+            daemon::wait_for_predecessor(pid);
+        });
+        if let Some(mut open) = open {
+            std::process::exit(if open.status().is_ok_and(|status| status.success()) { 0 } else { 1 });
+        }
+    }
     startup::begin();
     #[cfg(unix)]
     raise_open_files();
