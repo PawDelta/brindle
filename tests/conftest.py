@@ -775,6 +775,19 @@ def background_reads_end_with_the_test(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def codex_default_model(monkeypatch):
+    """Unpinned profiles use a known model, independent of the installed CLI.
+
+    Resolver tests can restore the returned function against their own fakes.
+    """
+    from brindle import providers
+
+    resolve = providers.codex_default_model
+    monkeypatch.setattr(providers, "codex_default_model", lambda cwd, *, env=None: "gpt-5.3-codex")
+    return resolve
+
+
+@pytest.fixture(autouse=True)
 def cli_sign_in_unknown(monkeypatch):
     """No test asks the real claude or codex whether they're signed in (the
     temporary CLAUDE_CONFIG_DIR would say no); tests/test_signin.py fakes it."""

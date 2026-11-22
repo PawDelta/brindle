@@ -1404,7 +1404,9 @@ def test_start_trusts_the_hook_and_says_so_once(ws, monkeypatch, capsys):
     turn_on(ws)
     cli._trust_codex_hook(ws.repo_root)
     assert codex_hook.status() == codex_hook.TRUSTED
-    assert "trusted brindle's Codex permission hook" in capsys.readouterr().out
+    output = capsys.readouterr().out
+    assert "trusted brindle's Codex permission hook" in output
+    assert str(codex_hook.codex_home() / "config.toml") in output
     cli._trust_codex_hook(ws.repo_root)
     assert capsys.readouterr().out == ""
 
