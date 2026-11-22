@@ -62,6 +62,7 @@ import time
 from typing import Callable
 
 from brindle.learning import LearningPlugin, Outcome, TaskInfo
+from brindle.model_names import canonical
 from brindle.pro.features import KIND_WORDS, SIZES, count_parts, featurize
 from brindle.pro.orgkey import OrgKey, OrgKeys, repo_identity
 
@@ -78,7 +79,7 @@ DAILY_LIMIT_BACKOFF = 3600.0   # after the repo's daily event cap
 WEIGHTS = ("light", "medium", "heavy", "advanced")
 EVENTS = ("reported", "review", "escalated", "merged", "removed_unmerged", "verdict", "no_verdict",
           "interrupted")
-PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")   # dots: dev.gpt-sol, review.gpt.low
 MAX_CANDIDATES = 16
 
 TERMINAL = ("merged", "removed_unmerged", "verdict", "no_verdict", "interrupted")
@@ -223,13 +224,15 @@ def record_payload(key: OrgKey, identity: str, task: TaskInfo, outcome: Outcome,
 
 def _record_body(key: OrgKey, identity: str, task: TaskInfo, outcome: Outcome,
                  review_rounds: int, escalations: int, decision, cost) -> dict | None:
-    if not task.profile or not PROFILE_RE.match(task.profile) or outcome.event not in EVENTS:
+    # History is kept under a profile's current id: one recorded under an old built-in id counts for the new one.
+    profile = canonical(task.profile or "")
+    if not profile or not PROFILE_RE.match(profile) or outcome.event not in EVENTS:
         return None
     body = {
         "org_id": key.org_id,
         "key_id": key.key_id,
         "repo_key": key.repo_key(identity),
-        "profile": task.profile,
+        "profile": profile,
         "weight": _weight(task),
         "features": one_hot(task),
         "event": outcome.event,
@@ -251,6 +254,8 @@ def _record_body(key: OrgKey, identity: str, task: TaskInfo, outcome: Outcome,
         body["cause"] = cause
     handovers = _count(getattr(outcome, "handovers", 0), 50)
     handed_from = getattr(outcome, "handed_from", None)
+    if isinstance(handed_from, str):
+        handed_from = canonical(handed_from)
     if (outcome.event == "merged" and handovers and isinstance(handed_from, str)
             and PROFILE_RE.match(handed_from)):
         body.update(handovers=handovers, handed_from=handed_from)
@@ -277,9 +282,11 @@ def _record_body(key: OrgKey, identity: str, task: TaskInfo, outcome: Outcome,
                                       _count(getattr(decision, "escalations", 0), 50))
     if outcome.event in WORKER_TERMINAL and decision is not None and cost is not None:
         baseline = getattr(decision, "baseline_profile", None)
+        if isinstance(baseline, str):
+            baseline = canonical(baseline)
         if isinstance(baseline, str) and PROFILE_RE.match(baseline):
             try:
-                ranks = (_count(cost(task.profile), 16), _count(cost(baseline), 16))
+                ranks = (_count(cost(profile), 16), _count(cost(baseline), 16))
             except Exception:  # noqa: BLE001 - no savings fields rather than a failed record
                 return body
             body.update(baseline_profile=baseline, learned=bool(getattr(decision, "learned", False)),
@@ -574,14 +581,20 @@ class CloudLearner(LearningPlugin):
         identity = self.identity() if org else None
         if org is None or identity is None:
             return None
-        body = suggest_payload(self.key(org), identity, task, candidates, self.cost, default,
-                               signals=self.signals)
+        # The server knows profiles by their current ids: an old built-in id is sent
+        # as its renamed one, and the server's pick goes back to the caller's spelling.
+        spelled: dict[str, str] = {}
+        for c in candidates:
+            spelled.setdefault(canonical(c), c)
+        body = suggest_payload(self.key(org), identity, task, list(spelled), self.cost,
+                               canonical(default), signals=self.signals)
         if body is None:
             return None
         resp = self._post(org, "/learning/suggest", body)
         pick = resp.get("profile")
-        if pick not in candidates:
+        if pick not in spelled:
             return None
+        pick = spelled[pick]
         if resp.get("overrode") is not True or pick == default:
             note = resp.get("note")
             return default, None, False, (note[:200] if isinstance(note, str) and note else None)

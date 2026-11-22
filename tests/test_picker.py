@@ -259,14 +259,14 @@ def test_workers_screen_checks_and_stores_a_hosted_key(monkeypatch):
 
 @pytest.mark.variant("the launch-time access re-check is the user-mandated guard that a saved worker pick the org no longer allows is never used")
 @pytest.mark.parametrize("pick, signed_in, access, light", [
-    ("codex", ["codex"], {}, ["developer-codex"]),
+    ("codex", ["codex"], {}, ["dev.gpt"]),
     ("codex", [], {}, None),
     ("codex", ["codex"], dict(allowed_providers=("claude",)), None),       # the org narrowed since the pick
     ("codex", ["codex"], dict(allowed_models=("claude-sonnet-4-6",)), None),  # a CLI whose profile names no model
-    ("claude-haiku", ["claude"], dict(allowed_models=("claude-haiku-5-5",)), ["developer-light"]),  # the profile's haiku
+    ("claude-haiku", ["claude"], dict(allowed_models=("claude-haiku-5-5",)), ["dev.claude-haiku"]),  # the profile's haiku
     ("claude-sonnet", ["claude"], dict(allowed_models=("claude-sonnet-4-5",)), None),   # developer runs 4-6
-    ("claude-sonnet", ["claude"], dict(allowed_profiles=("developer-light",)), None),
-    ("local-qwen3-coder", [], {}, ["developer-local"]),                    # Ollama is probed once when ready
+    ("claude-sonnet", ["claude"], dict(allowed_profiles=("dev.claude-haiku",)), None),
+    ("local-qwen3-coder", [], {}, ["dev.qwen3-coder"]),                    # Ollama is probed once when ready
     ("local-qwen3-coder", [], {}, None),                                   # ...and again when it wasn't
 ])
 def test_workers_launch_falls_back_when_a_pick_is_not_ready(db, repo, monkeypatch, capsys, pick, signed_in, access,

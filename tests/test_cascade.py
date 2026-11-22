@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from brindle import agents, autopilot, plugins, policy, providers, quota, routing_goal, workspaces
+from brindle import agents, autopilot, cascade, plugins, policy, providers, quota, routing_goal, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from brindle.profiles import load_profile
@@ -102,7 +102,28 @@ def test_the_measured_table_orders_runnable_candidates_and_unmeasured_keep_tier_
         monkeypatch.setattr(routing_goal, "priors", priors)
         picks.append(autopilot.choose_profile(db, "boss", str(repo), None, "task", None, "medium", goal=goal)[0])
     # Under min_runs Codex counts as not measured: tier order wins.
-    assert picks == ["developer-codex"] + ["developer-sonnet"] * 4
+    assert picks == ["dev.gpt"] + ["dev.claude-sonnet"] * 4
+
+
+def test_measured_history_under_an_old_id_counts_for_its_renamed_profile():
+    # _table keys its measured cells by the old id; the renamed profile reads them.
+    table = cascade.parse(_table(50))
+    assert table.cell("dev.gpt", "medium")["runs"] == 50
+    assert table.cell("developer-codex", "medium")["runs"] == 50
+
+
+@pytest.mark.parametrize("old_first", [True, False])
+def test_mixed_old_and_new_id_history_keeps_both_halves_in_either_order(old_first):
+    old = {"developer-codex": {"medium": {"p": 0.9, "first_try": 0.5, "usd": 1.0, "minutes": 20, "runs": 50}}}
+    new = {"dev.gpt": {"medium": {"p": 0.6, "first_try": 0.5, "usd": 100.0, "minutes": 100, "runs": 2}}}
+    raw = _table(50)
+    raw["profiles"] = {**old, **new} if old_first else {**new, **old}
+
+    cell = cascade.parse(raw).cell("dev.gpt", "medium")
+    assert cell["runs"] == 52
+    assert cell["p"] == pytest.approx((0.9 * 50 + 0.6 * 2) / 52)
+    # The medians come from the larger sample, not an average of the two medians.
+    assert cell["usd"] == 1.0 and cell["minutes"] == 20
 
 
 def test_a_table_built_from_records_with_near_zero_minutes_still_orders(db, repo, boss, monkeypatch):
@@ -118,11 +139,11 @@ def test_a_table_built_from_records_with_near_zero_minutes_still_orders(db, repo
     assert table["profiles"]["developer-codex"]["medium"]["minutes"] == 0
     monkeypatch.setattr(routing_goal, "priors", lambda: table)
     config(repo, learning="off", routing={"medium": ["developer-sonnet", "developer-codex"]})
-    assert autopilot.choose_profile(db, "boss", str(repo), None, "task", None, "medium")[0] == "developer-codex"
+    assert autopilot.choose_profile(db, "boss", str(repo), None, "task", None, "medium")[0] == "dev.gpt"
 
 
 @pytest.mark.parametrize("refused,reason", [
-    pytest.param({"developer-codex"}, "", marks=pytest.mark.variant(
+    pytest.param({"dev.gpt"}, "", marks=pytest.mark.variant(
         "a denial with no reason text must still count as a denial, not an approval")),
     pytest.param(None, "nothing today", marks=pytest.mark.variant(
         "every candidate refused: routing must refuse as policy does, not return a forbidden profile")),
@@ -144,8 +165,8 @@ def test_a_candidate_the_policy_refuses_is_replaced_by_one_it_allows(db, repo, b
             autopilot.choose_profile(db, "boss", str(repo), None, "task", None, "medium", why)
         return
     assert autopilot.choose_profile(db, "boss", str(repo), None, "task", None, "medium", why)[0] \
-        == "developer-sonnet"
-    assert "refused by policy" in why[0] and "skipped developer-codex" in why[0]
+        == "dev.claude-sonnet"
+    assert "refused by policy" in why[0] and "skipped dev.gpt" in why[0]
 
 
 class _EP:
@@ -159,9 +180,9 @@ class _EP:
 
 
 @pytest.mark.parametrize("tier_out,default", [
-    pytest.param(True, "developer-heavy", marks=pytest.mark.variant(
+    pytest.param(True, "dev.claude-opus", marks=pytest.mark.variant(
         "with the tier's own candidate out, the learner's default is the first replacement, not the unrunnable pick")),
-    pytest.param(False, "developer-sonnet", marks=pytest.mark.variant(
+    pytest.param(False, "dev.claude-sonnet", marks=pytest.mark.variant(
         "a runnable tier must not hide unmeasured replacements from the learner's evidence")),
 ])
 def test_the_learner_chooses_among_every_replacement(db, repo, boss, monkeypatch, tier_out, default):
@@ -171,13 +192,13 @@ def test_the_learner_chooses_among_every_replacement(db, repo, boss, monkeypatch
     if tier_out:
         unavailable = autopilot._unavailable
         monkeypatch.setattr(autopilot, "_unavailable", lambda name, *args: "unavailable"
-                            if name == "developer-sonnet" else unavailable(name, *args))
-    config(repo, learning="cloud", routing={"medium": ["developer-sonnet"]})
+                            if name == "dev.claude-sonnet" else unavailable(name, *args))
+    config(repo, learning="cloud", routing={"medium": ["developer-sonnet"]})   # an old id in config still routes
     monkeypatch.setattr(routing_goal, "priors", lambda: {**_table(50), "profiles": {}})   # nothing measured
-    picker = Picker(prefer="developer-codex")
+    picker = Picker(prefer="dev.gpt")
     plugins.reset()
     monkeypatch.setattr(pro_learning, "CloudLearner", lambda repo_root: picker)
     # The default is the tier's (or, with it out, the first replacement); the learner favours a later one.
     assert autopilot.choose_profile(db, "boss", str(repo), None, "task", None, "medium") \
-        == ("developer-codex", True)
-    assert picker.defaults == [default] and "developer-codex" in picker.asked[0][1]
+        == ("dev.gpt", True)
+    assert picker.defaults == [default] and "dev.gpt" in picker.asked[0][1]

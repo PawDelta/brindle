@@ -67,6 +67,7 @@ from brindle import (
     savings, session_sync, tasks, workspaces,
 )
 from brindle.config import RepoConfig, load_repo_config
+from brindle.model_names import canonical
 from brindle.db import DB, Agent, Review, Workspace
 
 log = logging.getLogger(__name__)
@@ -485,7 +486,10 @@ def second_profile(db: DB, cfg: RepoConfig, worker: Agent, ws: Workspace) -> str
         return None
     weight = next((t.weight for t in db.list_tasks(ws.repo_root) if t.agent_id == worker.id), None)
     profile = cfg.second_review.get(weight or "")
-    if not profile or profile == agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task):
+    from brindle.profiles import current_name
+
+    primary = agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task)
+    if not profile or current_name(profile, ws.repo_root) == current_name(primary, ws.repo_root):
         return None
     return profile
 
@@ -502,10 +506,19 @@ def second_review_pending(db: DB, cfg: RepoConfig, worker: Agent, ws: Workspace)
     # An approval in each slot: the commit's review ("") and the second
     # review's (its profile). Two in one slot are one review.
     # From the reviews row first: the reviewer's own row is deleted once it's closed.
-    slots = {r.review_slot if r.review_slot is not None
-             else _review_slot(db, a) if (a := db.get_agent(r.reviewer_id)) is not None else None
+    slots = {_slot(r.review_slot if r.review_slot is not None
+                   else _review_slot(db, a) if (a := db.get_agent(r.reviewer_id)) is not None else None,
+                   ws.repo_root)
              for r in reviews if r.reviewer_id}
-    return not {"", profile} <= slots
+    return not {"", _slot(profile, ws.repo_root)} <= slots
+
+
+def _slot(slot: str | None, repo_root: str) -> str | None:
+    """A review slot as its current profile id: a slot saved under an old
+    built-in id (before the rename) matches the renamed profile's slot."""
+    from brindle.profiles import current_name
+
+    return slot if not slot else current_name(slot, repo_root)
 
 
 def _review_slot(db: DB, reviewer: Agent) -> str | None:
@@ -936,27 +949,28 @@ def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
     falling back to ``cfg.reviewer``."""
     if cfg.review_profile:
         return cfg.review_profile, f"using {cfg.review_profile} (pinned by review_profile)"
-    default = cfg.reviewer or "reviewer-sonnet-high"
-    if default != "reviewer-sonnet-high" or _repo_pins_reviewer(repo_root):
+    default = cfg.reviewer or "review.claude-sonnet.high"
+    if default != "review.claude-sonnet.high" or _repo_pins_reviewer(repo_root):
         return default, f"using {default} (pinned by reviewer config)"
     from brindle import autopilot, pricing, profiles, review_scope
 
-    allow_local = "reviewer-local" in (
-        *cfg.learning_candidates,
-        *cfg.second_review.values(),
-        *cfg.routing.get("light", ()),
+    allow_local = "review.qwen3-coder" in (
+        *(canonical(n) for n in cfg.learning_candidates),
+        *(canonical(n) for n in cfg.second_review.values()),
+        *(canonical(n) for n in cfg.routing.get("light", ())),
     )
     names = [
         p.name for p in profiles.list_profiles(repo_root)
-        if (p.name == "reviewer" or p.name.startswith("reviewer-"))
-        and (allow_local or p.name != "reviewer-local")
+        if (p.name == "reviewer" or p.name.startswith(("reviewer-", "review.")))
+        and (allow_local or p.name != "review.qwen3-coder")
         # Built-in sizing profiles need risk/vendor checks. Keep custom profiles
         # with these names eligible, as they were before sizing was introduced.
         and not (p.name in (review_scope.LIGHT_PROFILE, review_scope.CODEX_LIGHT_PROFILE)
                  and profiles.profile_source(p.name, repo_root) == f"built-in profile {p.name}")
     ]
     for extra in (*cfg.routing.get("light", ()), *cfg.learning_candidates):
-        if extra.startswith("reviewer") and extra not in names and (allow_local or extra != "reviewer-local"):
+        extra = canonical(extra)
+        if extra.startswith(("reviewer", "review.")) and extra not in names and (allow_local or extra != "review.qwen3-coder"):
             names.append(extra)
     rank_of = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3}
     scored: list[tuple[tuple[int, float, int], str, str]] = []
@@ -1132,7 +1146,8 @@ def _other_provider_reviewers(db: DB, cfg: RepoConfig, reviewer: Agent, ws: Work
              and a.review_sha == sha and a.result is None and agents.alive_or_starting(a)}
     locked = bool(cfg.routing_locked.get("reviewer"))
     own = (cfg.review_profile, cfg.reviewer, *cfg.reviewer_fallbacks)
-    pool = [n for n in dict.fromkeys((*own, *(() if locked else cascade.REVIEWERS))) if n and n not in taken]
+    pool = [n for n in dict.fromkeys(canonical(x) for x in (*own, *(() if locked else cascade.REVIEWERS)) if x)
+            if n not in taken]
 
     def why_not(name: str) -> str | None:
         try:
@@ -1415,13 +1430,13 @@ def _review_round_pending(db: DB, ws: Workspace, worker: Agent, cfg: RepoConfig,
                           sha: str, reviews: list[Review]) -> bool:
     """Wait for each configured or already-started review slot to give a verdict."""
     second = second_profile(db, cfg, worker, ws)
-    expected = {"", second} if second else set()
+    expected = {"", _slot(second, ws.repo_root)} if second else set()
     latest: dict[str, Agent] = {}
     for a in sorted(db.list_agents(ws.id), key=lambda a: a.created_at):
         if a.mode == "review" and a.review_sha == sha and (slot := _review_slot(db, a)) is not None:
-            latest[slot] = a
+            latest[_slot(slot, ws.repo_root)] = a
     expected.update(latest)
-    completed = {r.review_slot for r in reviews}
+    completed = {_slot(r.review_slot, ws.repo_root) for r in reviews}
     return not expected <= completed or any(
         not any(r.reviewer_id == a.id for r in reviews) for a in latest.values())
 
@@ -1867,7 +1882,7 @@ def _light_profile(db: DB, parent: Agent | None, ws: Workspace, cfg: RepoConfig,
         return cfg.default_agent
 
 
-ESCALATION_PROFILE = "developer-heavy"
+ESCALATION_PROFILE = "dev.claude-opus"
 CLOUD_ENV = ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
 
 

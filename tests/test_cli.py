@@ -82,7 +82,7 @@ def test_ls_json(db, repo, monkeypatch):
     # No tmux window, so the agent reads as exited.
     assert entry["agents"] == [
         {"id": "a1", "profile": "developer", "provider": "claude", "status": "exited", "mode": "interactive",
-         "accepts_files": True}
+         "accepts_files": True, "model_display": "Claude"}
     ]
 
 

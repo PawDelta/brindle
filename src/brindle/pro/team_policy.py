@@ -1277,7 +1277,7 @@ class ProPolicy(PolicyPlugin):
                        else "set `model` in the profile")
                 return deny(model_refusal(p.org_id, p.allowed_models, got, who=who, fix=fix,
                                           store=self._store, client=self._client))
-        if p.allowed_profiles is not None and info.profile not in p.allowed_profiles:
+        if p.allowed_profiles is not None and not _listed(info.profile, p.allowed_profiles, self.repo_root):
             got = who if info.profile else "a delegation with no profile"
             return deny(f"{got} is not allowed; org {p.org_id} allows only "
                         f"{', '.join(p.allowed_profiles) or 'no profiles'} for you")
@@ -1357,6 +1357,17 @@ def model_allowed(allowed: tuple[str, ...] | None, model: str | None, pinned: st
     return bool(pinned) and pinned in allowed
 
 
+def _listed(profile: str, allowed, repo_root: str | None) -> bool:
+    """Whether ``profile`` is on an org's allowlist. An old built-in id on the
+    list allows the renamed profile it now names in ``repo_root``, unless that
+    repo (or the person, or the org) has a custom profile under the old name,
+    which is a different profile and stays distinct."""
+    from brindle.profiles import current_name
+
+    want = current_name(profile, repo_root)
+    return any(a == profile or current_name(a, repo_root) == want for a in allowed)
+
+
 @dataclass(frozen=True)
 class Access:
     """The CLIs, models and profiles this person may use here: the org's
@@ -1374,6 +1385,7 @@ class Access:
     unrouted: dict = field(default_factory=dict)        # CLI -> why the managed routing refuses it
     error: str | None = None
     agent_setup: AgentSetup | None = None               # its Claude route may pin an alias to an allowed id
+    repo_root: str | None = None                        # the repo whose custom profiles shadow old ids
     routing_goal: object | None = None                  # brindle.routing_goal.OrgGoal, or None
 
     def pinned(self, provider: str | None, model: str | None) -> str | None:
@@ -1409,7 +1421,7 @@ class Access:
         as ``policy._profile_fields`` resolves them) may start: check_assign's
         provider, model and profile tests."""
         return (bool(provider) and self.allows(provider) and self.allows_run(provider, model)
-                and (self.allowed_profiles is None or profile in self.allowed_profiles))
+                and (self.allowed_profiles is None or _listed(profile, self.allowed_profiles, self.repo_root)))
 
     def clis(self) -> list[str]:
         """The CLIs to offer: every supervisor CLI when nothing narrows the
@@ -1445,7 +1457,7 @@ def access(repo_root: str | None) -> Access:
     return Access(org_id=p.org_id, allowed_providers=p.allowed_providers,
                   allowed_models=p.allowed_models, allowed_profiles=p.allowed_profiles,
                   deny_personal_keys=deny_keys, unrouted=unrouted, agent_setup=p.agent_setup,
-                  routing_goal=p.routing_goal)
+                  routing_goal=p.routing_goal, repo_root=repo_root)
 
 
 def make(repo_root: str) -> ProPolicy:

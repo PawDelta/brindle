@@ -118,7 +118,7 @@ def served(profile: Profile, timeout: float = 1.0) -> bool:
     return ok and "is available" in detail
 
 
-LOCAL_PROFILE = "developer-local"   # the local model a hosted model's refusal is retried on
+LOCAL_PROFILE = "dev.qwen3-coder"   # the local model a hosted model's refusal is retried on
 
 
 def refusal_fallback(endpoint: Endpoint, repo_root: str | None = None) -> Endpoint | None:

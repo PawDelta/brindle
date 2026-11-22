@@ -138,7 +138,7 @@ def merged(repo):
 @pytest.mark.parametrize("moved", [True])
 def test_a_weight_without_a_second_reviewer_gets_one_review(db, repo, piped, moved):
     setup, started = piped
-    ws = setup(second={"heavy": "reviewer-codex"}, weight="light")
+    ws = setup(second={"heavy": "review.gpt"}, weight="light")
     agents.report_result(db, "w1", "added new.py")
     assert started == [None]
     if moved:   # the branch moves on, and is reported again, before rev0's verdict lands
@@ -163,9 +163,9 @@ def test_a_weight_without_a_second_reviewer_gets_one_review(db, repo, piped, mov
 
 def test_second_review_needs_both_approvals_before_it_merges(db, repo, piped):
     setup, started = piped
-    ws = setup(second={"heavy": "reviewer-codex"})
+    ws = setup(second={"heavy": "review.gpt"})
     agents.report_result(db, "w1", "added new.py")
-    assert started == ["reviewer-sonnet-high", "reviewer-codex"]   # both carry a concrete profile
+    assert started == ["review.claude-sonnet.high", "review.gpt"]   # both carry a concrete profile
     agents.submit_review(db, "rev0", True, "lgtm")
     assert not merged(repo) and db.get_agent("w1").pipeline == "reviewing"
     agents.submit_review(db, "rev1", True, "also lgtm")
@@ -178,7 +178,7 @@ def test_second_review_needs_both_approvals_before_it_merges(db, repo, piped):
 ])
 def test_the_second_reviewer_approving_first_still_waits_for_the_other(db, repo, piped, slot):
     setup, started = piped
-    setup(second={"heavy": "reviewer-codex"})
+    setup(second={"heavy": "review.gpt"})
     agents.report_result(db, "w1", "added new.py")
     if slot is not None:
         # #216: a fallback and a late original verdict can both approve the
@@ -199,7 +199,7 @@ def test_either_reviewer_asking_for_changes_blocks_the_merge(db, repo, piped, mo
     """#216: only a new verdict in the rejected slot can replace its rejection,
     even when the replacement reviewer uses the other slot's profile."""
     setup, _started = piped
-    ws = setup(second={"heavy": "reviewer-codex"})
+    ws = setup(second={"heavy": "review.gpt"})
     db.update_agent("w1", result="added new.py", pipeline="reviewing")
     monkeypatch.setattr(agents, "request_review", REAL_REQUEST_REVIEW)
     spawned = []
@@ -213,8 +213,8 @@ def test_either_reviewer_asking_for_changes_blocks_the_merge(db, repo, piped, mo
     monkeypatch.setattr(agents, "_review_profile", lambda db_, ws_, profile, cfg: profile or "reviewer")
     monkeypatch.setattr(agents, "_review_kill_switch", lambda ws_: None)
     boss, cfg = db.get_agent("boss"), config.load_repo_config(repo)
-    rejected_profile = "reviewer-codex" if rejected_second else "reviewer"
-    other_profile = "reviewer" if rejected_second else "reviewer-codex"
+    rejected_profile = "review.gpt" if rejected_second else "reviewer"
+    other_profile = "reviewer" if rejected_second else "review.gpt"
     rejected = agents.request_review(db, boss, ws, rejected_profile, cfg=cfg, second=rejected_second)
     agents.submit_review(db, rejected.id, False, "missing a test")
     assert db.get_agent("w1").pipeline == "fixing"
@@ -222,7 +222,7 @@ def test_either_reviewer_asking_for_changes_blocks_the_merge(db, repo, piped, mo
     agents.submit_review(db, other.id, True, "lgtm")   # a late approval can't outvote it
     assert not merged(repo) and db.get_agent("w1").pipeline == "fixing"
     assert db.latest_review(ws.id, gates.head(ws)) is not None
-    again = agents.request_review(db, boss, ws, "reviewer-codex", cfg=cfg, second=rejected_second)
+    again = agents.request_review(db, boss, ws, "review.gpt", cfg=cfg, second=rejected_second)
     assert spawned == ["s0", "s1", "s2"] and again.id == "s2"
     agents.submit_review(db, again.id, True, "test added")
     assert merged(repo)
@@ -234,7 +234,7 @@ def test_both_reviewers_asking_for_changes_is_one_fix_round(db, repo, piped):
     count one round: the second must not bring the cap, or the tests-only
     waiver, a round early."""
     setup, _ = piped
-    setup(second={"heavy": "reviewer-codex"})
+    setup(second={"heavy": "review.gpt"})
     agents.report_result(db, "w1", "added new.py")
     agents.submit_review(db, "rev0", False, "missing a test")
     agents.submit_review(db, "rev1", False, "new.py:1 is wrong")
@@ -263,7 +263,7 @@ def test_both_reviewers_start_even_with_checks(db, repo, piped, monkeypatch):
     from brindle.pro import analysis_brief
 
     setup, _ = piped
-    ws = setup(second={"heavy": "reviewer-codex"})
+    ws = setup(second={"heavy": "review.gpt"})
     cfg = json.loads((repo / ".brindle" / "config.json").read_text())
     (repo / ".brindle" / "config.json").write_text(json.dumps({**cfg, "checks": ["true"]}))
     # The real request_review, not the fixture's fake. Never monkeypatch.undo():
@@ -288,14 +288,14 @@ def test_both_reviewers_start_even_with_checks(db, repo, piped, monkeypatch):
     monkeypatch.setattr(analysis_brief, "review_context", lambda *a, **kw: ("brief", cited))
     parent = db.get_agent("boss")
     agents.start_review(db, parent, ws, "reviewer", None, cfg)
-    agents.start_review(db, parent, ws, "reviewer-codex", None, cfg, second=True)
+    agents.start_review(db, parent, ws, "review.gpt", None, cfg, second=True)
     assert len(detached) == 2 and spawned == []   # neither swallowed by the other's process
     # Whichever detached process gets there first, the other still isn't deduped away.
-    agents.review_after_checks(db, "boss", ws, "reviewer-codex", cfg=cfg,
+    agents.review_after_checks(db, "boss", ws, "review.gpt", cfg=cfg,
                                request_id=detached[1][-1], second=True)
     agents.review_after_checks(db, "boss", ws, "reviewer", cfg=cfg,
                                request_id=detached[0][-1])
-    assert sorted(spawned) == ["reviewer", "reviewer-codex"]
+    assert sorted(spawned) == ["review.gpt", "reviewer"]
     assert (analysis_brief.SESSION_DOC_ITEM, "review-doc", "4") in knowledge.receipt(db, "boss")
     assert (analysis_brief.DOC_ITEM, "review-doc", "4") in knowledge.receipt(db, "s0")
 
@@ -330,7 +330,7 @@ def suggestions(db, repo, second=None, **kw):
 
 def test_no_escapes_over_twenty_merges_suggests_dropping_the_second_review(db, repo, pro):
     seed(db, repo, "heavy", 20)
-    assert suggestions(db, repo, {"heavy": "reviewer-codex"}) == [
+    assert suggestions(db, repo, {"heavy": "review.gpt"}) == [
         'drop the second review for heavy (20 merges, no escapes in 90 days): '
         'remove "heavy" from "second_review"']
 
@@ -352,5 +352,5 @@ def test_cost_report_shows_the_suggestions_and_leaves_config_alone(db, repo, pro
     seed(db, repo, "heavy", 10, escaped=2)
     text = cost.describe_report(cost.report(db, str(repo)), str(repo))
     assert 'Review depth suggestions' in text
-    assert '"second_review": {"heavy": "reviewer-codex"}' in text
+    assert '"second_review": {"heavy": "review.gpt"}' in text
     assert not (repo / ".brindle" / "config.json").exists()

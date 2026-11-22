@@ -11,8 +11,8 @@ from brindle.config import RepoConfig
 from brindle.db import Workspace
 
 
-LIGHT_PROFILE = "reviewer-light"
-CODEX_LIGHT_PROFILE = "reviewer-codex-light"
+LIGHT_PROFILE = "review.claude-sonnet.low"
+CODEX_LIGHT_PROFILE = "review.gpt.low"
 DIFF_CHARS = 32000
 CALLER_CHARS = 6000
 MAX_SYMBOLS = 30

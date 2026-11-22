@@ -1,8 +1,9 @@
 ---
-name: reviewer-codex-light
-description: Reviews small branches with the existing Codex model at low effort
-extends: reviewer-codex
-provider: codex
+name: review.claude-sonnet.low
+description: Reviews small or docs/test-only branches with Sonnet at low effort
+extends: reviewer
+provider: claude
+model: sonnet
 effort: low
 ---
 Use the scoped context pack in your task as the starting point. Read beyond

@@ -1131,7 +1131,7 @@ def doctor(
             except typer.Abort:
                 return False
 
-        for line in doctor_mod.fix(ask):
+        for line in doctor_mod.fix(ask, os.getcwd()):
             typer.echo(line)
 
     results = []

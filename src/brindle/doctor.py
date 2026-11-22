@@ -400,15 +400,20 @@ def _gemini_key_present() -> bool:
         return False
 
 
-def fix(confirm) -> list[str]:
+def fix(confirm, repo_root: str | None = None) -> list[str]:
     """`brindle doctor --fix`: offer to let Claude Code use an exported
     ANTHROPIC_API_KEY without its approval question. ``confirm(prompt)``
     answers; declining (or nothing to do) leaves Claude Code's config alone.
     Also offers to set agy's ``"modelProvider": "gemini"`` when a Gemini key
-    exists that agy would ignore. Returns the lines to print."""
+    exists that agy would ignore, and to rewrite old built-in profile ids in
+    the config files (the person's, and ``repo_root``'s). Returns the lines to print."""
     from brindle import company_login, providers
 
     lines: list[str] = []
+    for path in _profile_config_files(repo_root):
+        found = _old_profile_ids(path, repo_root)
+        if found:
+            _rewrite_profile_ids(path, found, confirm, lines, repo_root)
     # Self-serve setup asks only on a terminal. What it found and its menu print
     # at once (before the question, not at the end); only an applied setup adds
     # result lines, so keeping the personal setup leaves "nothing to fix".
@@ -501,6 +506,66 @@ def _legacy_checks(repo_root: str | None) -> list[Check]:
     return [Check(WARN, "previous name", line) for line in legacy.findings(repo_root)]
 
 
+def _profile_config_files(repo_root: str | None) -> list[Path]:
+    """The config files a profile id can be named in: the person's, and the repo's."""
+    from brindle.config import CONFIG_DIR, CONFIG_FILE, LOCAL_CONFIG_FILE, user_config_path
+
+    paths = [user_config_path()]
+    if repo_root:
+        paths += [Path(repo_root) / CONFIG_DIR / CONFIG_FILE, Path(repo_root) / CONFIG_DIR / LOCAL_CONFIG_FILE]
+    return [p for p in paths if p.is_file()]
+
+
+def _custom_old_ids(repo_root: str | None) -> frozenset:
+    """Old built-in ids that a custom profile (the person's, the repo's or the org's) still owns: those keep their names."""
+    from brindle import model_names
+    from brindle.profiles import current_name
+
+    return frozenset(o for o in model_names.ALIASES if current_name(o, repo_root) == o)
+
+
+def _old_profile_ids(path: Path, repo_root: str | None) -> dict[str, str]:
+    """``{old: new}`` for the old built-in profile ids ``path`` names; {} when it names none or can't be read."""
+    import json
+
+    from brindle import model_names
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return model_names.rename_in_config(data, _custom_old_ids(repo_root))[1]
+
+
+def _profile_id_checks(repo_root: str | None) -> list[Check]:
+    out = []
+    for path in _profile_config_files(repo_root):
+        found = _old_profile_ids(path, repo_root)
+        if found:
+            names = ", ".join(f"{old} -> {new}" for old, new in sorted(found.items()))
+            out.append(Check(WARN, "profile ids", f"{path} names old profile ids ({names}); "
+                                                  "`brindle doctor --fix` offers to rewrite them"))
+    return out
+
+
+def _rewrite_profile_ids(path: Path, done: dict[str, str], confirm, lines: list[str], repo_root: str | None) -> None:
+    """Rewrite the old ids in ``path`` once the person says so; written to a temp file, then moved into place."""
+    import json
+
+    from brindle import model_names
+
+    if not confirm(f"Rewrite old profile ids in {path} ({', '.join(f'{o} -> {n}' for o, n in sorted(done.items()))})?"):
+        return
+    data = json.loads(path.read_text(encoding="utf-8"))
+    new, _ = model_names.rename_in_config(data, _custom_old_ids(repo_root))
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(new, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    lines.append(f"rewrote {len(done)} old profile id(s) in {path}")
+
+
 def _steps(repo_root: str | None, db: DB | None) -> list[tuple[str, object, float]]:
     """Every check, in the order doctor shows them: (name, function, seconds)."""
     tool = lambda *a, **k: (lambda: [_tool(*a, **k)])   # noqa: E731
@@ -541,6 +606,7 @@ def _steps(repo_root: str | None, db: DB | None) -> list[tuple[str, object, floa
         ("brindle Pro", pro_checks, CHECK_SECONDS),
         ("managed models", lambda: managed_checks(repo_root), CHECK_SECONDS),
         ("previous name", lambda: _legacy_checks(repo_root), CHECK_SECONDS),
+        ("profile ids", lambda: _profile_id_checks(repo_root), CHECK_SECONDS),
         ("brindle home", lambda: _home_check(db), CHECK_SECONDS),
         ("tmux focus-events", _tmux_server_check, CHECK_SECONDS),
         ("leftover processes", lambda: _process_check(db), CHECK_SECONDS),

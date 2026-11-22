@@ -293,7 +293,7 @@ def setup_model(
     server = serve.Server(
         host=serve._host(host),
         models=[model],
-        profiles=["developer-local"],
+        profiles=["dev.qwen3-coder"],
         context_tokens=context_tokens,
     )
     if not serve.reachable(server):

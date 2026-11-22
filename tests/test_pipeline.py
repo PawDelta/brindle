@@ -83,7 +83,7 @@ def test_dead_reviewer_restarts_once_then_needs_the_person(db, repo, monkeypatch
     elif guard == "running":
         add(db, ws, "other", "review", "reviewer", parent="boss", review_sha=sha)
     elif guard == "queued":
-        agents._review_request_file(ws.id, "reviewer-gemini").write_text(f"queued\n{sha}\n{time.time()}\n")
+        agents._review_request_file(ws.id, "review.gemini").write_text(f"queued\n{sha}\n{time.time()}\n")
     elif guard == "moved":
         db.update_agent("rev0", review_sha="old-commit")
     elif guard == "standalone":
@@ -181,7 +181,7 @@ def test_reviewer_dead_of_provider_failure_moves_to_another_provider(db, repo, m
     ws = workspaces.create(db, str(repo), "feat").workspace
     sha = gates.head(ws)
     add(db, ws, "w1", "assign", parent="boss", result="done", pipeline="reviewing")
-    add(db, ws, "rev0", "review", "reviewer-codex", parent="boss", review_sha=sha)
+    add(db, ws, "rev0", "review", "review.gpt", parent="boss", review_sha=sha)
     db.update_agent("rev0", provider="codex", review_slot="", status="processing", created_at=1)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: False)
     monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
@@ -229,7 +229,7 @@ def test_reviewer_without_verdict_gets_fallback_then_an_escalation_event(db, rep
     add(db, root, "boss", "interactive", "supervisor", status="processing")  # busy: messages queue
     ws = workspaces.create(db, str(repo), "feat").workspace
     add(db, ws, "w1", "assign", parent="boss", result="done", pipeline="reviewing")
-    add(db, ws, "rev0", "review", "reviewer-gemini", parent="boss")
+    add(db, ws, "rev0", "review", "review.gemini", parent="boss")
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss")
     monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)  # supervisor stays busy
     monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
@@ -245,11 +245,11 @@ def test_reviewer_without_verdict_gets_fallback_then_an_escalation_event(db, rep
     db.add_review(ws.id, gates.head(ws), "rev-second", True, "lgtm")
 
     agents.tell_parent_unreported(db, db.get_agent("rev0"))
-    assert started == ["reviewer-sonnet-high"]
+    assert started == ["review.claude-sonnet.high"]
     assert db.get_agent("w1").pipeline == "reviewing"
 
     agents.tell_parent_unreported(db, db.get_agent("rev1"))   # the fallback stops too
-    assert started == ["reviewer-sonnet-high"]
+    assert started == ["review.claude-sonnet.high"]
     assert db.get_agent("w1").pipeline is None
     assert any("review of `feat` never came back" in b for b in drain(db))
     assert [(e["agent_id"], e["root_id"], e["payload"]["actor"])
@@ -320,8 +320,8 @@ def test_stalled_reviewer_reopens_own_session_once_before_fallback(db, repo, tmp
 
 def test_fallback_reviewer_reuses_cached_checks_and_partial_findings(db, repo, tmp_path, monkeypatch):
     (repo / ".brindle" / "agents").mkdir(parents=True)
-    (repo / ".brindle" / "agents" / "reviewer-light.md").write_text(
-        "---\nname: reviewer-light\nextends: reviewer\nmodel: haiku\neffort: low\n---\n"
+    (repo / ".brindle" / "agents" / "review.claude-sonnet.low.md").write_text(
+        "---\nname: review.claude-sonnet.low\nextends: reviewer\nmodel: haiku\neffort: low\n---\n"
     )
     (repo / ".brindle" / "config.json").write_text(json.dumps({"checks": ["pytest -q"]}))
     root = workspaces.adopt_root(db, str(repo))
@@ -351,11 +351,11 @@ def test_fallback_reviewer_reuses_cached_checks_and_partial_findings(db, repo, t
     # before it starts the reviewer.
     monkeypatch.setattr(agents, "_detach", lambda argv: spawned.append(argv))
 
-    # Unpinned config -> routes to the cheaper reviewer-light tier and carries the findings.
+    # Unpinned config -> routes to the cheaper review.claude-sonnet.low tier and carries the findings.
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
     assert len(spawned) == 1
     argv = spawned[0]
-    assert argv[argv.index("--profile") + 1] == "reviewer-light"
+    assert argv[argv.index("--profile") + 1] == "review.claude-sonnet.low"
     assert "Blocker in big.py line 12" in argv[argv.index("--focus") + 1]
 
     # Pinned config -> keeps the pinned reviewer profile instead of downgrading.
@@ -430,7 +430,7 @@ def test_reviewer_stopping_on_a_deleted_worktree_tells_the_supervisor(db, repo, 
     add(db, root, "boss", "interactive", "supervisor", status="processing")
     ws = workspaces.create(db, str(repo), "feat").workspace
     add(db, ws, "w1", "assign", parent="boss", result="done", pipeline="reviewing")
-    add(db, ws, "rev0", "review", "reviewer-gemini", parent="boss")
+    add(db, ws, "rev0", "review", "review.gemini", parent="boss")
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
     monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
     shutil.rmtree(ws.path)   # removed outside brindle: the row outlives it

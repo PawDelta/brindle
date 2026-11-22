@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from brindle import spawn
+from brindle.model_names import canonical
 from brindle.worker_models import TIER_PREFERENCES
 
 CONFIG_DIR = ".brindle"
@@ -109,7 +110,7 @@ class RepoConfig:
     scoped_checks_max_tests: int = 300  # with a coverage map: at most this many tests run, most specific first (0: no cap)
     pre_pr_full: bool = False          # run every check in full before a PR (for a repo without CI); else scoped to the PR's diff
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
-    reviewer: str = "reviewer-sonnet-high"  # agent profile that reviews branches
+    reviewer: str = "review.claude-sonnet.high"  # agent profile that reviews branches
     review_profile: str | None = None  # force request_review's profile (skips automatic selection)
     review_sizing: bool = True        # scoped context and cheaper profiles for small or docs/test-only reviews
     review_small_max_files: int = 5
@@ -153,7 +154,7 @@ class RepoConfig:
     prompt_cache_prefix: bool = True
     review_rounds: int = 2            # suggested fix-round cap; notify the supervisor once, then keep fixing
     review_stall_stop: bool = True     # past the cap, hand repeated findings to the supervisor
-    # Retry a failed heavy task once on developer-heavy (Opus) before asking the supervisor.
+    # Retry a failed heavy task once on dev.claude-opus (Opus) before asking the supervisor.
     # None: on, except where the worker runs on a cloud account (Bedrock, Vertex, Foundry),
     # which may not have Fable; true or false forces it (see brindle.pipeline.fable_enabled).
     fable_escalation: bool | None = None
@@ -288,7 +289,7 @@ class RepoConfig:
 
     def routing_allows(self, name: str, design_heavy: bool = False) -> bool:
         """Explicit profile choices bypass this automatic-routing restriction."""
-        return not self.fable_for_design_only or name != "developer-fable" or design_heavy
+        return not self.fable_for_design_only or canonical(name) != "dev.claude-fable" or design_heavy
 
 
 def _merge_commands(shared: list[str], local: object) -> list[str]:
@@ -513,6 +514,16 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
             if key in source:
                 setattr(cfg, key, source[key])
                 break
+    # Profile ids in the config may be old built-in ids: read them as their current ids.
+    from brindle.profiles import current_name
+
+    def current(n: str) -> str:
+        return current_name(n, str(repo_root))
+
+    for key in ("default_agent", "reviewer", "review_profile"):
+        if isinstance(getattr(cfg, key, None), str):
+            setattr(cfg, key, current(getattr(cfg, key)))
+    cfg.learning_candidates = [current(n) for n in cfg.learning_candidates if isinstance(n, str)]
     rules: list[str] = []
     for source in (user, shared, local):
         found = source.get("rules")
@@ -550,7 +561,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
             for tier, names in routing.items():
                 norm_tier = normalize_weight(tier)
                 if norm_tier in WEIGHTS and isinstance(names, list):
-                    cfg.routing[norm_tier] = [n for n in names if isinstance(n, str)]
+                    cfg.routing[norm_tier] = [current(n) for n in names if isinstance(n, str)]
                     cfg.routing_sources[norm_tier] = str(path)
     for source in (user, shared, local):  # per kind, a later scope overriding an earlier one
         cfg.routing_locked.update(locked_kinds(source.get("routing_locked")))
@@ -567,7 +578,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
             for tier, name in second.items():
                 norm_tier = normalize_weight(tier)
                 if norm_tier in WEIGHTS and isinstance(name, str) and name:
-                    cfg.second_review[norm_tier] = name
+                    cfg.second_review[norm_tier] = current(name)
     for source in (user, shared, local):  # per model, so a repo can override one and keep the rest
         pricing = source.get("pricing")
         if isinstance(pricing, dict):
