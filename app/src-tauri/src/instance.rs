@@ -127,20 +127,53 @@ pub fn reopen_command(bundle: &Path) -> Command {
     cmd
 }
 
-/// The relaunch helper (`relaunch_command`), handled first thing in the app's
-/// entry point, before any Tauri or AppKit set-up, so it never gets a Dock tile:
-/// for `args` (the process's, program name first) of the form
-/// `<exe> REOPEN_FLAG <pid> <bundle>`, `wait(pid)` until the old instance has
-/// exited, and return the `open <bundle>` to run before this process exits.
-/// None for any other launch, which goes on to start the app.
-pub fn reopen_after_exit(args: &[String], wait: impl FnOnce(u32)) -> Option<Command> {
-    let [_, flag, pid, bundle, ..] = args else { return None };
+/// What the relaunch helper's arguments ask for (`reopen_after_exit`).
+pub enum Reopen {
+    /// Not the helper: start the app.
+    No,
+    /// The old instance has exited: run this `open <bundle>`, then exit.
+    Open(Command),
+    /// The old instance wasn't seen to exit: open nothing (a plain `open` would
+    /// only bring the old one forward, and it would then quit with no successor).
+    GaveUp,
+}
+
+/// The relaunch helper (`relaunch_command`): for `args` (the process's,
+/// program name first) of the form `<exe> REOPEN_FLAG <pid> <bundle>`,
+/// `wait(pid)` until the old instance has exited (true) and give the
+/// `open <bundle>` to run. Any other launch is `Reopen::No`.
+pub fn reopen_after_exit(args: &[String], wait: impl FnOnce(u32) -> bool) -> Reopen {
+    let [_, flag, pid, bundle, ..] = args else { return Reopen::No };
     if flag != REOPEN_FLAG {
-        return None;
+        return Reopen::No;
     }
-    let pid = pid.parse().ok()?;
-    wait(pid);
-    Some(reopen_command(Path::new(bundle)))
+    let Ok(pid) = pid.parse() else { return Reopen::No };
+    if wait(pid) {
+        Reopen::Open(reopen_command(Path::new(bundle)))
+    } else {
+        Reopen::GaveUp
+    }
+}
+
+/// The app's entry point: the relaunch helper is handled first, before any
+/// Tauri or AppKit set-up (`start_app`), so it never gets a Dock tile. In
+/// helper mode it waits (`wait`), runs the open (`open`, its exit code) and
+/// returns the code for the process to exit with, never starting the app;
+/// otherwise it starts the app and returns None.
+pub fn start(
+    args: &[String],
+    wait: impl FnOnce(u32) -> bool,
+    open: impl FnOnce(Command) -> i32,
+    start_app: impl FnOnce(),
+) -> Option<i32> {
+    match reopen_after_exit(args, wait) {
+        Reopen::No => {
+            start_app();
+            None
+        }
+        Reopen::Open(cmd) => Some(open(cmd)),
+        Reopen::GaveUp => Some(1),
+    }
 }
 
 /// Restart the app into the bundle at its path (the update installed there):
@@ -160,21 +193,23 @@ pub fn relaunch<R: Runtime>(app: &AppHandle<R>) {
 }
 
 /// Wait until the process `pid` has exited (at once when it has), for up to
-/// `EXIT_WAIT`: a kqueue's NOTE_EXIT, not a poll.
+/// `EXIT_WAIT`: a kqueue's NOTE_EXIT, not a poll. True only when it has
+/// exited; false when the bound ran out or the wait itself failed.
 #[cfg(target_os = "macos")]
-pub fn wait_for_exit(pid: u32) {
-    wait_for_exit_with_limit(pid, &EXIT_WAIT);
+pub fn wait_for_exit(pid: u32) -> bool {
+    wait_for_exit_with_limit(pid, &EXIT_WAIT)
 }
 
 /// Wait on an exiting process with the caller's bound. Daemon handover uses
 /// a shorter bound than waiting for the old app to release its instance lock.
+/// True only when the process is known to have exited.
 #[cfg(target_os = "macos")]
-pub(crate) fn wait_for_exit_with_limit(pid: u32, limit: &libc::timespec) {
+pub(crate) fn wait_for_exit_with_limit(pid: u32, limit: &libc::timespec) -> bool {
     // SAFETY: a kqueue of our own, given one change and one event buffer we own, closed after.
     unsafe {
         let kq = libc::kqueue();
         if kq < 0 {
-            return;
+            return false;
         }
         let mut change: libc::kevent = std::mem::zeroed();
         change.ident = pid as libc::uintptr_t;
@@ -182,9 +217,17 @@ pub(crate) fn wait_for_exit_with_limit(pid: u32, limit: &libc::timespec) {
         change.flags = libc::EV_ADD | libc::EV_ONESHOT;
         change.fflags = libc::NOTE_EXIT;
         let mut event: libc::kevent = std::mem::zeroed();
-        // A pid already gone fails to register (ESRCH, as an EV_ERROR event or -1): done.
-        libc::kevent(kq, &change, 1, &mut event, 1, limit);
+        let n = libc::kevent(kq, &change, 1, &mut event, 1, limit);
+        let err = io::Error::last_os_error().raw_os_error();
         libc::close(kq);
+        match n {
+            // A pid already gone fails to register (ESRCH, as an EV_ERROR event or -1): exited.
+            1 if event.flags & libc::EV_ERROR != 0 => event.data == libc::ESRCH as libc::intptr_t,
+            1 => event.fflags & libc::NOTE_EXIT != 0,
+            -1 => err == Some(libc::ESRCH),
+            // 0: the bound ran out with the process still alive.
+            _ => false,
+        }
     }
 }
 
@@ -225,33 +268,55 @@ mod tests {
         assert!(!args.iter().any(|a| a == "-n"));
         assert!(relaunch_command(Path::new("/Users/me/brindle/target/debug/brindle-desktop"), 4242).is_none());
 
-        // The helper, given those arguments: waits for that pid, then a plain `open <bundle>`.
+        // The helper, started with those arguments: waits for that pid, runs a plain
+        // `open <bundle>` and exits with its code, never starting the app.
         let argv: Vec<String> = std::iter::once(exe.to_string()).chain(args).collect();
         let mut waited = None;
-        let open = reopen_after_exit(&argv, |pid| waited = Some(pid)).expect("helper mode");
-        assert_eq!(waited, Some(4242));
-        assert_eq!(open.get_program(), "/usr/bin/open");
-        assert_eq!(open.get_args().collect::<Vec<_>>(), ["/Applications/brindle.app"]);
-        // Any other launch, the old flag included, goes on to start the app, waiting for nothing.
+        let mut opened = None;
+        let code = start(
+            &argv,
+            |pid| {
+                waited = Some(pid);
+                true
+            },
+            |cmd| {
+                opened = Some((cmd.get_program().to_owned(), cmd.get_args().map(|a| a.to_owned()).collect::<Vec<_>>()));
+                0
+            },
+            || panic!("the helper started the app"),
+        );
+        assert_eq!((code, waited), (Some(0), Some(4242)));
+        let (program, open_args) = opened.expect("opened the bundle");
+        assert_eq!(program, "/usr/bin/open");
+        assert_eq!(open_args, ["/Applications/brindle.app"]);
+
+        // The old instance not seen to exit (the bound ran out): open nothing, and fail.
+        let code = start(&argv, |_| false, |_| panic!("opened while the old instance lived"), || panic!("started the app"));
+        assert_eq!(code, Some(1));
+
+        // Any other launch, the old flag included, starts the app, waiting for nothing.
         for argv in [vec![exe], vec![exe, AFTER_EXIT_FLAG, "4242"], vec![exe, REOPEN_FLAG, "x", "/Applications/brindle.app"]] {
             let argv: Vec<String> = argv.into_iter().map(String::from).collect();
-            assert!(reopen_after_exit(&argv, |_| panic!("waited outside helper mode")).is_none());
+            let mut started = false;
+            let code = start(&argv, |_| panic!("waited outside helper mode"), |_| panic!("opened"), || started = true);
+            assert!(code.is_none() && started);
         }
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn waiting_for_exit_returns_once_the_old_instance_is_gone() {
-
         // The old instance: a process that lives until its stdin closes.
         let mut old = Command::new("/bin/cat").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).spawn().unwrap();
         let pid = old.id();
+        // A bound that runs out while it lives is no exit: the helper must not open then.
+        assert!(!wait_for_exit_with_limit(pid, &libc::timespec { tv_sec: 0, tv_nsec: 0 }));
         let waiting = std::thread::spawn(move || wait_for_exit(pid));
         assert!(!waiting.is_finished());
         drop(old.stdin.take());
-        waiting.join().unwrap();
+        assert!(waiting.join().unwrap(), "the exit wasn't reported as one");
         assert!(old.try_wait().unwrap().is_some(), "returned before the old instance exited");
-        // One already gone: no wait at all.
-        wait_for_exit(pid);
+        // One already gone: no wait at all, and an exit.
+        assert!(wait_for_exit(pid));
     }
 }
