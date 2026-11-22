@@ -197,9 +197,25 @@ def test_assign_reply_names_the_pick_and_stores_the_weight(db, repo, boss, monke
     config(repo, pipeline=False)
     out = asyncio.run(mcp_server.assign(task="do A", branch="feat-a", weight="medium"))
     assert "Started worker" in out
-    assert "weight medium -> dev.claude-sonnet" in out and "Codex at 93%, skipped dev.gpt" in out
+    route = next(line for line in out.splitlines() if "→" in line)
+    job, worker = route.split("→", 1)
+    assert "Medium" in job and "job" in job
+    assert "Claude Sonnet (" in worker and "dev.claude-sonnet" in worker
+    assert "developer-" not in out
+    assert "Codex at 93%, skipped dev.gpt" in out
     [t] = db.list_tasks(str(repo), state="started")
     assert t.weight == "medium" and t.profile == "dev.claude-sonnet"
+
+    from brindle import spawn
+
+    monkeypatch.setattr(spawn, "_load", lambda: 14.0)
+    monkeypatch.setattr(spawn, "_cores", lambda: 10)
+    queued = asyncio.run(mcp_server.assign(
+        agent_profile="developer-sonnet", task="do B", branch="feat-b"))
+    [pending] = db.list_tasks(str(repo), state="pending")
+    assert pending.id in queued and pending.agent_id is None
+    assert "dev.claude-sonnet" in queued and "Claude Sonnet (" in queued
+    assert "developer-sonnet" not in queued
 
 
 def test_learning_outcomes_carry_the_weight(db, repo, boss, monkeypatch):

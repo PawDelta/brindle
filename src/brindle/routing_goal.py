@@ -1,7 +1,7 @@
 """What routing aims for: a mix of cost, speed and first try (design
 routing-goals §1, §3, §6a).
 
-A goal is three weights, ``cost``, ``speed`` and ``first_try``, each 0–1 with
+A goal is three preference weights, ``cost``, ``speed`` and ``first_try``, each 0–1 with
 at least one above 0, kept summing to 1. It is set at four levels and the most
 specific wins::
 
@@ -22,7 +22,10 @@ Before any hosted estimate exists (Free, offline, a new install: §4.1), the
 goal's weights order the candidates the shipped table has measured
 (``brindle/data/routing_priors.json``) by §1's score, through the cascade
 (brindle.cascade): that order is routing's pick without hosted learning and
-the default the learner must beat. A tier the owner locked keeps its order.
+the default the learner must beat. A job size the owner locked keeps its order.
+Light, Medium, Heavy and Advanced describe the job; workers are named by
+their model display name and effort, with dev.* or review.* ids. These job
+sizes are separate from the goal's cost, speed and first-try preferences.
 
 The triangle (§6a) places a *setup* (an outcome: $ a task, minutes, first try)
 against one yardstick, the shipped Fable 5.2 alone reference, at the centre.
@@ -366,7 +369,7 @@ def tier_mix(db, repo_root: str) -> tuple[dict[str, float], int]:
 
 def preview(weights: dict | None, repo_root: str, db=None) -> dict:
     """The triangle's numbers for ``repo_root``. ``aim``: the weights asked
-    for (Balanced without a goal). ``roles``: each worker tier's first pick
+    for (Balanced without a goal). ``roles``: each job size's first worker pick
     under the goal (``profile``) and without it (``previous``); the reviewer
     and supervisor stay as they are until they have evidence of their own
     (§4). Candidates are judged as routing judges them (autopilot.eligible:
@@ -374,8 +377,8 @@ def preview(weights: dict | None, repo_root: str, db=None) -> dict:
     ceiling), so a pick here is one a delegation could run.
 
     ``you`` is on the same footing as the ``references``: the shipped Fable
-    alone numbers scaled by how your picks compare with a Fable worker on
-    this repo's recent mix of tiers, both from the shipped priors (``measured``
+    alone numbers scaled by how your picks compare with a Claude Fable worker on
+    this repo's recent mix of job sizes, both from the shipped priors (``measured``
     false: not yet measured on your tasks; ``runs``: the tasks the mix is
     from). ``landed`` places ``you`` against that same Fable reference (§6a),
     so the point and the table's numbers always agree."""

@@ -985,7 +985,7 @@ def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
         scored.sort(key=lambda item: item[0])
         _, best, tier = scored[0]
         info = autopilot.model_cost_info(best, cfg, repo_root)
-        return best, f"using {best}{info} (cheapest available {tier} reviewer tier)"
+        return best, f"using {info} (cheapest available {tier} reviewer tier)"
     tier = autopilot.profile_weight(default, cfg, repo_root)
     return default, f"using {default} ({tier} reviewer tier; no other reviewer available)"
 
