@@ -75,8 +75,8 @@ Use `brindle continue` later to resume a paused session. More in the
 
 ## Built with brindle
 
-brindle is built with brindle. Historical snapshot from `brindle history`, 2026-10-05 to
-2026-11-04 (the installed command could not open its read-only database to refresh these figures):
+brindle is built with brindle. One developer's own history, 2026-10-05 to 2026-11-04, as
+recorded by `brindle history`:
 
 | | |
 |---|---|
