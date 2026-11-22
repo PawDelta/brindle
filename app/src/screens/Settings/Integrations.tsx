@@ -165,7 +165,7 @@ export function Integrations({ client, open = openExternal }: { client: Integrat
               <div className="flex flex-wrap items-center gap-1">
                 {(["design", "task", "passage"] as const).map((k) => (
                   <label key={k} className="flex items-center gap-1 text-xs">{k === "design" ? "A plan" : k === "task" ? "A task of its split" : "A passage"} →
-                    <input className={`${field} w-28`} aria-label={`${NAMES[t]} ${k} type`} value={draft.types[t]?.[k] ?? ""} onChange={(e) => setDraft({ ...draft, types: { ...draft.types, [t]: { ...(draft.types[t] ?? TYPES[t]), [k]: e.target.value } } })} />
+                    <input className={`${field} w-28`} aria-label={`${NAMES[t]} ${k === "design" ? "plan" : k} type`} value={draft.types[t]?.[k] ?? ""} onChange={(e) => setDraft({ ...draft, types: { ...draft.types, [t]: { ...(draft.types[t] ?? TYPES[t]), [k]: e.target.value } } })} />
                   </label>
                 ))}
               </div>
