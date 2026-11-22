@@ -479,7 +479,15 @@ export function PermissionItemCard({ item, isNew, actions, who, onGo }: { item: 
       source={window ? "window" : "hook"}
       isNew={isNew}
       who={who}
-      what={window ? <>asks: {first}{line.code && <> <code className="font-mono text-[13px]">{line.code}</code></>}</> : <>wants to run <code className="font-mono text-[13px]">{line.code ?? line.whole}</code></>}
+      what={
+        p?.via === "pane" && line.lead ? (
+          <>{line.lead}</>
+        ) : window ? (
+          <>asks: {first}{line.code && <> <code className="font-mono text-[13px]">{line.code}</code></>}</>
+        ) : (
+          <>wants to run <code className="font-mono text-[13px]">{line.code ?? line.whole}</code></>
+        )
+      }
       chip={window ? "Agent prompt" : null}
       age={`waiting ${age}`}
       why={window ? (p?.terminal ?? "Brindle can't answer this one: it is a question for the agent itself") : (item.reason || "Held by brindle")}

@@ -45,7 +45,7 @@ from pathlib import Path
 
 INSTALLER = os.path.expanduser("~/.opencode/bin/opencode")   # where opencode.ai/install puts it
 EVENTS = ("opencode-prompt", "opencode-permission", "opencode-permission-replied", "opencode-stop",
-          "opencode-pre-tool")
+          "opencode-pre-tool", "opencode-permission-ask")
 
 PLUGIN = """\
 // brindle's OpenCode plugin: tells brindle what this agent is doing.
@@ -142,8 +142,26 @@ export const Brindle = async ({ client }) => {
       if (!mine(p.sessionID)) return
       if (event.type === "permission.asked" || event.type === "question.asked") {
         await send("opencode-permission", { session_id: p.sessionID })
+        if (event.type === "permission.asked") {
+          // brindle decides it, or holds it for the supervisor and the person, as a hook's ask.
+          // Not awaited: OpenCode's own prompt stays up meanwhile, and its answer there wins.
+          send("opencode-permission-ask", { session_id: p.sessionID, permission_id: p.id, permission: p.permission,
+                                            metadata: p.metadata, patterns: p.patterns }).then(async (out) => {
+            let answer = null
+            try { answer = out ? JSON.parse(out) : null } catch {}
+            if (!answer || (answer.decision !== "allow" && answer.decision !== "deny")) return
+            try {
+              await client.postSessionIdPermissionsPermissionId({
+                path: { id: p.sessionID, permissionID: p.id },
+                body: { response: answer.decision === "allow" ? "once" : "reject" }
+              })
+            } catch {}   // already answered in OpenCode: its own answer stands
+          })
+        }
       } else if (["permission.replied", "question.replied", "question.rejected"].includes(event.type)) {
-        await send("opencode-permission-replied", { session_id: p.sessionID })
+        // Which permission was answered, so brindle ends that hold alone; a question's reply names none.
+        const answered = event.type === "permission.replied" ? (p.permissionID ?? p.requestID ?? null) : null
+        await send("opencode-permission-replied", { session_id: p.sessionID, permission_id: answered })
       } else if (event.type === "session.error") {
         const e = p.error || {}
         if (e.name !== "MessageAbortedError") error = [e.name, e.data && e.data.message].filter(Boolean).join(": ") || "error"
@@ -467,6 +485,14 @@ def handle_hook(db, agent_id: str, event: str, payload: dict) -> None:
     elif event == "opencode-permission":
         agents.handle_hook(db, agent_id, "notification", {**base, "message": "permission"})
     elif event == "opencode-permission-replied":
+        # A permission answered in OpenCode itself: the hold brindle has for that one ends (its
+        # row gone, see agents._await_app_answer), so the app stops offering an answer nothing
+        # would take. Only that one: another ask, or a question's reply, leaves the rest held.
+        replied = payload.get("permission_id")
+        if isinstance(replied, str) and replied:
+            for row in db.permission_requests_of(agent_id):
+                if row["channel"] in ("hook", "supervisor") and _asked_id(row) == replied:
+                    db.pop_permission_request(agent_id, lambda r, t=row["tool_use_id"]: r["tool_use_id"] == t)
         agents.handle_hook(db, agent_id, "tool-done", base)
     elif event == "opencode-stop":
         if base and base["session_id"] != agent.session_ref:
@@ -532,6 +558,67 @@ def _checks(db, agent, payload: dict, respelled: list[dict]) -> dict | None:
     return answer
 
 
+PERMISSION_KEY = "opencode_permission"   # OpenCode's id for a held ask, kept in its recorded request
+
+
+def _asked_id(row) -> str | None:
+    """The OpenCode permission id a held request's row was recorded with, if any."""
+    try:
+        return json.loads(row["request"]).get(PERMISSION_KEY)
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def permission_ask(db, agent_id: str, payload: dict) -> str:
+    """A worker's OpenCode asks its own permission (``permission.asked``) for a
+    call none of its rules answered. Decided as Codex's hook decides a request
+    (agents.codex_policy_decision); what that leaves to someone is held for the
+    worker's supervisor, then the person, as a hook's ask is (agents._hold_for_app),
+    so the app offers Allow and Deny. The plugin answers OpenCode with what this
+    prints, through OpenCode's own permission API: "allow" once, "deny" as
+    reject. Nothing printed leaves OpenCode's prompt to answer."""
+    from brindle import agents, permissions
+    from brindle.config import load_repo_config
+    from brindle.profiles import profile_rules_for
+
+    agent = db.get_agent(agent_id)
+    if agent is None or agent.mode not in agents.REPORTING_MODES or not agent.parent_id:
+        return ""   # the person's own session: they answer in OpenCode
+    ws = db.get_workspace(agent.workspace_id)
+    if ws is None:
+        return ""
+    cfg = load_repo_config(ws.repo_root)
+    meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    kind = str(payload.get("permission") or "")
+    command = meta.get("command") if kind == "bash" else None
+    if isinstance(command, str) and command:
+        req = permissions.Request("opencode", "bash", "Bash", cwd=ws.path, worktree=ws.path, repo_root=ws.repo_root,
+                                  command=command, agent=agent.id)
+        decision = agents.codex_policy_decision(agent, ws, cfg, [req], profile_rules_for(agent.profile, ws.repo_root),
+                                                agents._session_of(db, agent))
+        if decision.decision == "deny" and cfg.permission_policy != "on":
+            # The person turned brindle's rules off: only what they allow answers by itself.
+            decision = permissions.Decision("ask", decision.reason)
+    else:
+        path = next((meta[k] for k in ("filepath", "filePath", "path") if isinstance(meta.get(k), str)), None)
+        req = permissions.Request("opencode", "other", kind or "Tool", cwd=ws.path, worktree=ws.path,
+                                  repo_root=ws.repo_root, path=path, agent=agent.id)
+        decision = permissions.Decision("ask", "OpenCode asks for it and no brindle rule covers it")
+    if decision.decision == "ask":
+        # OpenCode's own id for it: an answer given in OpenCode ends this hold alone (handle_hook).
+        asked = payload.get("permission_id")
+        answer = agents._hold_for_app(db, agent, req, decision.reason, None, keep=False,
+                                      hold=cfg.permission_hold_seconds,
+                                      extra={PERMISSION_KEY: asked} if isinstance(asked, str) and asked else None,
+                                      **agents._supervising(db, agent, cfg, decision, {}))
+        if not answer:
+            return ""
+        decision = permissions.Decision("deny" if answer in ("deny", "supervisor_deny") else "allow",
+                                        "answered in the brindle app" if answer in agents.ANSWERS
+                                        else "answered by its supervisor")
+    return json.dumps({"decision": decision.decision, "reason": decision.reason})
+
+
 def hook_main(db, agent_id: str | None, event: str, stdin_text: str) -> str:
     """``brindle _hook opencode-<event>``: what it prints is only read for
     ``opencode-pre-tool`` (a per-call decision); the plugin ignores the rest."""
@@ -548,6 +635,12 @@ def hook_main(db, agent_id: str | None, event: str, stdin_text: str) -> str:
         except Exception as e:  # no answer means OpenCode's own rules apply, which ask nothing in an unasked launch
             print(f"brindle hook {event}: {e}", file=sys.stderr)
             return json.dumps(UNCHECKED) if _in_unasked_launch() else ""
+    if event == "opencode-permission-ask":
+        try:
+            return permission_ask(db, agent_id, payload)
+        except Exception as e:  # no answer leaves OpenCode's own prompt in place
+            print(f"brindle hook {event}: {e}", file=sys.stderr)
+            return ""
     try:
         handle_hook(db, agent_id, event, payload)
     except Exception as e:  # never break the person's OpenCode session over brindle

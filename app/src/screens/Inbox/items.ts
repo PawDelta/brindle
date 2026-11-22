@@ -109,6 +109,8 @@ export function describeItem(item: InboxItemDTO): string {
     case "permission": {
       // The request whole where the hook recorded it; else the prompt's own words.
       const p = item.permission;
+      // A worker's own prompt, read by the engine: its sentence (who asks, for what, why).
+      if (p?.via === "pane" && (item.detail || p.wording)) return (item.detail || p.wording)!;
       if (p?.target) return `Asks to run ${p.tool ? `${p.tool}: ` : ""}${p.target}`;
       return item.detail?.trim() || "Asks your permission";
     }
@@ -183,6 +185,8 @@ export const answerable = (item: InboxItemDTO): boolean =>
    read whole. */
 export function permissionLine(item: InboxItemDTO): { lead: string | null; code: string | null; whole: string } {
   const p = item.permission;
+  // A worker's own prompt (via "pane"): the engine's sentence is the line; the request in full under it.
+  if (p?.via === "pane") return { lead: p.wording ?? null, code: null, whole: p.target ? `${p.tool ? `${p.tool}: ` : ""}${p.target}` : (item.detail ?? "") };
   if (p?.target) return { lead: p.tool ? `${p.tool}` : null, code: p.target, whole: `${p.tool ? `${p.tool}: ` : ""}${p.target}` };
   const words = (p?.wording ?? item.detail ?? "").trim();
   const first = words.split("\n").map((l) => l.trim()).find((l) => l && !/^[╭╰│─]/.test(l)) ?? describeItem(item);

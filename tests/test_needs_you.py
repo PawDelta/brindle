@@ -61,7 +61,7 @@ def test_a_prompted_worker_shows_needs_you_and_its_supervisor_is_told(db, root, 
     db.update_agent("w1", status_since=time.time() - cull.STUCK_AFTER - 5)
     assert cull.note_stuck(db, time.time(), {}) != []
     body = db.pop_pending("boss").body
-    assert "w1" in body and "waiting on a prompt" in body
+    assert "w1" in body and ("src/app.py" if provider == "codex" else "git push") in body
 
 
 @pytest.mark.parametrize("command,answered,status", [
