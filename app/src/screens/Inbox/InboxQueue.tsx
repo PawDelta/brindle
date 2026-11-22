@@ -256,17 +256,19 @@ export function InboxQueue({ items: receivedItems, synced, fresh, actions, clien
   }, [due]);
 
   /* Read for this person in the Library; false, with the reason on the row, when the Library didn't take it. */
-  const markRead = (row: Row): Promise<boolean> => {
-    const keys = teamKeys(row);
+  const markRowsRead = (rows: Row[]): Promise<boolean> => {
+    const keys = rows.flatMap(teamKeys);
     if (keys.length === 0) return Promise.resolve(true);
+    for (const row of rows) for (const item of row.items) actions.dismiss(itemKey(item));
     return client.markInboxRead(keys).then(() => {
       void refresh();
       return true;
     }, (e: unknown) => {
-      actions.report(row.items[0], e instanceof Error ? e.message : String(e));
+      actions.report(rows[0].items[0], e instanceof Error ? e.message : String(e));
       return false;
     });
   };
+  const markRead = (row: Row) => markRowsRead([row]);
 
   /* The row settles to its grey line where it stood; an open row hands the open to the row after it. */
   const settle = (row: Row, entry: Omit<DoneEntry, "key" | "at">, meta: string | null = null) => {
@@ -452,10 +454,7 @@ export function InboxQueue({ items: receivedItems, synced, fresh, actions, clien
               <section aria-label="From the team" data-testid="inbox-team">
                 <h2 className="iq-sec-h"><i className="iq-dot" />From the team {newTeam.length > 0 && <span className="n">{newTeam.length} new</span>}
                   {unreadTeam.length > 0 && waitCount === 0
-                    ? <button type="button" className="aside" data-testid="mark-all-read" onClick={() => {
-                        const keys = unreadTeam.flatMap(teamKeys);
-                        if (keys.length) void client.markInboxRead(keys).then(() => void refresh(), (e: unknown) => actions.report(unreadTeam[0].items[0], e instanceof Error ? e.message : String(e)));
-                      }}>Mark all read</button>
+                    ? <button type="button" className="aside" data-testid="mark-all-read" onClick={() => void markRowsRead(unreadTeam)}>Mark all read</button>
                     : <span className="aside">nothing here is waiting on you</span>}</h2>
                 {withLines(teamRows, "team")}
               </section>

@@ -393,13 +393,13 @@ def toplevel(path: str | Path) -> str:
 # Whether a ref exists, what it points at, what origin's default branch is and
 # which of two commits is ahead are the same in every checkout of a repo, and
 # change only when a ref does. The daemon's sweeps ask them for every checkout
-# every few seconds, and each git run is a process an antivirus inspects
-# (docs/investigations/process-count.md). So they are read from the repo's own
-# files (HEAD, loose refs, packed-refs), and what only git can work out (which
-# commit is ahead, the remotes) is asked once and kept: per pair of commits,
-# which never goes stale, or until the config files change. Whatever the files
-# can't say (a reftable repo, GIT_DIR in the environment, a path that isn't a
-# checkout's root) is asked of git every time, as before.
+# every few seconds, and each git run is a process an antivirus inspects. So
+# they are read from the repo's own files (HEAD, loose refs, packed-refs), and
+# what only git can work out (which commit is ahead, the remotes) is asked once
+# and kept: per pair of commits, which never goes stale, or until the config
+# files change. Whatever the files can't say (a reftable repo, GIT_DIR in the
+# environment, a path that isn't a checkout's root) is asked of git every time,
+# as before.
 
 
 class _Unreadable(Exception):

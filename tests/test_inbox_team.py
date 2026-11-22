@@ -5,9 +5,12 @@ state is the person's on every machine. The Library here is a fake of the
 contract in the web repo's docs/shared-designs-api.md."""
 
 import hashlib
+import io
 import json
+import re
 import time
 from pathlib import Path
+from urllib.response import addinfourl
 
 import pytest
 from starlette.testclient import TestClient
@@ -16,7 +19,7 @@ from brindle import autopilot, bus, git, inbox_team, plans, workspaces
 from brindle.daemon import lifecycle
 from brindle.daemon.app import build_app
 from brindle.db import Agent
-from brindle.pro import review_queue
+from brindle.pro import auth, review_queue
 from brindle.service import inbox
 
 ME = "u_me"
@@ -194,6 +197,33 @@ def test_rows_marked_read_stay_read_on_another_machine(db, library, daemon):
     lifecycle._poll_review_queue()
     shown = {i["kind"]: i["read"] for i in _inbox(daemon) if i["item_key"] in keys}
     assert shown == {"signoff_progress": True, "shared_doc_comment": True, "review_requested": True}
+
+
+@pytest.mark.variant("real HTTP serialization catches form-encoded Inbox reads that dict-only Library fakes accept")
+def test_read_marks_use_the_library_json_contract(db, library, monkeypatch):
+    inbox_team.poll(db)
+    transport = auth.UrllibTransport()
+
+    def respond(request, **kwargs):
+        # Like InboxRead on the server: form data is not a JSON model,
+        # even when the keys inside it would all pass the key validator.
+        body = json.loads(request.data) if request.get_header("Content-type") == "application/json" else None
+        keys = body.get("item_keys") if isinstance(body, dict) else None
+        if (not isinstance(keys, list) or not 1 <= len(keys) <= 200
+                or not all(isinstance(k, str) and re.fullmatch(r"[A-Za-z0-9_.:@+-]{1,300}", k) for k in keys)):
+            status, result = 422, {"detail": "invalid InboxRead"}
+        else:
+            status, result = library.call(request.get_method(), inbox_team.READ, body, "tok")
+        return addinfourl(io.BytesIO(json.dumps(result).encode()),
+                         {"Content-Type": "application/json"}, request.full_url, status)
+
+    monkeypatch.setattr(transport.opener, "open", respond)
+    http_client = auth.Client(transport=transport)
+    monkeypatch.setattr(review_queue, "account", lambda client=None, store=None: (http_client, ME, "tok"))
+    keys = [item.item_key for item in inbox_team.items(ME)]
+    assert set(inbox_team.mark_read(db, keys)) == set(keys)
+    assert library.read == {i["item_key"] for i in library.items if i["kind"] != "review_requested"}
+    assert all(item.read for item in inbox_team.items(ME))
 
 
 def test_mark_all_read_survives_an_in_flight_feed(db, library, daemon, monkeypatch):
