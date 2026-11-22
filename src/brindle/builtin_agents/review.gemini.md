@@ -1,5 +1,6 @@
 ---
 name: review.gemini
+role: reviewer
 description: Reviews a branch's changes for bugs and risks without editing code, using Google Antigravity (Gemini) for a second model's view
 provider: antigravity
 model: gemini-4-argon

@@ -1,5 +1,6 @@
 ---
 name: dev.qwen3-coder
+role: developer
 description: Implements a small, well-specified task on a local open-weight model (Ollama), at no cost
 provider: native
 api: openai                        # Ollama's OpenAI-compatible endpoint

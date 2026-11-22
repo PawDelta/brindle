@@ -909,21 +909,27 @@ def test_routing_policy_marks_what_the_org_refuses_and_locks(seeded, monkeypatch
     monkeypatch.setattr(providers, "claude_org_managed", lambda: False)
     (Path(seeded["repo"]) / ".brindle" / "agents").mkdir(parents=True, exist_ok=True)
     (Path(seeded["repo"]) / ".brindle" / "agents" / "mine.md").write_text("---\nname: mine\nextends: developer\n---\n")
-    _, body = _get("/v1/routing", AUTH, f"repo={seeded['repo']}")
+    # A profile built on one whose frontmatter never closes: shown with its lint error, its role unknown.
+    (Path(seeded["repo"]) / ".brindle" / "agents" / "child.md").write_text("---\nname: child\nextends: broken\n---\n")
+    (Path(seeded["repo"]) / ".brindle" / "agents" / "broken.md").write_text("---\nname: broken\n")
+    code, body = _get("/v1/routing", AUTH, f"repo={seeded['repo']}")
+    assert code == 200
+    child = {p["name"]: p for p in body["profiles"]}["child"]
+    assert child["lint_errors"] and child["role"] is None
     policy = body["policy"]
     assert (policy["applies"], policy["editable"], policy["allowed_providers"]) == (True, True, ["claude"])
     assert {(lock["kind"], lock["name"]) for lock in policy["locked"]} == {
         ("provider", "codex"), ("provider", "antigravity"), ("provider", "opencode"), ("keys", "personal_api_keys")}
     rows = {p["name"]: p for p in body["profiles"]}
-    assert (rows["developer-heavy"]["allowed"], rows["developer-heavy"]["refusal"] is None) == (heavy_ok, heavy_ok)
-    assert all(rows["developer-heavy"][k] for k in ("display", "maker", "tool", "effort"))
-    assert ROUTE_ID not in rows["developer-heavy"]["display"]
-    assert (rows["developer-heavy"]["builtin"], rows["mine"]["builtin"]) == (True, False)
-    for refused in ("developer-light", "developer-codex"):      # a model, then a provider, the org doesn't allow
+    assert (rows["dev.claude-opus"]["allowed"], rows["dev.claude-opus"]["refusal"] is None) == (heavy_ok, heavy_ok)
+    assert all(rows["dev.claude-opus"][k] for k in ("display", "maker", "tool", "effort"))
+    assert ROUTE_ID not in rows["dev.claude-opus"]["display"]
+    assert (rows["dev.claude-opus"]["builtin"], rows["mine"]["builtin"]) == (True, False)
+    for refused in ("dev.claude-haiku", "dev.gpt"):      # a model, then a provider, the org doesn't allow
         assert not rows[refused]["allowed"] and rows[refused]["refusal"]
-    assert ("developer-heavy" in policy["models"][allowed]) == heavy_ok
-    assert "developer-light" not in policy["models"][allowed]
-    heavy = [m for t in body["tiers"].values() for m in t["models"] if m["profile"] == "developer-heavy"]
+    assert ("dev.claude-opus" in policy["models"][allowed]) == heavy_ok
+    assert "dev.claude-haiku" not in policy["models"][allowed]
+    heavy = [m for t in body["tiers"].values() for m in t["models"] if m["profile"] == "dev.claude-opus"]
     assert heavy and all((m["model"], m["provider_name"], m["allowed"]) == (ROUTE_ID, "Claude Code", heavy_ok)
                          for m in heavy)
 
@@ -961,7 +967,7 @@ def test_routing_user_view_runs_no_learner_and_no_sign_in_probe(seeded, monkeypa
     assert code == 200 and routed == [] and probed == []
     assert len(pro_reads) == 1
     # The person's own view: their settings and library, not this repo's.
-    assert (body["tiers"]["medium"]["values"], body["tiers"]["medium"]["source"]) == (["developer-codex"], "user")
+    assert (body["tiers"]["medium"]["values"], body["tiers"]["medium"]["source"]) == (["dev.gpt"], "user")
     assert "repo-only" not in {p["name"] for p in body["profiles"]}
     assert all(k["learned"] is None for k in body["kinds"].values())
     pro_reads.clear()

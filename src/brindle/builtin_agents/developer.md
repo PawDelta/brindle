@@ -1,5 +1,6 @@
 ---
 name: developer
+role: developer
 description: Implements a well-scoped coding task on its own branch
 provider: claude
 permission_mode: auto
