@@ -204,10 +204,51 @@ def frame(db: DB, body: str, sender_id: str | None, nonce: str) -> str:
             f"{safe}\n</{TAG} nonce=\"{nonce}\">")
 
 
+NONCES = "wake-nonces"   # agent_marks kind: {nonce: when} of the agent's recent hand-overs
+_DELIVERY_LINE = re.compile(r'brindle delivered \d+ messages? \(nonce "([0-9a-f]{16})"\):')
+_ENVELOPE = ("<task-notification>", "</task-notification>")
+
+
+def _record_nonce(db: DB, agent_id: str, nonce: str) -> None:
+    """Remember ``nonce`` as one of ``agent_id``'s hand-overs (see handed_over),
+    forgetting any older than a waiter can live."""
+    while True:   # another waiter's record landed between the read and the write: read again
+        saved = db.mark(agent_id, NONCES)
+        try:
+            known = json.loads(saved) if saved else {}
+        except ValueError:
+            known = {}
+        now = time.time()
+        kept = {n: t for n, t in (known.items() if isinstance(known, dict) else ())
+                if isinstance(t, (int, float)) and now - t < TIMEOUT}
+        if db.swap_mark(agent_id, NONCES, saved, json.dumps({**kept, nonce: now})):
+            return
+
+
+def handed_over(db: DB, agent_id: str, prompt: str) -> bool:
+    """Whether ``prompt`` is one of this agent's waiter hand-overs as Claude
+    Code submits it: its ``<task-notification>`` envelope first, then the
+    delivery line, naming a nonce brindle drew and recorded for this agent.
+    Never the wording alone: anyone can type that, while the nonce is fresh
+    for each hand-over and drawn after every body in it was written."""
+    text = prompt.lstrip()
+    if not text.startswith(_ENVELOPE[0]) or _ENVELOPE[1] not in text:
+        return False
+    found = _DELIVERY_LINE.search(text, text.index(_ENVELOPE[1]))
+    saved = db.mark(agent_id, NONCES) if found else None
+    try:
+        known = json.loads(saved) if saved else {}
+    except ValueError:
+        return False
+    return isinstance(known, dict) and found is not None and found.group(1) in known
+
+
 def take(db: DB, agent: Agent) -> tuple[str, list] | None:
     """Everything queued for ``agent``, each message framed with one fresh
     nonce, as one text, with the messages taken (for ``give_back``); None
-    if nothing. A failure part way puts back what it had taken."""
+    if nothing. A failure part way puts back what it had taken. The nonce
+    is recorded before the text leaves, so the prompt Claude Code wakes the
+    model with is known as brindle's, never the person speaking (handed_over)."""
     nonce = secrets.token_hex(8)
     taken: list = []
     parts = []
@@ -215,6 +256,8 @@ def take(db: DB, agent: Agent) -> tuple[str, list] | None:
         while (msg := db.pop_pending(agent.id, waiter_pid=os.getpid())) is not None:
             taken.append(msg)
             parts.append(frame(db, msg.body, msg.sender_id, nonce))
+        if parts:
+            _record_nonce(db, agent.id, nonce)
     except BaseException:
         give_back(db, agent.id, taken)
         raise
