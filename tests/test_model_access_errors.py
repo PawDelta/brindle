@@ -57,16 +57,16 @@ def test_a_refused_profile_is_skipped_for_the_next_in_its_tier(db, repo, monkeyp
     monkeypatch.setattr("shutil.which", lambda cli: f"/usr/bin/{cli}")
     monkeypatch.setattr(quota, "headroom", lambda provider, cfg=None, repo_root=None: 100.0)
     why = []
-    assert autopilot.choose_profile(db, "boss", str(repo), weight="heavy", why=why)[0] == "developer-heavy"
+    assert autopilot.choose_profile(db, "boss", str(repo), weight="heavy", why=why)[0] == "dev.claude-opus"
     swap = model_access.swap(load_repo_config(repo).routing, "heavy", "developer-heavy", ERRORS[3][0])
-    assert swap[0].key == "vertex_quota" and swap[1] == "developer-gemini"
+    assert swap[0].key == "vertex_quota" and swap[1] == "dev.gemini"
     why = []
     name, _ = autopilot.choose_profile(db, "boss", str(repo), weight="heavy", why=why)
-    assert name == "developer-gemini"
-    assert "model refused for this account" in why[0] and "skipped developer-heavy" in why[0]
+    assert name == "dev.gemini"
+    assert "model refused for this account" in why[0] and "skipped dev.claude-opus" in why[0]
     # and the swap is in the run notes, with its fix
     note = model_access.notes()[0]
-    assert "developer-heavy" in note and "tasks moved to developer-gemini" in note and "Fix:" in note
+    assert "developer-heavy" in note and "tasks moved to dev.gemini" in note and "Fix:" in note
 
 
 @pytest.mark.brindle_ci
@@ -168,7 +168,7 @@ def test_a_supervisor_is_told_about_a_refused_worker_and_about_an_alias_fallback
     assert len(done) == 2
     refused_msg = next(b for _t, b in sent if "w1" in b)
     assert "can't call its model" in refused_msg and "use the `us.`" in refused_msg
-    assert "developer-gemini" in refused_msg    # the next profile in its tier
+    assert "dev.gemini" in refused_msg    # the next profile in its tier
     assert "fell back to Opus 4.6" in next(b for _t, b in sent if "w2" in b)
     assert model_access.refused("developer-heavy").key == "bedrock_endpoint"
     sent.clear()

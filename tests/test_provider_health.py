@@ -37,7 +37,7 @@ def _profile(repo, name, text):
 
 
 def test_review_choice_passes_over_a_limited_providers_reviewer(db, repo, clock, available):
-    _profile(repo, "reviewer-sonnet-high", "---\nextends: reviewer\nprovider: codex\n---\n")
+    _profile(repo, "review.claude-sonnet.high", "---\nextends: reviewer\nprovider: codex\n---\n")
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("writer", ws.id, "developer-sonnet", "claude", None,
                        "assign", "done", "@0", "done", NOW))
@@ -46,7 +46,7 @@ def test_review_choice_passes_over_a_limited_providers_reviewer(db, repo, clock,
     chosen, note = agents._review_choice(db, ws, None, RepoConfig(review_sizing=False))
 
     assert chosen == "reviewer"
-    assert note is not None and "reviewer-sonnet-high" in note
+    assert note is not None and "review.claude-sonnet.high" in note
 
 
 def test_routing_checks_the_cap_on_the_effective_model(repo, brindle_home, clock, available, monkeypatch):

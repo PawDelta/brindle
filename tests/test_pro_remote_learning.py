@@ -114,7 +114,7 @@ def test_record_payload_keys_and_contents(parts, remote):
     assert merged == {**merged, "profile": "developer", "weight": "heavy", "event": "merged",
                       "checks_passed": True, "review_rounds": 1, "escalations": 1,
                       "tokens": 1234, "wall_seconds": 61.5}
-    assert verdict == {**verdict, "profile": "reviewer-codex", "weight": "heavy", "event": "verdict",
+    assert verdict == {**verdict, "profile": "review.gpt", "weight": "heavy", "event": "verdict",
                        "approved": True, "wall_seconds": 9.5, "features": merged["features"]}
     assert verdict["agent_ref"] != merged["agent_ref"]
     assert no_verdict == {**no_verdict, "profile": "reviewer", "weight": "heavy",

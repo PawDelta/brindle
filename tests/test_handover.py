@@ -111,7 +111,7 @@ def test_with_a_note_a_fresh_worker_starts_on_the_tables_pick_led_by_the_note(db
     cut_off(db, "w1")
 
     [launch] = spawned
-    assert launch["profile"] == "developer-gemini" and launch["ws"] == ws.id   # the table's pick, same worktree
+    assert launch["profile"] == "dev.gemini" and launch["ws"] == ws.id   # the table's pick, same worktree
     text = launch["prompt"]
     assert text.startswith("Parse the flags") and handover.RAN_OUT in text
     assert text.index("done: the parser") < text.index("From brindle's records")
@@ -155,7 +155,7 @@ def test_a_second_trigger_of_the_same_stop_starts_nothing(db, setup):
     during_spawn.append(lambda: limit_report.on_stop_failure(db, db.get_agent("w1"), rate_limited=True))
     cut_off(db, "w1")
 
-    assert [s["profile"] for s in spawned] == ["developer-gemini"]
+    assert [s["profile"] for s in spawned] == ["dev.gemini"]
     assert db.get_agent("new1").status == "processing" and db.get_agent("w1").status == "rewound"
 
 
@@ -168,12 +168,12 @@ def test_a_third_stop_parks_the_task_with_one_inbox_card(db, setup):
     out_of("antigravity")
     cut_off(db, "new1")                  # hop 2: Codex, the only measured provider left
     # The learner hears the merge as a takeover: from the profile before it, after two hops.
-    assert learning.handover(db, db.get_agent("new2"), ws.repo_root) == ("developer-gemini", 2)
+    assert learning.handover(db, db.get_agent("new2"), ws.repo_root) == ("dev.gemini", 2)
     # A third stop: even with Codex back within the park window, the person decides.
     out_of("codex", time.time() + 10 * 60)
     cut_off(db, "new2")
 
-    assert [s["profile"] for s in spawned] == ["developer-gemini", "developer-codex"]
+    assert [s["profile"] for s in spawned] == ["dev.gemini", "dev.gpt"]
     assert db.get_agent("new2").status == "paused"
     [card] = handover.inbox_items(db, ws.repo_root)
     assert card.kind == handover.KIND and card.agent_id == "new2"
@@ -203,7 +203,7 @@ def test_a_replacement_billed_through_the_org_waits_for_the_persons_yes(db, setu
     [card] = handover.inbox_items(db, ws.repo_root)
     assert [c.id for c in card.choices] == ["continue", "wait", "stop"]
     handover.answer(db, card.request_id, "continue")
-    assert [s["profile"] for s in spawned] == ["developer-gemini"] and db.get_agent("w1").status == "rewound"
+    assert [s["profile"] for s in spawned] == ["dev.gemini"] and db.get_agent("w1").status == "rewound"
 
 
 @pytest.mark.parametrize("when", [pytest.param("routing", marks=pytest.mark.variant(
@@ -222,15 +222,15 @@ def test_a_replacement_over_the_budget_is_never_started(db, setup, repo, monkeyp
 
     monkeypatch.setattr(budget, "entitled", lambda: True)
     monkeypatch.setattr(budget, "estimate", lambda db_, root, profile, weight, extra=None:
-                        5.0 if profile == "developer-gemini" else 0.5)
+                        5.0 if profile == "dev.gemini" else 0.5)
     out_of("claude")
     if when == "routing":
         over()
         cut_off(db, "w1")
-        assert [s["profile"] for s in spawned] == ["developer-codex"]     # the table's pick didn't fit
+        assert [s["profile"] for s in spawned] == ["dev.gpt"]     # the table's pick didn't fit
         return
     # The person is asked about Gemini first (billed per token); the budget tightens before they answer.
-    monkeypatch.setattr(handover, "per_token", lambda profile, repo_root: profile == "developer-gemini")
+    monkeypatch.setattr(handover, "per_token", lambda profile, repo_root: profile == "dev.gemini")
     cut_off(db, "w1")
     [card] = handover.inbox_items(db, ws.repo_root)
     over()
@@ -279,7 +279,7 @@ def test_recovery_adopts_only_the_launch_its_handover_recorded(db, setup, monkey
 
     assert handover.sweep(db, now=time.time() + handover.CLAIM_EXPIRES + 5)
     assert db.get_agent("other").task == "Write the docs" and db.get_agent("other").dismissed_at is None
-    assert [s["profile"] for s in spawned] == ["developer-gemini"]          # its own replacement, started now
+    assert [s["profile"] for s in spawned] == ["dev.gemini"]          # its own replacement, started now
     assert db.get_task(task.id).agent_id == "new1" and db.get_agent("w1").status == "rewound"
 
 
