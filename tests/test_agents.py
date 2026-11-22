@@ -287,6 +287,31 @@ def test_teach_auto_mode_menu_is_declined_never_typed_into(db, ws, monkeypatch, 
         db.delete_agent(aid)
 
 
+# A busy chat whose screen shows text below its input box that quotes the
+# launcher's footer phrase (a queued message echo). That text is not the
+# launcher's footer: delivery must not press Escape, which would interrupt
+# the turn.
+CLAUDE_BUSY_CHAT_QUOTES_LAUNCHER_FOOTER = (
+    "⏺ Bash(grep -rn 'ctrl+x' src)\n  ⎿  ctrl+x to delete\n\n"
+    "✻ Working… (12s · esc to interrupt)\n"
+    "────\n❯ \n────\n"
+    "  ⏵⏵ accept edits on (shift+tab to cycle) · esc to interrupt\n"
+    "  ⎿ Queued: brindle: fix the ctrl+x to delete hint\n"
+)
+
+
+def test_flush_never_escapes_a_busy_chat_that_quotes_the_launcher_footer(db, ws, monkeypatch):
+    fake_agent(db, ws, status="idle", mode="interactive")
+    db.enqueue("a1", "queued message", None)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_BUSY_CHAT_QUOTES_LAUNCHER_FOOTER)
+    sent, pasted = [], []
+    monkeypatch.setattr(tmux, "send_keys", lambda *a, **k: sent.append(a))
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    agents.flush(db, "a1")
+    assert not any(a[1] == "Escape" for a in sent)
+    assert pasted == ["queued message"]  # a busy chat takes the message; it is not a launcher
+
+
 def test_flush_keeps_message_queued_over_background_session_launcher(db, ws, monkeypatch):
     # A worker too: a blind paste there would start a NEW background session
     # instead of reaching this one.

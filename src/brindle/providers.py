@@ -1460,10 +1460,12 @@ class ClaudeCode(Provider):
     # reliable anchor -- "ctrl+x to delete" is specific to that screen, unlike
     # phrases such as "moved to the background", which can appear quoted in
     # an ordinary transcript and would false-positive a plain substring
-    # search. Only trust the footer BELOW the last box-drawing border, so a
-    # transcript line above it can't be mistaken for the real status bar.
+    # search. The launcher's footer is the screen's LAST non-blank line and
+    # starts with its mode bar: any text under the input box (a queued-message
+    # echo, a transcript line) quoting the phrase is not the footer, and
+    # pressing Escape for it would interrupt a busy chat's turn.
     BORDER = re.compile(r"^[\s─]*$")
-    AGENT_VIEW_FOOTER = re.compile(r"ctrl\+x to delete", re.I)
+    AGENT_VIEW_FOOTER = re.compile(r"^\s*⏵⏵.*ctrl\+x to delete", re.I)
     ANSI_SGR = re.compile(r"\x1b\[([0-9;]*)m")
     # `.` doesn't cross lines, but `\s` does: keep the capture off of it so a
     # blank "❯ " line's trailing space can't slurp the newline and match into
@@ -1550,10 +1552,7 @@ class ClaudeCode(Provider):
         if self.teach_auto_mode_menu(screen):
             return "menu"
         plain_lines = plain_full.rstrip().splitlines()[-25:]
-        plain_tail = "\n".join(plain_lines)
-        border_idx = [i for i, ln in enumerate(plain_lines) if self.BORDER.match(ln) and ln.strip()]
-        footer = "\n".join(plain_lines[border_idx[-1] + 1:]) if border_idx else plain_tail
-        if self.AGENT_VIEW_FOOTER.search(footer):
+        if plain_lines and self.AGENT_VIEW_FOOTER.search(plain_lines[-1]):
             return "background"
         if not interactive:
             return None
