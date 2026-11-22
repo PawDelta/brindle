@@ -164,7 +164,6 @@ CODEX_EDITS = ("  Would you like to make the following edits?\n\n  ../shared/con
 CODEX_TRUST = ("  You are in /Users/dev/elsewhere\n\n  Trust this folder?\n\n"
                "› 1. Trust and continue\n  2. Quit\n\n  Press enter to continue\n")
 AGY_COMMAND = "Requesting permission for:\n  git push origin main\nRun this command?\n  Yes / No\nesc to cancel\n"
-OPENCODE_COMMAND = "  △ Permission required\n  $ npm publish --access public\n\n   Allow once   Allow always   Reject\n"
 CLAUDE_QUESTION = ("⏺ Which storage should I use for the cache?\n\n  1. SQLite\n  2. Postgres\n\n"
                    "────────────────────────────────────────\n❯ \n────────────────────────────────────────\n"
                    "  ⏵⏵ accept edits on (shift+tab to cycle)\n")
@@ -178,11 +177,11 @@ RAW = (*PANE, "Trust and continue", "Allow always", "\n", "w1")
 
 @pytest.mark.parametrize("provider,screen,person", [
     # A permission no rule decides: its supervisor's first, never the person's yet, whether or not
-    # brindle can press its answer (Antigravity's and OpenCode's it can't: the supervisor escalates those).
+    # brindle can press its answer (Antigravity's it can't: the supervisor escalates those). OpenCode's
+    # go through brindle's plugin and its hold instead (test_permission_routing).
     ("claude", CLAUDE_BASH, False),
     ("codex", CODEX_EDITS, False),
     ("antigravity", AGY_COMMAND, False),
-    ("opencode", OPENCODE_COMMAND, False),
     # Trust dialogs, menus and questions: its supervisor's, as a structured message.
     ("codex", CODEX_TRUST, False),
     ("claude", CLAUDE_MENU, False),

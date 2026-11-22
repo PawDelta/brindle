@@ -401,8 +401,10 @@ def route(db: DB, agent: Agent, screen: str | None = None, prompt: Prompt | None
         prompt = current(db, agent, screen)
     if prompt is None or db.get_workspace(agent.workspace_id) is None:
         return None
-    if prompt.kind == "permission" and db.permission_requests_of(agent.id):
-        return "hook"   # its hook recorded the request and routed it (agents.permission_request_decision)
+    if prompt.kind == "permission" and (db.permission_requests_of(agent.id) or agent.provider == "opencode"):
+        # Its hook recorded the request and routed it (agents.permission_request_decision), or,
+        # for OpenCode, brindle's plugin hands every ask of OpenCode's to opencode.permission_ask.
+        return "hook"
     raw = db.mark(agent.id, MARK)
     mark = json.loads(raw) if raw else None
     if _ours(mark, agent, prompt):

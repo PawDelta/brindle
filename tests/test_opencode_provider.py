@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from brindle import antigravity, opencode, permissions, pipeline, workspaces
+from brindle import antigravity, opencode, permissions, pipeline, spawn, workspaces
 from brindle.config import set_local, set_user
 from brindle.db import Agent
 from brindle.profiles import load_profile
@@ -116,10 +116,11 @@ def test_permission_mode_and_model_map_onto_opencode(brindle_home, tmp_path, mod
 import { EventEmitter } from 'node:events';
 let input = ''; for await (const chunk of process.stdin) input += chunk;
 const {source, command, requested} = JSON.parse(input);
-globalThis.fakeSpawn = () => {
+globalThis.fakeSpawn = (cmd, args) => {
   const p = new EventEmitter(); p.stdout = new EventEmitter();
   p.stdin = {end() {queueMicrotask(() => {
-    p.stdout.emit('data', JSON.stringify({decision: 'allow'})); p.emit('close', 0);
+    if (args.includes('opencode-pre-tool')) p.stdout.emit('data', JSON.stringify({decision: 'allow'}));
+    p.emit('close', 0);
   })}}; return p;
 };
 process.env.BRINDLE_AGENT_ID = 'test'; process.env.BRINDLE_OPENCODE_POLICY = '';
@@ -324,6 +325,51 @@ def test_permission_policy_denies_through_the_plugins_pre_tool_hook(db, ws, brin
     assert not os.path.exists(path)
 
 
+
+
+@pytest.mark.parametrize("decided, response", [
+    ({"decision": "allow"}, ["once"]),     # allowed by brindle (its rules, the supervisor or the person)
+    ({"decision": "deny"}, ["reject"]),
+    (None, []),                            # nobody answered: OpenCode's own prompt stays
+])
+def test_plugin_answers_opencodes_own_ask_with_brindles_decision(decided, response):
+    """The real plugin hands an OpenCode ask to brindle (opencode-permission-ask) and
+    answers that very permission through OpenCode's API: never a different one."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node is required to execute the OpenCode plugin")
+    program = """
+import { EventEmitter } from 'node:events';
+let input = ''; for await (const chunk of process.stdin) input += chunk;
+const {source, decided} = JSON.parse(input);
+const asked = [];
+globalThis.fakeSpawn = (cmd, args) => {
+  const p = new EventEmitter(); p.stdout = new EventEmitter();
+  p.stdin = {end(body) {queueMicrotask(() => {
+    if (args.includes('opencode-permission-ask')) {
+      asked.push(JSON.parse(body));
+      if (decided) p.stdout.emit('data', JSON.stringify(decided));
+    }
+    p.emit('close', 0);
+  })}}; return p;
+};
+process.env.BRINDLE_AGENT_ID = 'test'; process.env.BRINDLE_OPENCODE_POLICY = '';
+process.env.OPENCODE_CONFIG_CONTENT = '{}';
+const {Brindle} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+const replies = [];
+const hooks = await Brindle({client: {postSessionIdPermissionsPermissionId: async r => {replies.push(r); return {}}}});
+await hooks.event({event: {type: 'permission.asked', properties: {id: 'per_1', sessionID: 'ses_1', permission: 'bash',
+  tool: {callID: 'c'}, metadata: {command: 'npm publish'}}}});
+for (let i = 0; i < 20; i++) await Promise.resolve();   // the unawaited answer settles
+console.log(JSON.stringify([asked.map(a => a.metadata.command),
+  replies.map(r => [r.path.id, r.path.permissionID, r.body.response])]));
+"""
+    source = opencode.PLUGIN.replace('import { spawn } from "node:child_process"',
+                                    'const spawn = globalThis.fakeSpawn').replace("__BRINDLE__", '["fake"]')
+    result = spawn.read([node, "--input-type=module", "-e", program],
+                        input=json.dumps({"source": source, "decided": decided}))
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [["npm publish"], [["ses_1", "per_1", r] for r in response]]
 
 
 def test_screen_state_reads_opencodes_footer():
