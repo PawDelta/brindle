@@ -281,6 +281,21 @@ def test_plugin_events_drive_status_and_the_end_of_a_turn(db, ws, monkeypatch):
     assert opencode.hook_main(db, None, "opencode-stop", "not json") == ""
 
 
+def test_an_answer_given_in_opencode_ends_only_that_asks_hold(db, ws):
+    """Two of a worker's asks held at once: OpenCode answering one, or a question,
+    leaves the other held (its row is what keeps agents._await_app_answer waiting)."""
+    add_agent(db, ws, status="waiting")
+    for request_id, asked in (("r1", "per_1"), ("r2", "per_2")):
+        db.add_permission_request("o1", request_id, json.dumps({"tool": "Bash", "kind": "bash", "command": "make",
+                                                                opencode.PERMISSION_KEY: asked}),
+                                  "why", None, "hook", hold_until=time.time() + 3600)
+    held = lambda: [r["tool_use_id"] for r in db.permission_requests_of("o1")]  # noqa: E731
+    opencode.hook_main(db, "o1", "opencode-permission-replied", json.dumps({"session_id": "s", "permission_id": None}))
+    assert held() == ["r1", "r2"]                       # a question's reply names no permission
+    opencode.hook_main(db, "o1", "opencode-permission-replied", json.dumps({"session_id": "s", "permission_id": "per_1"}))
+    assert held() == ["r2"]
+
+
 def test_permission_policy_denies_through_the_plugins_pre_tool_hook(db, ws, brindle_home, monkeypatch):
     from brindle.config import set_local
 
@@ -342,7 +357,7 @@ def test_plugin_answers_opencodes_own_ask_with_brindles_decision(decided, respon
 import { EventEmitter } from 'node:events';
 let input = ''; for await (const chunk of process.stdin) input += chunk;
 const {source, decided} = JSON.parse(input);
-const asked = [];
+const asked = [], answered = [];
 globalThis.fakeSpawn = (cmd, args) => {
   const p = new EventEmitter(); p.stdout = new EventEmitter();
   p.stdin = {end(body) {queueMicrotask(() => {
@@ -350,6 +365,7 @@ globalThis.fakeSpawn = (cmd, args) => {
       asked.push(JSON.parse(body));
       if (decided) p.stdout.emit('data', JSON.stringify(decided));
     }
+    if (args.includes('opencode-permission-replied')) answered.push(JSON.parse(body).permission_id);
     p.emit('close', 0);
   })}}; return p;
 };
@@ -361,15 +377,19 @@ const hooks = await Brindle({client: {postSessionIdPermissionsPermissionId: asyn
 await hooks.event({event: {type: 'permission.asked', properties: {id: 'per_1', sessionID: 'ses_1', permission: 'bash',
   tool: {callID: 'c'}, metadata: {command: 'npm publish'}}}});
 for (let i = 0; i < 20; i++) await Promise.resolve();   // the unawaited answer settles
-console.log(JSON.stringify([asked.map(a => a.metadata.command),
-  replies.map(r => [r.path.id, r.path.permissionID, r.body.response])]));
+// OpenCode's replies: brindle hears which permission was answered, and none for a question.
+await hooks.event({event: {type: 'permission.replied', properties: {sessionID: 'ses_1', permissionID: 'per_1'}}});
+await hooks.event({event: {type: 'question.replied', properties: {sessionID: 'ses_1', requestID: 'que_1'}}});
+console.log(JSON.stringify([asked.map(a => [a.permission_id, a.metadata.command]),
+  replies.map(r => [r.path.id, r.path.permissionID, r.body.response]), answered]));
 """
     source = opencode.PLUGIN.replace('import { spawn } from "node:child_process"',
                                     'const spawn = globalThis.fakeSpawn').replace("__BRINDLE__", '["fake"]')
     result = spawn.read([node, "--input-type=module", "-e", program],
                         input=json.dumps({"source": source, "decided": decided}))
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == [["npm publish"], [["ses_1", "per_1", r] for r in response]]
+    assert json.loads(result.stdout) == [[["per_1", "npm publish"]], [["ses_1", "per_1", r] for r in response],
+                                         ["per_1", None]]
 
 
 def test_screen_state_reads_opencodes_footer():

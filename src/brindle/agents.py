@@ -6213,7 +6213,8 @@ ANSWERS = ("allow_once", "allow_always", "deny")
 
 def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | None, keep: bool,
                   hold: float, supervisor: Agent | None = None, supervise: float = 0,
-                  tool_input: object = None, subagent: str | None = None) -> str | None:
+                  tool_input: object = None, subagent: str | None = None,
+                  extra: dict | None = None) -> str | None:
     """Record a request the policy left to the person and, while the app's
     daemon runs, hold it there for the person's answer for ``hold`` seconds
     (_await_app_answer; the row's ``hold_until`` says till when, for the
@@ -6227,13 +6228,14 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     worker's supervisor answers it first, for ``supervise`` seconds of the
     hold (brindle.permission_routing), and the person after; it is shown the
     CLI's complete ``tool_input``, which also tells identical requests apart.
-    ``subagent``: _subagent_of."""
+    ``subagent``: _subagent_of. ``extra``: kept with the request too, to find
+    it by later (the CLI's own id for it, as opencode.permission_ask keeps)."""
     from brindle import permission_asks, permission_routing, permissions
     from brindle.daemon.holds import Holder
 
     request_id = uuid.uuid4().hex[:16]
     # The subagent goes in the recorded JSON (Request.from_dict ignores it): no released table gains a column.
-    recorded = (json.dumps({**req.to_dict(), **({"subagent": subagent} if subagent else {})}),
+    recorded = (json.dumps({**req.to_dict(), **(extra or {}), **({"subagent": subagent} if subagent else {})}),
                 json.dumps(suggestions) if suggestions else None)
     # Only an answer to exactly this request and these suggestions counts.
     digest = permissions.request_digest(*recorded)

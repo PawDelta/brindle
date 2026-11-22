@@ -145,7 +145,7 @@ export const Brindle = async ({ client }) => {
         if (event.type === "permission.asked") {
           // brindle decides it, or holds it for the supervisor and the person, as a hook's ask.
           // Not awaited: OpenCode's own prompt stays up meanwhile, and its answer there wins.
-          send("opencode-permission-ask", { session_id: p.sessionID, permission: p.permission,
+          send("opencode-permission-ask", { session_id: p.sessionID, permission_id: p.id, permission: p.permission,
                                             metadata: p.metadata, patterns: p.patterns }).then(async (out) => {
             let answer = null
             try { answer = out ? JSON.parse(out) : null } catch {}
@@ -159,7 +159,9 @@ export const Brindle = async ({ client }) => {
           })
         }
       } else if (["permission.replied", "question.replied", "question.rejected"].includes(event.type)) {
-        await send("opencode-permission-replied", { session_id: p.sessionID })
+        // Which permission was answered, so brindle ends that hold alone; a question's reply names none.
+        const answered = event.type === "permission.replied" ? (p.permissionID ?? p.requestID ?? null) : null
+        await send("opencode-permission-replied", { session_id: p.sessionID, permission_id: answered })
       } else if (event.type === "session.error") {
         const e = p.error || {}
         if (e.name !== "MessageAbortedError") error = [e.name, e.data && e.data.message].filter(Boolean).join(": ") || "error"
@@ -483,11 +485,14 @@ def handle_hook(db, agent_id: str, event: str, payload: dict) -> None:
     elif event == "opencode-permission":
         agents.handle_hook(db, agent_id, "notification", {**base, "message": "permission"})
     elif event == "opencode-permission-replied":
-        # Answered in OpenCode itself: a hold brindle still has for it ends (its row gone, see
-        # agents._await_app_answer), so the app stops offering an answer nothing would take.
-        for row in db.permission_requests_of(agent_id):
-            if row["channel"] in ("hook", "supervisor"):
-                db.pop_permission_request(agent_id, lambda r, t=row["tool_use_id"]: r["tool_use_id"] == t)
+        # A permission answered in OpenCode itself: the hold brindle has for that one ends (its
+        # row gone, see agents._await_app_answer), so the app stops offering an answer nothing
+        # would take. Only that one: another ask, or a question's reply, leaves the rest held.
+        replied = payload.get("permission_id")
+        if isinstance(replied, str) and replied:
+            for row in db.permission_requests_of(agent_id):
+                if row["channel"] in ("hook", "supervisor") and _asked_id(row) == replied:
+                    db.pop_permission_request(agent_id, lambda r, t=row["tool_use_id"]: r["tool_use_id"] == t)
         agents.handle_hook(db, agent_id, "tool-done", base)
     elif event == "opencode-stop":
         if base and base["session_id"] != agent.session_ref:
@@ -553,6 +558,17 @@ def _checks(db, agent, payload: dict, respelled: list[dict]) -> dict | None:
     return answer
 
 
+PERMISSION_KEY = "opencode_permission"   # OpenCode's id for a held ask, kept in its recorded request
+
+
+def _asked_id(row) -> str | None:
+    """The OpenCode permission id a held request's row was recorded with, if any."""
+    try:
+        return json.loads(row["request"]).get(PERMISSION_KEY)
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
 def permission_ask(db, agent_id: str, payload: dict) -> str:
     """A worker's OpenCode asks its own permission (``permission.asked``) for a
     call none of its rules answered. Decided as Codex's hook decides a request
@@ -589,8 +605,11 @@ def permission_ask(db, agent_id: str, payload: dict) -> str:
                                   repo_root=ws.repo_root, path=path, agent=agent.id)
         decision = permissions.Decision("ask", "OpenCode asks for it and no brindle rule covers it")
     if decision.decision == "ask":
+        # OpenCode's own id for it: an answer given in OpenCode ends this hold alone (handle_hook).
+        asked = payload.get("permission_id")
         answer = agents._hold_for_app(db, agent, req, decision.reason, None, keep=False,
                                       hold=cfg.permission_hold_seconds,
+                                      extra={PERMISSION_KEY: asked} if isinstance(asked, str) and asked else None,
                                       **agents._supervising(db, agent, cfg, decision, {}))
         if not answer:
             return ""
