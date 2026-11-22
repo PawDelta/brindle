@@ -102,15 +102,16 @@ def _run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: 
         out = f"{check_scope.SKIPPED}{ws.branch} changes nothing this check covers"
         db.set_check(ws.id, sha, cmd, True, out)
         return True, out
-    # A narrowed run is cached by the files that narrowed it, so its pass never satisfies a full run.
-    ident = run if run == cmd or diff is None else run + "\n" + "\n".join(diff[1])
+    # A narrowed run (or one given BRINDLE_CHANGED_FILES so a script can narrow itself)
+    # is cached by its diff, so its pass never satisfies a full run.
+    ident = run if diff is None else run + "\n" + "\n".join(diff[1])
     dirty = bool(git.dirty_files(ws.path))
     if dirty:
         return _run_queued(db, ws, run, env, timeout, cancel)
     # One run at a time per (workspace, commit, command): a check warmed when
     # the worker reported, a reviewer's summary and the merge gate can all
     # want the same result at once; the later ones wait, then reuse it.
-    tree = git.out(["rev-parse", "HEAD^{tree}"], ws.path)
+    tree = git.out(["rev-parse", f"{sha}^{{tree}}"], ws.path)
     if ident != cmd and (passed := db.get_tree_check(ws.repo_root, tree, cmd)) is not None and passed["ok"]:
         db.set_check(ws.id, sha, cmd, True, passed["output"] or "")   # the whole check passed: so does any part
         return True, passed["output"] or ""
@@ -706,11 +707,7 @@ def pr_checked(db: DB, ws: Workspace, progress=None, passed: tuple[str, list[str
         yield sha
 
 
-def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool,
-        reused: tuple[str, list[str]] | None = None) -> Report:
-    """``reused``: (sha, commands) whose passing result the caller carried
-    over to ``sha`` (``pipeline._reusable_checks``); they aren't run again
-    while HEAD is still that sha."""
+def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Report:
     r = Report()
     dirty = git.dirty_files(ws.path, tracked_only=True)   # untracked scratch files don't travel with the branch
     if dirty:
@@ -737,12 +734,8 @@ def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool,
         r.passed.append("rules passed (" + ", ".join(rules.packs) + ")")
 
     env = workspaces.workspace_env(ws, cfg)
-    skip = set(reused[1]) if reused and reused[0] == sha else set()
     with queue_place(time.time()):
         for cmd in cfg.checks:
-            if cmd in skip:
-                r.passed.append(f"`{cmd}` passed (reused)")
-                continue
             ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
             if not ok and timed_out(out):
                 return r.fail(f"{CHECKS_TIMED_OUT}, in {ws.branch}:\n{out}\n"

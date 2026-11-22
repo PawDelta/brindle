@@ -32,6 +32,33 @@ def test_pre_pr_on_a_tree_that_passed_in_full_runs_nothing_again(db, repo, monke
     assert commands == [cmd]
 
 
+@pytest.mark.variant("a self-narrowed worker check receives BRINDLE_CHANGED_FILES and must not satisfy a full run")
+def test_self_narrowed_worker_check_does_not_satisfy_full_run_on_same_tree(db, repo, monkeypatch):
+    """A non-pytest check receives BRINDLE_CHANGED_FILES on a worker branch and
+    can narrow itself; its pass must not populate the full-run tree cache key."""
+    cmd = "check-script --scoped"
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"checks": [cmd]}))
+    (repo / "a.txt").write_text("v1\n")
+    sh("git add -A && git commit -qm base", repo)
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "done", "@0", None, 1.0))
+    (Path(ws.path) / "a.txt").write_text("v2\n")
+    sh("git commit -qam work", Path(ws.path))
+
+    seen = []
+
+    def fake_run(c, cwd, env, timeout, cancel=None):
+        seen.append(env.get("BRINDLE_CHANGED_FILES"))
+        return (True, "scoped ok") if "BRINDLE_CHANGED_FILES" in env else (False, "full fail")
+
+    monkeypatch.setattr(autopilot, "run_check", fake_run)
+    assert gates.run_checked(db, ws, cmd, {}, 30)[0]
+    ok, _ = gates.run_checked(db, ws, cmd, {}, 30, full=True)
+    assert not ok
+    assert seen == ["a.txt", None]
+
+
 @pytest.mark.parametrize("slot, legacy, approves", [("", True, True)])
 def test_same_slot_approval_supersedes_after_reviewers_are_deleted(db, repo, monkeypatch,
                                                                 slot, legacy, approves):
