@@ -19,8 +19,8 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from brindle import (agents, autopilot, bus, git, identity_lock, inbox_team, permissions, prompt_answer,
-                     provider_switch, session_sync, sessions, tmux, view)
+from brindle import (agents, autopilot, bus, git, identity_lock, inbox_team, permission_routing, permissions,
+                     prompt_answer, provider_switch, session_sync, sessions, tmux, view, worker_prompts)
 from brindle.config import load_repo_config
 from brindle.daemon.holds import HOLDS, LEASE_SECONDS
 from brindle.db import DB, Agent, Workspace, request_subagent
@@ -379,9 +379,15 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
             asking = [p for p in (pending_permissions(db, row)
                                   if a["status"] == "waiting" or HOLDS.of_agent(row.id) else [])
                       if _answerable(row, p)]
-            out += [InboxItemDTO(kind="permission", reason="asks permission",
-                                 detail=p.request.summary() if p.request else None, permission=p.dto, **link)
+            out += [InboxItemDTO(kind="permission", reason="asks permission", detail=p.request.summary() if p.request
+                                 else None, permission=p.dto, **link) if p.via != "pane"
+                    else InboxItemDTO(kind="permission", reason="asks permission at its own prompt",
+                                      detail=f"{worker_prompts.who(db, row)} {p.dto.wording}", permission=p.dto, **link)
                     for p in asking]
+            # A request its supervisor is answering, or brindle is still deciding, isn't the person's yet.
+            if (reason and not asking and a["status"] == "waiting"
+                    and (permission_routing.waits_on_supervisor(db, row) or worker_prompts.withheld(db, row))):
+                reason = None
             if reason and not asking:
                 kind = _kind(a, ws, reason)
                 asked = db.get_autopilot(row.id) if kind == "question" else None
@@ -389,7 +395,8 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
                                         request_id=str(occurrences.get(f"question:{a['id']}", 0)) if kind == "question"
                                         else str(row.status_since) if kind in ("waiting", "credentials", "failed") else None,
                                         detail=asked.question if asked else row.failed_why.removeprefix("review: ")
-                                        if (row.failed_why or "").startswith("review: ") else None,
+                                        if (row.failed_why or "").startswith("review: ")
+                                        else worker_prompts.described(db, row) if kind == "waiting" else None,
                                         action=_sign_in(row.provider) if kind == "credentials" else None))
             # A worker's plan proposal is its supervisor's to approve (approve_plan); it is
             # never an Inbox card. The supervisor decides whether the person should weigh in.
@@ -645,7 +652,9 @@ def dismiss_doc_read(db: DB, request: str) -> dict:
 @dataclass
 class Pending:
     """A permission request ``agent`` waits on, and what answering it needs."""
-    via: str                                 # "hook" or "prompt", as PermissionDTO.via
+    via: str                                 # "hook" or "prompt", as PermissionDTO.via; "pane": a
+                                             # worker's own prompt, read by worker_prompts (dto.via
+                                             # "pane" when brindle can answer it, else "prompt")
     row: dict | None                         # the hook's permission_requests row ("hook" only)
     request: permissions.Request | None
     suggestions: list | None                 # Claude Code's own "always allow" updates
@@ -760,6 +769,24 @@ def pending_permissions(db: DB, agent: Agent) -> list[Pending]:
         screen = tmux.capture(agent.tmux_window, lines=60, server=agents.server_of(agent))
     except tmux.TmuxError:
         return []
+    stage = worker_prompts.route(db, agent, screen)
+    if stage is not None:
+        # A worker's own prompt: the rules', then its supervisor's (worker_prompts.route).
+        # The person gets a permission only, in a sentence; anything else is the "waiting" item's.
+        prompt = worker_prompts.current(db, agent, screen)
+        if stage not in ("person", "hook") or prompt is None or prompt.kind != "permission":
+            return []
+        # The app shows ``wording`` beside the worker's name; ``detail`` (items) is the whole sentence.
+        pressable = stage == "person" and prompt.keys
+        req = permissions.Request(agent.provider, "bash" if prompt.action == "run" else "other",
+                                  "Bash" if prompt.action == "run" else "Tool", command=prompt.target or None)
+        return [Pending("pane", None, req, None, PermissionDTO(
+            via="pane", request_id=prompt.request_id, tool=req.tool, kind=req.kind, target=prompt.target or None,
+            digest=prompt.key, wording=worker_prompts.predicate(prompt),
+            # A prompt brindle can't press (its keys unknown, or its hook's request ended there): its terminal.
+            terminal=None if pressable else TERMINAL,
+            choices=[PermissionChoiceDTO(choice="allow_once", label="Allow"),
+                     PermissionChoiceDTO(choice="deny", label="Deny")] if pressable else []))]
     if not get_provider(agent.provider).tool_permission(screen):
         return []
     return [Pending("prompt", None, None, None,
@@ -810,6 +837,22 @@ def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str
         raise ServiceError("not_found", f"no agent {agent_id}", 404)
     identity_lock.ensure(agent)
     asking = pending_permissions(db, agent)
+    pane = next((p for p in asking if p.via == "pane"), None)
+    if pane is not None and not pane.dto.choices:
+        raise ServiceError("conflict", f"{agent_id}'s request {TERMINAL}", 409)
+    if pane is not None:
+        # Codex's own escalation prompt: answered in its pane, only while it shows exactly this request.
+        if pane.dto.request_id != request_id or pane.dto.digest != digest:
+            raise ServiceError("conflict", f"{agent_id} isn't waiting on that request, as shown, any more: "
+                                           "fetch the inbox again", 409)
+        if choice not in ("allow_once", "deny"):
+            raise ServiceError("conflict", f"{agent_id}'s request offers no {choice}", 409)
+        if not worker_prompts.answer(db, agent, request_id, choice):
+            raise ServiceError("conflict", f"{agent_id}'s request was answered or withdrawn meanwhile: "
+                                           "fetch the inbox again", 409)
+        bus.publish_agent(db, "permission.answered", agent.id, request_id=request_id, choice=choice,
+                          via="pane", cleared=True)
+        return {"choice": choice, "via": "pane", "cleared": True, "rule": None}
     if any(p.via == "prompt" for p in asking):
         raise ServiceError("conflict", f"{agent_id}'s request {TERMINAL}", 409)
     # The one the person answers, by its id: an agent can hold several at once.

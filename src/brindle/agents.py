@@ -6014,54 +6014,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             reqs = permissions.from_codex(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
             if not reqs:
                 return None
-            rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-            from dataclasses import replace
-
-            from brindle.native.permissions import Permissions, split_commands, uncovered_part
-            from brindle.profiles import load_profile
-
-            try:
-                profile = load_profile(agent.profile, ws.repo_root)
-            except KeyError:
-                profile = None  # deleted profile: no extra allowances
-            if profile is not None:
-                rules += permissions.profile_bash_allows(profile)
-            decision = permissions.Decision("ask", "not in the profile's allowed_tools") if review_only \
-                else permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session, spend=True)
-            if decision.decision == "ask" and len(reqs) == 1:
-                # A deny on one part of a compound command (cd x && <denied>)
-                # wins before any part-by-part allow below.
-                decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
-            # A rule that asks explicitly is the person's to decide, whatever the
-            # profile's allowed_tools cover: only an ask no rule made falls to them.
-            explicit = decision.decision == "ask" and decision.rule is not None
-            if decision.decision == "ask" and profile is not None and not explicit:
-                perms = Permissions(profile.permission_mode, profile.allowed_tools)
-                command = reqs[0].command or ""
-                specs = [spec for name, spec in perms.rules
-                         if name == "Bash" and spec not in (None, "", "*")]
-                cwd = os.path.realpath(reqs[0].cwd or ws.path)
-                root = os.path.realpath(ws.path)
-                # Like pre_tool_decision: a compound command whose every part
-                # allowed_tools covers (a cd within the worktree counts).
-                if (len(reqs) == 1 and reqs[0].kind == "bash" and specs
-                        and (cwd == root or cwd.startswith(root + os.sep))
-                        and uncovered_part(specs, command, cd_root=ws.path) is None):
-                    decision = permissions.Decision(
-                        "allow", "every part of the command matches the profile's allowed_tools")
-                    # Deny each part as the allow just read it (quotes and a
-                    # harmless redirection gone), which deny_in_parts doesn't.
-                    for part in split_commands(command):
-                        denied = permissions.decide(replace(reqs[0], command=part), checks=cfg.checks, rules=rules)
-                        if denied.decision == "deny" or (denied.decision == "ask" and denied.rule is not None):
-                            decision = denied
-                            break
-                elif perms.mode == "dontAsk":
-                    # Nobody watches this pane: a prompt would stall the agent.
-                    decision = permissions.Decision(
-                        "deny", f"{decision.reason.removesuffix('; asking the user')}, and this profile "
-                        "never asks (permission_mode dontAsk). Don't retry it: do without it, or ask "
-                        "your supervisor with the send_message tool (brindle MCP server)")
+            decision = codex_policy_decision(agent, ws, cfg, reqs, profile_rules, session, review_only=review_only)
             if review_only and decision.decision != "allow":
                 return None  # as Codex would without brindle: its own prompt or refusal
             summary = reqs[0].summary() if len(reqs) == 1 else (
@@ -6150,6 +6103,64 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         return opencode.UNCHECKED if opencode_unasked else None
 
 
+def codex_policy_decision(agent: Agent, ws: Workspace, cfg, reqs: list, profile_rules: list,
+                          session: str | None, review_only: bool = False, spend: bool = True):
+    """brindle's policy on a Codex request ``reqs`` (permissions.Request), as
+    its PermissionRequest hook answers it, and as a sandbox escalation at
+    Codex's own prompt is decided (brindle.worker_prompts): the rules, the
+    repo's checks, and the profile's allowed_tools."""
+    from dataclasses import replace
+
+    from brindle import permissions
+    from brindle.native.permissions import Permissions, split_commands, uncovered_part
+    from brindle.profiles import load_profile
+
+    rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
+    try:
+        profile = load_profile(agent.profile, ws.repo_root)
+    except KeyError:
+        profile = None  # deleted profile: no extra allowances
+    if profile is not None:
+        rules += permissions.profile_bash_allows(profile)
+    decision = permissions.Decision("ask", "not in the profile's allowed_tools") if review_only \
+        else permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session, spend=spend)
+    if decision.decision == "ask" and len(reqs) == 1:
+        # A deny on one part of a compound command (cd x && <denied>)
+        # wins before any part-by-part allow below.
+        decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
+    # A rule that asks explicitly is the person's to decide, whatever the
+    # profile's allowed_tools cover: only an ask no rule made falls to them.
+    explicit = decision.decision == "ask" and decision.rule is not None
+    if decision.decision == "ask" and profile is not None and not explicit:
+        perms = Permissions(profile.permission_mode, profile.allowed_tools)
+        command = reqs[0].command or ""
+        specs = [spec for name, spec in perms.rules
+                 if name == "Bash" and spec not in (None, "", "*")]
+        cwd = os.path.realpath(reqs[0].cwd or ws.path)
+        root = os.path.realpath(ws.path)
+        # Like pre_tool_decision: a compound command whose every part
+        # allowed_tools covers (a cd within the worktree counts).
+        if (len(reqs) == 1 and reqs[0].kind == "bash" and specs
+                and (cwd == root or cwd.startswith(root + os.sep))
+                and uncovered_part(specs, command, cd_root=ws.path) is None):
+            decision = permissions.Decision(
+                "allow", "every part of the command matches the profile's allowed_tools")
+            # Deny each part as the allow just read it (quotes and a
+            # harmless redirection gone), which deny_in_parts doesn't.
+            for part in split_commands(command):
+                denied = permissions.decide(replace(reqs[0], command=part), checks=cfg.checks, rules=rules)
+                if denied.decision == "deny" or (denied.decision == "ask" and denied.rule is not None):
+                    decision = denied
+                    break
+        elif perms.mode == "dontAsk":
+            # Nobody watches this pane: a prompt would stall the agent.
+            decision = permissions.Decision(
+                "deny", f"{decision.reason.removesuffix('; asking the user')}, and this profile "
+                "never asks (permission_mode dontAsk). Don't run it again: do without it, or ask "
+                "your supervisor with the send_message tool (brindle MCP server)")
+    return decision
+
+
 def _supervising(db: DB, agent: Agent, cfg, decision, payload: dict) -> dict:
     """_hold_for_app's supervisor arguments for an ask of brindle's policy:
     none when the person alone answers it (brindle.permission_routing)."""
@@ -6202,7 +6213,8 @@ ANSWERS = ("allow_once", "allow_always", "deny")
 
 def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | None, keep: bool,
                   hold: float, supervisor: Agent | None = None, supervise: float = 0,
-                  tool_input: object = None, subagent: str | None = None) -> str | None:
+                  tool_input: object = None, subagent: str | None = None,
+                  extra: dict | None = None) -> str | None:
     """Record a request the policy left to the person and, while the app's
     daemon runs, hold it there for the person's answer for ``hold`` seconds
     (_await_app_answer; the row's ``hold_until`` says till when, for the
@@ -6216,13 +6228,14 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     worker's supervisor answers it first, for ``supervise`` seconds of the
     hold (brindle.permission_routing), and the person after; it is shown the
     CLI's complete ``tool_input``, which also tells identical requests apart.
-    ``subagent``: _subagent_of."""
+    ``subagent``: _subagent_of. ``extra``: kept with the request too, to find
+    it by later (the CLI's own id for it, as opencode.permission_ask keeps)."""
     from brindle import permission_asks, permission_routing, permissions
     from brindle.daemon.holds import Holder
 
     request_id = uuid.uuid4().hex[:16]
     # The subagent goes in the recorded JSON (Request.from_dict ignores it): no released table gains a column.
-    recorded = (json.dumps({**req.to_dict(), **({"subagent": subagent} if subagent else {})}),
+    recorded = (json.dumps({**req.to_dict(), **(extra or {}), **({"subagent": subagent} if subagent else {})}),
                 json.dumps(suggestions) if suggestions else None)
     # Only an answer to exactly this request and these suggestions counts.
     digest = permissions.request_digest(*recorded)

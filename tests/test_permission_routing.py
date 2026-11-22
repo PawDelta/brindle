@@ -170,6 +170,33 @@ def test_the_person_gets_what_the_supervisor_escalates_or_leaves(db, team, monke
     assert history(db) == [("person", "deny")]
 
 
+@pytest.mark.parametrize("boss, answer", [
+    ("escalate", "allow"),   # the person allows it from the Inbox's Allow
+    ("deny", "deny"),        # its supervisor denies it
+])
+def test_an_opencode_workers_own_ask_is_its_supervisors_then_the_persons(db, team, monkeypatch, boss, answer):
+    """OpenCode asks for permission itself (permission.asked); brindle's plugin hands
+    the ask to opencode.permission_ask, which holds it as a hook's ask: its supervisor
+    first, then the person with Allow and Deny. What it prints is what the plugin
+    answers OpenCode with."""
+    from brindle import opencode
+
+    db.update_agent("w1", provider="opencode")
+    set_local(team.ws.repo_root, "permission_supervisor_hold_seconds", 30)
+
+    def supervisor(holder):
+        assert team.says("boss", holder.request_id, boss, "the person decides")[0] == 200
+
+    def person(holder):
+        [shown] = inbox.pending_permissions(db, db.get_agent("w1"))
+        assert shown.dto.target == "make build" and {"allow_once", "deny"} <= {c.choice for c in shown.dto.choices}
+        person_answers("allow_once")(holder)
+    waiting(monkeypatch, supervisor, *([person] if boss == "escalate" else []))
+    out = opencode.hook_main(db, "w1", "opencode-permission-ask", json.dumps(
+        {"session_id": "ses_1", "permission": "bash", "metadata": {"command": "make build"}}))
+    assert json.loads(out)["decision"] == answer
+
+
 SUBAGENT = "a47d9298166766162"
 MAKE_BUILD = {"tool_name": "Bash", "tool_input": {"command": "make build"}}
 

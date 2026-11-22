@@ -120,7 +120,8 @@ def test_one_watch_tick_with_no_sidebar_tells_the_supervisor_of_a_codex_approval
     asyncio.run(lifecycle._watch(server, None, False, wait=one_minute, clock=lambda: now[0]))
 
     assert db.get_agent("w1").status == "waiting"
-    assert [to for to, body in sent if "w1" in body and "Would you like to run" in body] == ["boss"]
+    # Told once, in a sentence: never Codex's prompt pasted (tests/test_worker_prompt_inbox.py).
+    assert [to for to, body in sent if "w1" in body and "uv run python -m pytest --version" in body] == ["boss"]
 
 
 @pytest.mark.variant("audit gap: the provider switch sweep had no periodic caller")

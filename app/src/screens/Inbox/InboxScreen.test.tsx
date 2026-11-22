@@ -8,7 +8,7 @@ import type { AskDTO, AskDecisionDTO, AskGroupDTO, GoalDTO, InboxItemDTO, Sessio
 import type { AppUpdateStatus, AppUpdates } from "../../api/tauri";
 import { AppUpdateBanner, AppUpdateProvider } from "../../components/AppUpdateBanner";
 import { BASE_URL, FakeDaemon, TOKEN } from "../../test/fakeDaemon";
-import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../../test/fixtures";
+import { REPO, paneEscalation, permission, permissionInTerminal, question, root, waiting, worker } from "../../test/fixtures";
 import { Permissions } from "../Settings/Permissions";
 import { forgetReclaimable } from "../../store/storage";
 import { InboxScreen, type InboxScreenProps } from "./InboxScreen";
@@ -644,6 +644,18 @@ describe("inbox", () => {
     fireEvent.click(within(held).getByRole("button", { name: "Stop asking for these…" }));
     expect(within(held).queryByRole("button", { name: /rule/ })).toBeNull();
     expect(onOpenRule).toHaveBeenCalledWith("unchecked-commands");
+  });
+
+  it("a worker's own prompt the engine read: its sentence is the headline, why included, and Allow answers exactly that request", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [paneEscalation] });
+    mount(daemon);
+    const card = await screen.findByTestId("permission-card");
+    const headline = card.querySelector("h3")!;
+    // The engine's sentence, its reason and sandbox context with it, not a bare "wants to run <command>".
+    expect(headline.textContent).toContain(paneEscalation.permission!.wording);
+    expect(headline.querySelector("code")).toBeNull();
+    fireEvent.click(within(within(card).getByRole("group", { name: "Decision" })).getByRole("button", { name: "Allow once" }));
+    await waitFor(() => expect(daemon.permissionAnswers).toEqual([{ agent: "w1", request: "pane-0123456789abcdef", choice: "allow_once" }]));
   });
 
   it("a hold with no group: the request is in the headline, Allow never saves a grant by itself, and a refusal shows on the card", async () => {

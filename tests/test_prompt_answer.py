@@ -124,7 +124,8 @@ def test_teach_auto_mode_startup_bypasses_classifier(db, launch, options, cursor
                  "claude", marks=pytest.mark.variant("completed Claude tool transcript before a plain question")),
     pytest.param("Hooks need review", ["1. Enable hooks", "2. Skip hooks"], "review", "starting", None, "codex",
                  marks=pytest.mark.variant("#250: reviewer startup menu")),
-    pytest.param("Would you like to run the following command?\n$ make probe", ["1. Yes", "2. No"], "review", "processing", None, "codex",
+    pytest.param("Would you like to run the following command?\n$ curl -s https://example.com/probe", ["1. Yes", "2. No"],
+                 "review", "processing", None, "codex",
                  marks=pytest.mark.variant("#250: reviewer command approval")),
     pytest.param(TRUST, ["Not now", "Allow this folder"], "assign", "hooked", None, "antigravity",
                  marks=pytest.mark.variant("bypass attempt: a menu the agent raises mid-task; the only test of the hook ending startup")),
@@ -150,9 +151,14 @@ def test_a_menu_after_the_session_started_is_never_answered(db, launch, monkeypa
         agents.handle_hook(db, "w1", "codex-permission-request", {"tool_name": "Bash"})
         assert cull.note_stuck(db, launch.clock[0], {})
     assert db.get_agent("w1").status == "waiting"
-    [message] = db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss' AND held=1").fetchall()
-    assert question in message["body"]
-    assert all(option in message["body"] for option in options)
+    permission = question.startswith("Would you like")   # asked mid-turn, to answer with answer_permission
+    [message] = db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss' AND (held=1 OR ?)",
+                                (permission,)).fetchall()
+    if permission:
+        assert question.splitlines()[-1].removeprefix("$ ") in message["body"]
+    else:
+        assert question in message["body"]
+        assert all(option in message["body"] for option in options)
     assert not cull.note_stuck(db, launch.clock[0], {})
     assert db.pending_count("boss") == 1
     assert not pane.keys and not asked
