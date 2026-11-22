@@ -72,7 +72,7 @@ _PROSE_DETERMINER_BEFORE_RE = re.compile(
 _PROSE_QUOTED_RE = re.compile(r"""(?<![\w=])(["'])brindle\s+([^"'\n]+?)\1""")
 _PROSE_PROMPT_RE = re.compile(r"^\s*(?:\$|%)\s+brindle\s+(.+)$")
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
-_MD_EMPHASIS_RE = re.compile(r"(?<!\w)\*\*?([^\s*][^*\n]*?)\*\*?(?!\w)")
+_MD_EMPHASIS_RE = re.compile(r"(?<!\w)(\*\*?)([^\s*][^*\n]*?)\1(?!\w)")
 _PROSE_CMD_SUFFIX_WORDS = frozenset({"command", "commands", "subcommand", "subcommands"})
 _PROSE_STOP_WORDS = frozenset({
     "a", "about", "above", "across", "after", "again", "against", "all",
@@ -569,6 +569,42 @@ def _scan_prose_text(
     return has_prior_cmd_in_sentence(len(scan_text))
 
 
+def _strip_md_emphasis_with_mask(
+    chars: list[str],
+    in_code: list[bool],
+    cmd_offsets: set[int],
+) -> tuple[str, list[bool], set[int]]:
+    """Strip paired Markdown ``*``/``**`` delimiters outside inline code spans
+    while preserving per-character code provenance and command-marker offsets."""
+    text = "".join(chars)
+    if "*" not in text:
+        return text, in_code, cmd_offsets
+
+    drop: set[int] = set()
+    for m in _MD_EMPHASIS_RE.finditer(text):
+        dlen = len(m.group(1))
+        open_range = range(m.start(), m.start() + dlen)
+        close_range = range(m.end() - dlen, m.end())
+        if any(in_code[i] for i in open_range) or any(in_code[i] for i in close_range):
+            continue
+        drop.update(open_range)
+        drop.update(close_range)
+    if not drop:
+        return text, in_code, cmd_offsets
+
+    new_chars: list[str] = []
+    new_in_code: list[bool] = []
+    old_to_new: list[int] = []
+    for idx, ch in enumerate(chars):
+        old_to_new.append(len(new_chars))
+        if idx not in drop:
+            new_chars.append(ch)
+            new_in_code.append(in_code[idx])
+    old_to_new.append(len(new_chars))
+    new_offsets = {old_to_new[o] for o in cmd_offsets if 0 <= o <= len(chars)}
+    return "".join(new_chars), new_in_code, new_offsets
+
+
 def _scan_prose_line(
     line_text: str,
     lineno: int,
@@ -895,7 +931,6 @@ def _check_markdown(
         plain = unmasked[last_end:start_pos]
         if plain:
             cleaned = _HTML_TAG_RE.sub(lambda tm: "\n" * tm.group(0).count("\n"), plain)
-            cleaned = _MD_EMPHASIS_RE.sub(r"\1", cleaned)
             prose_chunks.append((cleaned, False, False))
         span_line = unmasked.count("\n", 0, start_pos) + 1
         span_text = " ".join(m.group(2).split())
@@ -914,7 +949,6 @@ def _check_markdown(
     tail_plain = unmasked[last_end:]
     if tail_plain:
         cleaned = _HTML_TAG_RE.sub(lambda tm: "\n" * tm.group(0).count("\n"), tail_plain)
-        cleaned = _MD_EMPHASIS_RE.sub(r"\1", cleaned)
         prose_chunks.append((cleaned, False, False))
 
     # Split visible prose chunks into 1-based lines while preserving `in_code` and `cmd_offsets`.
@@ -925,18 +959,21 @@ def _check_markdown(
 
     def flush_md_line() -> None:
         if line_chars:
+            line_str, mask, offsets = _strip_md_emphasis_with_mask(
+                line_chars, line_in_code, line_cmd_offsets
+            )
             _scan_prose_line(
-                "".join(line_chars),
+                line_str,
                 cur_lineno,
                 cli_tree,
                 global_options,
                 record,
-                prior_cmd_offsets=line_cmd_offsets,
-                in_code=line_in_code,
+                prior_cmd_offsets=offsets,
+                in_code=mask,
             )
-            line_chars.clear()
-            line_in_code.clear()
-            line_cmd_offsets.clear()
+        line_chars.clear()
+        line_in_code.clear()
+        line_cmd_offsets.clear()
 
     for chunk_text, chunk_in_code, is_marker in prose_chunks:
         for ch in chunk_text:
