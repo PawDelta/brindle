@@ -84,6 +84,11 @@ def _builtin_names(package: str) -> list[str]:
     return [name for name, _ in _builtin_files(package)]
 
 
+def builtin_names() -> set[str]:
+    """The names of brindle's own (built-in) profiles."""
+    return set(_builtin_names("brindle.builtin_agents"))
+
+
 class ProfileError(ValueError):
     """A profile file that can't be used as written: an ``extends`` cycle, or
     a native profile naming a Claude subscription token."""

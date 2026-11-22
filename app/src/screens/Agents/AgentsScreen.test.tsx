@@ -15,10 +15,22 @@ vi.mock("../../api/open", () => ({ openExternal: vi.fn(() => Promise.resolve()),
 
 afterEach(cleanup);
 
+/* How the engine names each model (brindle.model_names): the app shows these, never its own reading of an id. */
+const DISPLAY: Record<string, string> = {
+  "haiku-5.5": "Haiku 5.5", "sonnet-5.5": "Sonnet 5.5", "opus-5.5": "Opus 5.5", "fable-5.1": "Fable 5.1",
+  "gpt-5.5": "GPT-5.5", "gpt-5.5-mini": "GPT-5.5 Mini", "gemini-3-pro": "Gemini 3 Pro",
+};
+const MAKER: Record<string, [string, string]> = { claude: ["Anthropic", "Claude Code"], codex: ["OpenAI", "Codex"], antigravity: ["Google", "Antigravity"], opencode: ["OpenCode", "OpenCode"] };
+
+/* A built-in profile, unless `builtin: false` says it's the person's own. */
 const rp = (name: string, provider: string, model: string | null, cost_tier: string, fields: Partial<RoutingProfile> = {}): RoutingProfile => ({
   name,
   provider,
   model,
+  display: model ? DISPLAY[model] : MAKER[provider][1],
+  maker: MAKER[provider][0],
+  tool: MAKER[provider][1],
+  builtin: true,
   cost_tier,
   installed: true,
   signed_in: true,
@@ -36,7 +48,7 @@ const profiles: RoutingProfile[] = [
   rp("reviewer", "claude", "opus-5.5", "high"),
   rp("reviewer-codex", "codex", "gpt-5.5", "medium"),
   rp("supervisor", "claude", null, "medium"),
-  rp("quick-fix", "codex", "gpt-5.5-mini", "low"),
+  rp("quick-fix", "codex", "gpt-5.5-mini", "low", { builtin: false }),
 ];
 
 const described: DaemonData["profiles"] = [
@@ -130,6 +142,24 @@ describe("agents tab", () => {
     expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { medium: { model: "developer-heavy", fallbacks: ["developer", "developer-codex"] } } });
     expect(chain("medium")).toBe("Sonnet 5.5, then GPT-5.5");
     expect(lock("medium").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("agents: a built-in profile the app has never heard of is named by the engine's display name, not its id, and isn't a custom agent", async () => {
+    const sol = rp("developer-codex-sol", "codex", "gpt-6.1-sol", "medium", { display: "GPT‑6.1 Sol", effort: "high" });
+    const config = data().routingConfig!;
+    setup({ routingProfiles: [...profiles, sol], routingConfig: { ...config, user: { ...config.user, routing: { ...config.user.routing, medium: ["developer-codex-sol", "developer"] } } } });
+    await screen.findByTestId("kind-medium");
+
+    const name = runsOn("medium").querySelector<HTMLElement>("[data-model-name]");
+    expect(name?.dataset.modelName).toBe("GPT‑6.1 Sol");
+    expect(runsOn("medium").textContent).not.toContain("developer-codex-sol");
+    expect(runsOn("medium").querySelector('[data-effort="high"]')).toBeTruthy();
+    // The quick-fix custom agent is shown by its own name, with no model name standing in for it.
+    expect(within(row("light")).getByTestId("chain").textContent).toContain("quick-fix");
+    fireEvent.click(runsOn("light"));
+    const light = within(row("light")).getByRole("group", { name: "Choices for Light" });
+    expect(option(light, "quick-fix")!.querySelector("[data-model-name]")).toBeNull();
+    expect(option(light, "developer-codex-sol")!.querySelector("[data-model-name]")).toBeTruthy();
   });
 
   it("agents: reorders, removes and adds fallbacks inline, under the row", async () => {

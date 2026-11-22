@@ -134,7 +134,7 @@ describe("Sidebar", () => {
     ["paused", "review", "done", "Done", "done"],
     ["idle", "merging", "done", "Done", "done"],
   ])("session status word: %s / %s / %s reads as %s", async (status, stage, goal_phase, word, colour) => {
-    mount({ workspaces: [{ ...root, agents: [{ ...root.agents![0], model: "claude-sonnet-4", status: status === "processing" ? "processing" : root.agents![0].status }] }, worker], sessions: [{ ...live, status }], goal: { ...goal, stage, goal_phase } }, { screen: "session", root: "sup1", repo: REPO });
+    mount({ workspaces: [{ ...root, agents: [{ ...root.agents![0], model: "claude-sonnet-4", model_display: "Claude Sonnet", status: status === "processing" ? "processing" : root.agents![0].status }] }, worker], sessions: [{ ...live, status }], goal: { ...goal, stage, goal_phase } }, { screen: "session", root: "sup1", repo: REPO });
     await waitFor(() => expect(within(sessionRow("sup1")!).getByTestId("session-status").textContent).toBe(word));
     const row = sessionRow("sup1")!;
     const label = within(row).getByTestId("session-status");
@@ -145,7 +145,7 @@ describe("Sidebar", () => {
     expect(marker.className).toContain(colour ? `st-${colour}` : "text-ink-3");
     expect(row.querySelector(".supervisor-tag")).toBeNull();
     if (!rested) {
-      expect(within(row).getByTestId("session-model").textContent).toBe("sonnet");
+      expect(within(row).getByTestId("session-model").textContent).toBe("Claude Sonnet");
       fireEvent.click(screen.getByRole("button", { name: "Hide sup1's agents" }));
       expect(agentRow("w1")).toBeNull();
       expect(within(row).getByTestId("session-status").textContent).toBe(word);
@@ -225,7 +225,7 @@ describe("Sidebar", () => {
   });
 
   it("branches workers from the root dot, folds from it, and opens the supervisor from the row", async () => {
-    const supervisor = { ...worker.agents![0], profile: "supervisor-sonnet", milestone: "Release page" };
+    const supervisor = { ...worker.agents![0], profile: "supervisor-sonnet", milestone: "Release page", model_display: "Claude Sonnet" };
     const { navigate } = mount({ workspaces: [root, { ...worker, agents: [supervisor, child] }] });
     await waitFor(() => expect(agentRow("c1")).toBeTruthy());
     expect(agentRow("sup1")).toBeNull();
@@ -233,7 +233,7 @@ describe("Sidebar", () => {
     expect(agentRow("c1")!.closest("ul")!.parentElement).toBe(agentRow("w1")!.closest("li"));
     expect(agentRow("w1")!.closest("li")!.classList.contains("session-tree-node")).toBe(true);
     expect(agentRow("c1")!.closest("li")!.classList.contains("session-tree-node")).toBe(true);
-    expect(within(agentRow("w1")!).getByTestId("agent-role").textContent).toBe("supervisor · sonnet");
+    expect(within(agentRow("w1")!).getByTestId("agent-role").textContent).toBe("supervisor · Claude Sonnet");
     expect(agentRow("w1")!.querySelector(".supervisor-tag")).toBeNull();
     const dot = screen.getByRole("button", { name: "Hide sup1's agents" });
     expect(dot.classList.contains("session-root-dot")).toBe(true);
@@ -275,21 +275,25 @@ describe("Sidebar", () => {
   it("worker row role reads only the role, with the milestone, model and branch in the tooltip, and double-click copies its info", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
-    const a = { ...worker.agents![0], profile: "developer-haiku", milestone: "Logo goes Home" };
-    const b = { ...a, id: "w2", milestone: undefined, profile: "developer-heavy" };
-    // The pipeline's reviewer is the developer's sibling (same parent), on a Codex model.
-    const r = { ...a, id: "w3", mode: "review", profile: "codex", provider: "codex", model: "gpt-6-luna", milestone: undefined };
-    const g = { ...a, id: "w4", profile: "developer-gemini", provider: "gemini", model: "gemini-3-pro", milestone: undefined };
-    const bare = { ...a, id: "w5", profile: "claude", milestone: undefined };
+    // Each worker carries the engine's job size and model name; none is read from its profile's id.
+    const a = { ...worker.agents![0], profile: "developer-haiku", milestone: "Logo goes Home", weight: "light", model_display: "Claude Haiku" };
+    const b = { ...a, id: "w2", milestone: undefined, profile: "developer-heavy", weight: "heavy", model_display: "Claude" };
+    // The pipeline's reviewer is the developer's sibling (same parent), on a Codex model: no job size.
+    const r = { ...a, id: "w3", mode: "review", profile: "codex", provider: "codex", model: "gpt-6-luna", weight: undefined, model_display: "GPT‑6 Luna", milestone: undefined };
+    const g = { ...a, id: "w4", profile: "developer-codex-sol", provider: "codex", model: "gpt-6.1-sol", weight: "medium", model_display: "GPT‑6.1 Sol", milestone: undefined };
+    const bare = { ...a, id: "w5", profile: "claude", weight: undefined, model_display: undefined, milestone: undefined };
     mount({ workspaces: [root, { ...worker, agents: [a, r] }, { ...worker, id: "proj/other", name: "other", branch: "feat/other", agents: [b, g, bare] }] }, { screen: "session", root: "sup1", repo: REPO });
     await waitFor(() => expect(agentRow("w1")).toBeTruthy());
-    expect(within(agentRow("w4")!).getByTestId("agent-role").textContent).toBe("developer · gemini");
+    const role = (id: string) => within(agentRow(id)!).getByTestId("agent-role").dataset;
     expect(agentRow("w1")!.closest("li")!.contains(agentRow("w3"))).toBe(true);
-    expect(within(agentRow("w3")!).getByTestId("agent-role").textContent).toBe("reviewer · codex");
-    expect(within(agentRow("w2")!).getByTestId("agent-role").textContent).toBe("developer · claude");
-    expect(within(agentRow("w5")!).getByTestId("agent-role").textContent).toBe("developer");
-    expect(within(agentRow("w1")!).getByTestId("agent-role").textContent).toBe("developer · haiku");
-    expect(agentRow("w1")!.title).toContain("haiku");
+    // A sized worker leads with its size, the model second; a profile id no list knows still gets the engine's name.
+    expect([role("w4").size, role("w4").modelName]).toEqual(["medium", "GPT‑6.1 Sol"]);
+    expect([role("w1").size, role("w1").modelName]).toEqual(["light", "Claude Haiku"]);
+    expect([role("w2").size, role("w2").modelName]).toEqual(["heavy", "Claude"]);
+    expect(within(agentRow("w4")!).getByTestId("agent-role").textContent).not.toContain("developer-codex-sol");
+    expect([role("w3").size, role("w3").modelName]).toEqual([undefined, "GPT‑6 Luna"]);
+    expect([role("w5").size, role("w5").modelName]).toEqual([undefined, undefined]);
+    expect(agentRow("w1")!.title).toContain("Claude Haiku");
     expect(agentRow("w1")!.title).toContain("milestone: Logo goes Home");
     expect(agentRow("w3")!.title).toContain("gpt-6-luna");
     expect(agentRow("w2")!.querySelector("[data-testid=agent-title]")).toBeNull();

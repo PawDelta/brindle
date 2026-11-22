@@ -61,7 +61,9 @@ def test_worker_records_the_milestone_current_when_assigned(db, repo, no_pane):
     db.set_milestones(supervisor.id, [("Parse flags", "true", None), ("Print JSON", "true", None)])
     db.record_check(db.milestones(supervisor.id)[0].id, True, "ok")
     worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id)
-    assert view.agent_entry(db, db.get_agent(worker.id))["milestone"] == "Print JSON"
+    db.update_agent(worker.id, weight="heavy")
+    entry = view.agent_entry(db, db.get_agent(worker.id))
+    assert (entry["milestone"], entry["weight"], entry["model_display"]) == ("Print JSON", "heavy", "Claude")
     assert "milestone" not in view.agent_entry(db, db.get_agent(supervisor.id))
 
 
