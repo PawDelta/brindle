@@ -20,7 +20,7 @@ function fixed(state: OrgSettings, id: OrgSettingName) {
 }
 function choices(id: OrgSettingName) {
   if (id === "share_links") return [
-    { value: "org", name: "People in this organisation", help: "A link requires sign-in to this organisation." },
+    { value: "org", name: "People in this organization", help: "A link requires sign-in to this organization." },
     { value: "anyone", name: "Anyone with the link", help: "Anyone who has the link can open the plan." },
     { value: "off", name: "Off", help: "Plans cannot be opened through share links." },
   ];
@@ -29,7 +29,7 @@ function choices(id: OrgSettingName) {
     { value: "off", name: "Each person's Mac", help: "Nothing is uploaded. A shared plan is sent on its own." },
   ];
   return [
-    { value: "on", name: "On", help: id === "share" ? "Plans can be shared with people, teams and the organisation." : "Enabled for members with their Library on brindle servers." },
+    { value: "on", name: "On", help: id === "share" ? "Plans can be shared with people, teams and the organization." : "Enabled for members with their Library on brindle servers." },
     { value: "off", name: "Off", help: id === "share" ? "Sharing is turned off." : "Turned off for members." },
   ];
 }
@@ -42,7 +42,7 @@ function display(state: OrgSettings, id: OrgSettingName) {
   return fixed(state, id) ? value : `Starts ${value.toLowerCase()}`;
 }
 
-export function Organisation({ client }: { client: Pick<DaemonClient, "orgSettings" | "setOrgSetting"> }) {
+export function Organization({ client }: { client: Pick<DaemonClient, "orgSettings" | "setOrgSetting"> }) {
   const [state, setState] = useState<OrgSettings | null>(null);
   const [editing, setEditing] = useState<OrgSettingName | null>(null);
   const [selected, setSelected] = useState("off");
@@ -66,10 +66,10 @@ export function Organisation({ client }: { client: Pick<DaemonClient, "orgSettin
     return () => { generation.current++; };
   }, [client, reload]);
 
-  const organisationSwitches = state?.can_edit_org ? state.policy.switches : {};
+  const organizationSwitches = state?.can_edit_org ? state.policy.switches : {};
   const view = state && scope ? { ...state, policy: { ...state.policy, switches: {
-    ...organisationSwitches, ...state.policy.groups[scope]?.switches,
-    ...Object.fromEntries(Object.entries(organisationSwitches).filter(([, value]) => value?.startsWith("enforced_"))),
+    ...organizationSwitches, ...state.policy.groups[scope]?.switches,
+    ...Object.fromEntries(Object.entries(organizationSwitches).filter(([, value]) => value?.startsWith("enforced_"))),
   } } } : state;
   const canEdit = (id: OrgSettingName) => !!state && (scope
     ? state.can_edit_groups && !(state.can_edit_org && state.policy.switches[id as keyof typeof state.policy.switches]?.startsWith("enforced_"))
@@ -119,11 +119,11 @@ export function Organisation({ client }: { client: Pick<DaemonClient, "orgSettin
     }
   };
 
-  return <section className="flex flex-col gap-s2" aria-label="Organisation Library settings">
+  return <section className="flex flex-col gap-s2" aria-label="Organization Library settings">
     <header className="flex flex-wrap items-baseline gap-x-s2 gap-y-0.5"><h2 className={h2}>Library</h2><span className="text-xs text-ink-3">What everyone gets, as members read it. Change one setting at a time.</span></header>
-    {state && Object.keys(state.policy.groups).length > 0 && <label className="flex items-baseline gap-s2 text-sm">Settings for<select className={field} aria-label="Settings for" value={scope} disabled={busy} onChange={e => { setScope(e.target.value); setEditing(null); setError(null); }}><option value="">Organisation</option>{Object.keys(state.policy.groups).map(group => <option key={group} value={group}>{group}</option>)}</select></label>}
-    {state && !state.can_edit_org && !scope && <p className="px-s2 text-xs text-ink-3">Organisation-wide settings require Enterprise. On Team, admins can change their groups' settings.</p>}
-    {!state && !error && <p role="status" className="text-sm text-ink-3">Loading organisation settings…</p>}
+    {state && Object.keys(state.policy.groups).length > 0 && <label className="flex items-baseline gap-s2 text-sm">Settings for<select className={field} aria-label="Settings for" value={scope} disabled={busy} onChange={e => { setScope(e.target.value); setEditing(null); setError(null); }}><option value="">Organization</option>{Object.keys(state.policy.groups).map(group => <option key={group} value={group}>{group}</option>)}</select></label>}
+    {state && !state.can_edit_org && !scope && <p className="px-s2 text-xs text-ink-3">Organization-wide settings require Enterprise. On Team, admins can change their groups' settings.</p>}
+    {!state && !error && <p role="status" className="text-sm text-ink-3">Loading organization settings…</p>}
     {view && [true, false].map(isFixed => <div key={String(isFixed)} className="flex flex-col gap-1.5">
       <div className="flex flex-wrap items-baseline gap-s2 px-s2"><h3 className={label}>{isFixed ? "Set for everyone" : "Members choose"}</h3><span className="text-xs text-ink-3">{isFixed ? "Members see the value and can't change it." : "Each person starts with the value shown."}</span></div>
       {ROWS.filter(row => (!scope || row.id !== "share_links") && fixed(view, row.id) === isFixed).map(row => <div key={row.id} data-testid={`org-setting-${row.id}`} data-state={editing === row.id ? "editing" : "reading"} className={`border-t px-s2 py-s1 ${editing === row.id ? "border-branch" : "border-line"}`}>

@@ -257,7 +257,7 @@ def snapshot(db: DB, visual_id: str, rev: int, html: str, destination: str = "do
 
         policy = docs_org_api("GET", "policy", repo=v["repo_root"])
         if destination not in policy.get("export_destinations", ["download"]):
-            raise ServiceError("forbidden", "the organisation does not allow this destination", 403)
+            raise ServiceError("forbidden", "the organization does not allow this destination", 403)
     content = markdown if markdown is not None else html
     if not isinstance(content, str) or not content.strip() or len(content.encode()) > visuals.MAX_BYTES:
         raise ServiceError("invalid", "the snapshot is missing or too large")

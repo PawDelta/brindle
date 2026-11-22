@@ -85,7 +85,7 @@ describe("DocSwitches", () => {
   });
 
   it("shows the daemon's refusal", async () => {
-    setup(vi.fn().mockRejectedValue(new Error("your organisation has share off for everyone")));
+    setup(vi.fn().mockRejectedValue(new Error("your organization has share off for everyone")));
     fireEvent.click(await screen.findByRole("switch", { name: "Sharing" }));
     expect((await screen.findByRole("alert")).textContent).toContain("share off for everyone");
     expect(screen.getByRole("switch", { name: "Sharing" }).getAttribute("aria-checked")).toBe("true");

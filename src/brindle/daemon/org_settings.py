@@ -21,7 +21,7 @@ def save(body):
     repo = _get(body, "repo")
     ent = _docs_entitlement(repo)
     if ent.role not in ("owner", "admin"):
-        raise ServiceError("forbidden", "only an organisation owner or admin can do this", 403)
+        raise ServiceError("forbidden", "only an organization owner or admin can do this", 403)
     if ent.org_id != org or ent.sub != actor:
         raise ServiceError("identity_changed", "Your active account changed; reload these settings.", 409)
     name = _get(body, "name", required=True)
@@ -32,7 +32,7 @@ def save(body):
         raise ServiceError("forbidden", "Org-wide settings require Enterprise; Team admins can edit group settings.", 403)
     allowed = ("anyone", "org", "off") if name == "share_links" else analysis_policy.STATES
     if name not in (*analysis_policy.SWITCHES, "share_links") or value not in allowed:
-        raise ServiceError("invalid", "Unknown organisation setting or value.")
+        raise ServiceError("invalid", "Unknown organization setting or value.")
     return _save_row(ent, repo, org, actor, name, value, group, _get(body, "previous", required=True))
 
 
@@ -58,7 +58,7 @@ def _changed_policy(current, ent, name, value, group, previous):
         if name == "share_links" or group not in current["groups"]:
             raise ServiceError("invalid", "Choose an existing group and a group setting.")
         if current["switches"].get(name) in ("enforced_on", "enforced_off") and "analysis_docs_enterprise" in ent.features:
-            raise ServiceError("forbidden", "This setting is fixed for the whole organisation.", 403)
+            raise ServiceError("forbidden", "This setting is fixed for the whole organization.", 403)
         switches = current["groups"][group]["switches"]
     # Refuse an edit of an out-of-date row, preserving unrelated fields and groups.
     actual = current.get("share_links", "org") if name == "share_links" else switches.get(name, "off")

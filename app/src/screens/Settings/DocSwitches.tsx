@@ -2,7 +2,7 @@
    (GET /analysis-docs/switches), each set with PUT /analysis-docs/switches.
    The `store` switch is the Library location: This Mac (off) or brindle servers (on);
    changing it moves the plans there, and the engine turns the switches that need the
-   servers on (servers) or off (This Mac) in the same update; the reply carries them all. A switch their organisation enforces is shown
+   servers on (servers) or off (This Mac) in the same update; the reply carries them all. A switch their organization enforces is shown
    locked, with the org's value, and can't be changed here. Without the analysis_docs
    plan, or an engine without the route, the section isn't shown. */
 
@@ -15,7 +15,7 @@ export type DocSwitchesClient = Pick<DaemonClient, "docSwitches" | "setDocSwitch
 
 const ABOUT: Record<DocSwitchName, { name: string; help: string }> = {
   store: { name: "Library location", help: "Where your approved plans are kept." },
-  share: { name: "Sharing", help: "Let your plans be shared with your teams and organisation." },
+  share: { name: "Sharing", help: "Let your plans be shared with your teams and organization." },
   assist: { name: "Briefs", help: "Give new work a brief from the plans that match it." },
   prompt_analysis: { name: "Prompt analysis", help: "Record which plans your prompts matched (never the prompt itself)." },
   import_upload: { name: "Imported folders", help: "Let folders you add to your library be uploaded." },
@@ -24,7 +24,7 @@ const ABOUT: Record<DocSwitchName, { name: string; help: string }> = {
 /* The two Library locations: the store switch off and on. */
 const LOCATIONS: { on: boolean; label: string; help: string }[] = [
   { on: false, label: "This Mac", help: "Private to you. When you share a plan, only that plan goes to brindle servers." },
-  { on: true, label: "brindle servers", help: "Keep your Library on brindle servers. Turns on Sharing, Briefs, Imported folders and Prompt analysis, unless set by your organisation." },
+  { on: true, label: "brindle servers", help: "Keep your Library on brindle servers. Turns on Sharing, Briefs, Imported folders and Prompt analysis, unless set by your organization." },
 ];
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
@@ -114,13 +114,13 @@ export function DocSwitches({ client }: { client: DocSwitchesClient }) {
         <h2 id="doc-switches-title" className={h2}>Library</h2>
         <span className="text-xs text-ink-3">Where your approved plans live and what brindle does with them.</span>
       </header>
-      {hasLocked && <h3 className="px-s2 pt-s1 text-xs font-medium uppercase text-ink-3">Set by your organisation</h3>}
+      {hasLocked && <h3 className="px-s2 pt-s1 text-xs font-medium uppercase text-ink-3">Set by your organization</h3>}
       {store?.locked && <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-s3 border-t border-line px-s2 py-s1" data-testid="doc-switch-store" data-state="locked">
         <div><div className="text-sm font-medium">{ABOUT.store.name}</div><p className="text-xs text-ink-3">{ABOUT.store.help}</p></div>
         <span className="inline-flex items-center gap-1.5 text-[13px]"><PolicyLock />{lockedValue(store)}</span>
       </div>}
       {hasLocked && <div className="flex flex-col divide-y divide-line border-y border-line">{serverSwitches.filter(s => s.locked && s.name === "share").map(renderSwitch)}
-        {policy.share_links !== undefined && <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-s3 px-s2 py-s1" data-testid="doc-policy-links" data-state="locked"><div><div className="text-sm font-medium">Plan links</div><p className="text-xs text-ink-3">Who a plan's link opens for.</p></div><span className="inline-flex items-center gap-1.5 text-[13px]"><PolicyLock />{policy.share_links === "anyone" ? "Anyone with the link" : policy.share_links === "org" ? "People in your organisation" : "Off"}</span></div>}
+        {policy.share_links !== undefined && <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-s3 px-s2 py-s1" data-testid="doc-policy-links" data-state="locked"><div><div className="text-sm font-medium">Plan links</div><p className="text-xs text-ink-3">Who a plan's link opens for.</p></div><span className="inline-flex items-center gap-1.5 text-[13px]"><PolicyLock />{policy.share_links === "anyone" ? "Anyone with the link" : policy.share_links === "org" ? "People in your organization" : "Off"}</span></div>}
         {serverSwitches.filter(s => s.locked && s.name !== "share").map(renderSwitch)}
       </div>}
       {switches.some(s => !s.locked) && <h3 className="px-s2 pt-s1 text-xs font-medium uppercase text-ink-3">Yours to change</h3>}
@@ -164,7 +164,7 @@ export function DocSwitches({ client }: { client: DocSwitchesClient }) {
           {serverSwitches.filter(s => !s.locked).map(renderSwitch)}
         </div>
       </div>
-      {hasLocked && <p className="flex items-center gap-1.5 px-s2 text-xs text-ink-3"><PolicyLock />Set by your organisation. Ask an organisation owner or admin to change these.</p>}
+      {hasLocked && <p className="flex items-center gap-1.5 px-s2 text-xs text-ink-3"><PolicyLock />Set by your organization. Ask an organization owner or admin to change these.</p>}
       {move && move.left > 0 && (
         <div role="alert" className={alert}>
           {move.left} {move.left === 1 ? "plan wasn't" : "plans weren't"} moved yet.{" "}

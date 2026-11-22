@@ -98,7 +98,7 @@ export const SETTINGS_TABS = [
   { id: "format", label: "Plan format" },
   { id: "storage", label: "Storage" },
   { id: "project", label: "Project" },
-  { id: "organisation", label: "Organisation" },
+  { id: "organization", label: "Organization" },
   { id: "about", label: "About" },
 ] as const;
 export type SettingsTab = (typeof SETTINGS_TABS)[number]["id"];
