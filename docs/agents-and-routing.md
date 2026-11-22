@@ -11,10 +11,10 @@ The supervisor sizes each task as a **kind of work**:
 | Kind | Meant for | Default agent |
 |---|---|---|
 | `light` | small, well-specified, mechanical work (docs, renames, simple tests) | `dev.claude-haiku` (Claude Haiku, low effort) |
-| `medium` | a normal feature or bugfix in one area | `dev.claude` (Claude Code default model) |
+| `medium` | a normal feature or bugfix in one area | `developer` (Claude Code default model) |
 | `heavy` | architecture, broad refactors, subtle bugs | `dev.claude-opus` (Claude Opus, high effort) |
 | `advanced` | complex, long-running system design and implementation | `dev.claude-fable` (Claude Fable, high effort) |
-| reviewer | checking a worker's branch before it merges | `review.claude-sonnet` (the `reviewer` config key) |
+| reviewer | checking a worker's branch before it merges | `review.claude-sonnet.high` (the `reviewer` config key) |
 | supervisor | planning, handing out tasks, merging | your Claude Code model, or the CLI you pick with `brindle -s` |
 
 Light, Medium, Heavy and Advanced are brindle's task-size words. Worker names
@@ -32,9 +32,9 @@ lists agents in the order brindle tries them. These are the defaults:
 ```json
 {
   "routing": {
-    "light":    ["dev.claude-haiku", "dev.claude", "dev.gpt", "dev.qwen3-coder"],
-    "medium":   ["dev.claude", "dev.gpt", "dev.claude-opus"],
-    "heavy":    ["dev.claude-opus", "dev.gemini", "dev.claude", "dev.gpt"],
+    "light":    ["dev.claude-haiku", "developer", "dev.gpt", "dev.qwen3-coder"],
+    "medium":   ["developer", "dev.gpt", "dev.claude-opus"],
+    "heavy":    ["dev.claude-opus", "dev.gemini", "developer", "dev.gpt"],
     "advanced": ["dev.claude-fable", "dev.claude-opus", "dev.gemini"]
   }
 }
@@ -50,7 +50,7 @@ margin. `limit_cooldown_minutes` sets how long a provider that hit its limit
 counts as unavailable. The first agent left runs. If every
 candidate is out, the repo's `default_agent` runs. The reply to the supervisor
 says what was picked and why, for example
-`weight medium -> Claude · runs in Codex (at 93%, skipped GPT · runs in Codex)`.
+`weight medium -> Claude · runs in Claude Code (at 93%, skipped GPT · runs in Codex)`.
 
 A `native` profile that runs a local model can also name a backup with
 `fallback:` in its profile (for example `dev.qwen3-coder` falls back to
@@ -64,7 +64,7 @@ team), `.brindle/config.local.json` (just you, this repo) or
 tiers you leave out keep theirs:
 
 ```json
-{"routing": {"light": ["dev.gpt", "dev.claude"]}}
+{"routing": {"light": ["dev.gpt", "developer"]}}
 ```
 
 `brindle doctor` shows the list in effect for each tier and the file it came
@@ -140,7 +140,7 @@ list (or sets `reviewer`); "any kind" adds it as a candidate. You can do the
 same by hand:
 
 ```json
-{"routing": {"medium": ["frontend", "dev.claude", "dev.gpt"]}}
+{"routing": {"medium": ["frontend", "developer", "dev.gpt"]}}
 ```
 
 ```json
