@@ -4,7 +4,7 @@
      it, and gives it the engine's version): what macOS takes the daemon, tmux and
      every agent's pane for, as they all descend from the daemon's launchd job.
      Its name is what a privacy prompt and System Settings show, and these strings
-     are what the prompt says under it (docs/investigations/macos-prompts.md).
+     are what the prompt says under it.
      Never opened as an app: no window, no Dock icon. -->
 <plist version="1.0">
 <dict>
