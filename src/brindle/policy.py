@@ -143,7 +143,9 @@ def _profile_fields(profile: str | None, repo_root: str, *,
                 pass
         if not model:
             if p.provider == "codex":
-                model = "gpt-5.3-codex"
+                from brindle.providers import codex_default_model
+
+                model = codex_default_model(repo_root)
             elif p.provider == "antigravity":
                 model = "gemini-2.5-pro"
             elif p.provider == "claude":

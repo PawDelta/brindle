@@ -113,6 +113,44 @@ def _codex_config() -> dict:
         return {}
 
 
+def codex_default_model(cwd: str) -> str | None:
+    """Ask the installed CLI for its configured model, else its catalog default.
+
+    No guessed fallback: an unavailable CLI or an unrecognized response leaves
+    policy with an unknown model, refused by a restrictive model allowlist.
+    """
+    from brindle import codex_hook
+
+    try:
+        server = codex_hook._AppServer(codex_binary(), [])
+        try:
+            cfg = server.call("config/read", {"includeLayers": False, "cwd": cwd})["config"]
+            active = (cfg.get("profiles") or {}).get(cfg.get("profile"), {})
+            model = active.get("model") or cfg.get("model")
+            if isinstance(model, str) and model.strip():
+                return model.strip()
+            params = {"includeHidden": True}
+            provider = active.get("model_provider") or cfg.get("model_provider")
+            if provider:
+                params["modelProvider"] = provider
+            seen = set()
+            while True:
+                result = server.call("model/list", params)
+                for entry in result["data"]:
+                    model = entry.get("model")
+                    if entry.get("isDefault") is True and isinstance(model, str) and model.strip():
+                        return model.strip()
+                cursor = result.get("nextCursor")
+                if not cursor or cursor in seen:
+                    return None
+                seen.add(cursor)
+                params["cursor"] = cursor
+        finally:
+            server.close()
+    except Exception:  # noqa: BLE001 - unknown defaults must never become an allowed guess
+        return None
+
+
 def _worktree_git_dirs(cwd: str) -> list[str]:
     """The git metadata a commit in the linked worktree ``cwd`` writes outside
     it: the worktree's admin dir (its index, HEAD, COMMIT_EDITMSG and reflog)
