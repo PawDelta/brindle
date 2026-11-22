@@ -640,7 +640,7 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     Only a waiting worker's pane is read: hooks mark a wait (a permission
     request), a question a turn ended on is forwarded by the turn-end hook
     (prompt_answer.at_turn_end), and startup prompts are settle_startups'."""
-    from brindle import pane_escalation, permission_routing, prompt_answer
+    from brindle import permission_routing, prompt_answer, worker_prompts
 
     done = []
     owners = agents.pane_owners(db, panes)
@@ -658,12 +658,23 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
             screen = ""
         if prompt_answer.decline_teach_auto_mode(db, a, screen):
             continue
-        # A Codex sandbox escalation is the policy's, then the supervisor's, and
-        # only then the person's, in a sentence: never its pane forwarded.
-        stage = pane_escalation.route(db, a, screen)
+        # Whatever it waits on is the rules', then its supervisor's, and only
+        # then the person's, in a sentence: never its pane forwarded.
+        before = db.mark(a.id, worker_prompts.MARK)
+        stage = worker_prompts.route(db, a, screen)
+        if stage == "answered":
+            done.append(f"answered worker {a.id}'s prompt by brindle's permission rules")
+        elif stage in ("supervisor", "person") and db.mark(a.id, worker_prompts.MARK) != before:
+            done.append(f"told {a.parent_id} that worker {a.id} is waiting on input")
+        elif stage == "hook":
+            # Its hook's request is the person's now: its supervisor hears that once, structured.
+            prompt = worker_prompts.current(db, a, screen)
+            pending = agents.pending_permission(db, a.id)
+            body = (worker_prompts.supervisor_note(db, a, prompt) if prompt else f"[brindle] Worker {a.id} is waiting.") \
+                + (f"\n\n{pending} Only the user can answer it; tell them exactly what is pending." if pending else "")
+            if _send_note(db, a, a.status_since or a.created_at, body):
+                done.append(f"told {a.parent_id} that worker {a.id} waits on the person")
         if stage is not None:
-            if stage == "answered":
-                done.append(f"answered worker {a.id}'s sandbox escalation by brindle's permission rules")
             continue
         health = db.conn.execute("SELECT submitted_prompt FROM launch_health WHERE agent_id=?",
                                  (a.id,)).fetchone()

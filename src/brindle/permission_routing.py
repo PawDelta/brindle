@@ -188,7 +188,7 @@ def answer(db: DB, callers: set[str], worker_id: str, request_id: str, choice: s
     the request is still the supervisor's (not person-only, escalated, or
     past its time). Every identical request of the worker's waiting on the
     supervisor is answered with it."""
-    from brindle import pane_escalation
+    from brindle import worker_prompts
     from brindle.daemon.holds import HOLDS
 
     if choice not in CHOICES:
@@ -200,11 +200,11 @@ def answer(db: DB, callers: set[str], worker_id: str, request_id: str, choice: s
         raise RoutingError("forbidden", "a worker can't answer its own permission request", 403)
     if not worker.parent_id or worker.parent_id not in callers:
         raise RoutingError("forbidden", f"only {worker.id}'s own supervisor answers its permission requests", 403)
-    if request_id.startswith(pane_escalation.PREFIX):
-        # Codex's own sandbox-escalation prompt, read off its pane (brindle.pane_escalation).
-        ok = (pane_escalation.escalate(db, worker, request_id) if choice == "escalate"
-              else pane_escalation.answer(db, worker, request_id, choice, " ".join(reason.split())[:REASON_CHARS],
-                                          by="supervisor"))
+    if request_id.startswith(worker_prompts.PREFIX):
+        # A permission at its CLI's own prompt, read off its pane (brindle.worker_prompts).
+        ok = (worker_prompts.escalate(db, worker, request_id) if choice == "escalate"
+              else worker_prompts.answer(db, worker, request_id, choice, " ".join(reason.split())[:REASON_CHARS],
+                                         by="supervisor"))
         if not ok:
             raise RoutingError("conflict", f"{worker.id}'s request {request_id} isn't waiting on you: it is the "
                                            "person's (your time ran out or you escalated it), answered already, "

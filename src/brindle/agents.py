@@ -6107,7 +6107,7 @@ def codex_policy_decision(agent: Agent, ws: Workspace, cfg, reqs: list, profile_
                           session: str | None, review_only: bool = False, spend: bool = True):
     """brindle's policy on a Codex request ``reqs`` (permissions.Request), as
     its PermissionRequest hook answers it, and as a sandbox escalation at
-    Codex's own prompt is decided (brindle.pane_escalation): the rules, the
+    Codex's own prompt is decided (brindle.worker_prompts): the rules, the
     repo's checks, and the profile's allowed_tools."""
     from dataclasses import replace
 

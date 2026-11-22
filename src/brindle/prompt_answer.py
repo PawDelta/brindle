@@ -650,14 +650,17 @@ def tell(db, agent, prompt: str) -> bool:
         return False
     db.set_status(a.id, "waiting")
     a = db.get_agent(a.id)
-    ws = db.get_workspace(a.workspace_id)
-    attach = f"Attach with `brindle attach {ws.name}` to answer it" if ws else "Answer it in its pane"
+    from brindle import worker_prompts
+
+    # Classified and routed (the rules, its supervisor as a structured message, then the
+    # person in a sentence), never the pane forwarded: one path for every prompt.
+    found = worker_prompts.classify(a.provider, prompt) or worker_prompts.Prompt("unknown", a.provider)
+    stage = worker_prompts.route(db, a, prompt, found)
+    if stage is not None:
+        return stage in ("supervisor", "person")
     pending = agents.pending_permission(db, a.id)
     request = f"\n\n{pending} Only the user can answer it." if pending else ""
-    prompt = redact(prompt)
-    summary = " | ".join(prompt.splitlines())
-    body = (f"Worker {a.id} ({a.profile}) is waiting on a prompt: {summary}\n\n"
-            f"{attach}, or send it guidance if it is asking a task question.{request}\n\nThe prompt:\n{prompt}")
+    body = worker_prompts.supervisor_note(db, a, found, prompt) + request
     won, previous = db.claim_note(a.id, a.status_since)
     if not won:
         return False
@@ -690,9 +693,11 @@ def at_turn_end(db, agent) -> bool:
         question = "\n".join(_tail(screen))
         told = blocking_prompt(screen, agent.provider, brief) and tell(db, agent, question)
         if told and not agents.pending_permission(db, agent.id):   # that one is the person's to answer
-            from brindle import open_items
+            from brindle import open_items, worker_prompts
 
-            open_items.track(db, agent, f"ended its turn on a question: {redact(question)[-open_items.DETAIL_LIMIT:]}")
+            fresh = db.get_agent(agent.id)
+            said = (worker_prompts.described(db, fresh) if fresh else None) or redact(question)[-open_items.DETAIL_LIMIT:]
+            open_items.track(db, agent, f"ended its turn on a question: {said}")
         return told
     except Exception:  # noqa: BLE001 - must never break the hook
         log.exception("brindle: couldn't check %s's pane at the end of its turn", agent.id)

@@ -55,19 +55,26 @@ class CodexPane:
                 pytest.fail(f"typed {key!r} into Codex's prompt")
 
 
-@pytest.fixture
-def codex(db, root, screens, monkeypatch):  # noqa: F811
-    """Worker w1 (Codex) under boss, waiting at its prompt; returns a function
-    giving the pane for a command, and what boss was sent."""
+def add_worker(db, root, monkeypatch, provider="codex"):  # noqa: F811
+    """Worker w1 under boss, waiting at a prompt; returns what boss is sent."""
     boss, ws = root
     set_local(ws.repo_root, "permission_policy", "off")
     set_local(ws.repo_root, "checks", ["python -m pytest -q"])
     since = time.time() - 5
-    db.add_agent(Agent("w1", ws.id, "developer-codex-heavy", "codex", boss.id, "assign", "waiting", "%w1", None,
+    db.add_agent(Agent("w1", ws.id, f"developer-{provider}", provider, boss.id, "assign", "waiting", "%w1", None,
                        since, status_since=since))
     sent = []
     monkeypatch.setattr(agents, "_send_message", lambda db, agent, body, sender_id, **kw: sent.append(body))
     monkeypatch.setattr(agents, "send_message", lambda db, to, body, sender_id=None, **kw: sent.append(body))
+    return sent
+
+
+@pytest.fixture
+def codex(db, root, screens, monkeypatch):  # noqa: F811
+    """Codex worker w1 under boss; returns a function giving its escalation
+    pane for a command, and what boss was sent."""
+    _, ws = root
+    sent = add_worker(db, root, monkeypatch)
 
     def pane(command, reason="Run the test suite with network access for xdist workers"):
         p = CodexPane(command, reason)
@@ -121,19 +128,76 @@ def test_an_escalation_the_rules_cant_decide_reaches_the_person_as_a_sentence(db
 
 
 def test_a_second_sweep_while_the_first_decides_leaves_the_escalation_to_it(db, codex, monkeypatch):
-    from brindle import pane_escalation
+    from brindle import worker_prompts
 
     pane_for, sent, _ = codex
     pane_for("/Users/dev/Projects/web/.venv/bin/python -m pytest -q -n 6 tests")
-    decide, seen = pane_escalation._decide, []
+    decide, seen = worker_prompts._decide, []
 
-    def deciding(db, agent, esc):
+    def deciding(db, agent, prompt):
         seen.append(inbox.pending_permissions(db, db.get_agent("w1")))   # the app, mid-decision
         seen.append(cull.note_stuck(db, time.time(), {}))                # another process's sweep
-        return decide(db, agent, esc)
-    monkeypatch.setattr(pane_escalation, "_decide", deciding)
+        return decide(db, agent, prompt)
+    monkeypatch.setattr(worker_prompts, "_decide", deciding)
 
     cull.note_stuck(db, time.time(), {})
     cull.note_stuck(db, time.time(), {})                                 # and once it is the supervisor's
     assert seen == [[], []]
     assert len(sent) == 1                                                # its supervisor asked once, nothing else
+
+
+# Recorded panes of each CLI's common prompts, mid-task, with no permission hook in the way.
+CLAUDE_BASH = ("╭──────────────────────────────────────────────╮\n"
+               "│ Bash command                                 │\n│                                              │\n"
+               "│   npm publish --access public                │\n│   Publish the package                        │\n"
+               "│                                              │\n│ Do you want to proceed?                      │\n"
+               "│ ❯ 1. Yes                                     │\n"
+               "│   2. Yes, and don't ask again for npm publish commands in /repo │\n"
+               "│   3. No, and tell Claude what to do differently (esc) │\n"
+               "╰──────────────────────────────────────────────╯\n")
+CODEX_EDITS = ("  Would you like to make the following edits?\n\n  ../shared/config.py (+2 -1)\n\n"
+               "› 1. Yes, proceed (y)\n  2. No, and tell Codex what to do differently (esc)\n\n"
+               "  Press enter to confirm or esc to cancel\n")
+CODEX_TRUST = ("  You are in /Users/dev/elsewhere\n\n  Trust this folder?\n\n"
+               "› 1. Trust and continue\n  2. Quit\n\n  Press enter to continue\n")
+AGY_COMMAND = "Requesting permission for:\n  git push origin main\nRun this command?\n  Yes / No\nesc to cancel\n"
+OPENCODE_COMMAND = "  △ Permission required\n  $ npm publish --access public\n\n   Allow once   Allow always   Reject\n"
+CLAUDE_QUESTION = ("⏺ Which storage should I use for the cache?\n\n  1. SQLite\n  2. Postgres\n\n"
+                   "────────────────────────────────────────\n❯ \n────────────────────────────────────────\n"
+                   "  ⏵⏵ accept edits on (shift+tab to cycle)\n")
+CLAUDE_MENU = " Select a model\n\n ❯ 1. Sonnet\n   2. Opus\n\n Enter to confirm · Esc to exit\n"
+# What only a pasted pane would put in front of its supervisor; the person's
+# sentence also has no options, line breaks or worker ids.
+PANE = ("Do you want to proceed", "Would you like", "Requesting permission", "Permission required", "Run this command",
+        "Esc to", "esc to", "Press enter", "❯", "›", "│", "⏺")
+RAW = (*PANE, "Trust and continue", "Allow always", "\n", "w1")
+
+
+@pytest.mark.parametrize("provider,screen,person", [
+    # A permission brindle can answer in the pane: its supervisor's first, never the person's yet.
+    ("claude", CLAUDE_BASH, False),
+    ("codex", CODEX_EDITS, False),
+    # A permission whose keys brindle doesn't press: the person's, in a sentence.
+    ("antigravity", AGY_COMMAND, True),
+    ("opencode", OPENCODE_COMMAND, True),
+    # Trust dialogs, menus and questions: its supervisor's, as a structured message.
+    ("codex", CODEX_TRUST, False),
+    ("claude", CLAUDE_MENU, False),
+    ("claude", CLAUDE_QUESTION, False),
+])
+def test_each_clis_prompts_reach_the_person_only_as_a_sentence(db, root, screens, monkeypatch,  # noqa: F811
+                                                               provider, screen, person):
+    _, ws = root
+    sent = add_worker(db, root, monkeypatch, provider)
+    monkeypatch.setattr(tmux, "capture", lambda target, **k: screen if target == "%w1" else CODEX_BUSY)
+    monkeypatch.setattr(tmux, "send_keys", lambda *a, **k: pytest.fail("answered a prompt no rule decided"))
+
+    cull.note_stuck(db, time.time(), {})
+
+    [told] = sent                                    # its supervisor, once, without the pane
+    assert not any(raw in told for raw in PANE)
+    shown = [i for i in inbox.items(db, ws.repo_root) if i.agent_id == "w1"]
+    assert bool(shown) is person
+    for item in shown:
+        words = [item.detail or "", *([item.permission.wording or ""] if item.permission else [])]
+        assert all(w.endswith(".") and not any(raw in w for raw in RAW) for w in words)
