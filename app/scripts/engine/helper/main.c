@@ -5,7 +5,7 @@
  * agent's pane descend from it. Run as the engine's bare python3, privacy
  * prompts and System Settings named "python3" and gave no reason. This is the
  * main executable of an app bundle (Info.plist beside this file: a name, usage
- * strings), so they name brindle (docs/investigations/macos-prompts.md).
+ * strings), so they name brindle.
  *
  * It runs Python in this process, from the engine's libpython: exec'ing
  * python3 would make the process python3 again. It runs only what the engine's

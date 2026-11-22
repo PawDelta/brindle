@@ -909,7 +909,13 @@ def test_routing_policy_marks_what_the_org_refuses_and_locks(seeded, monkeypatch
     monkeypatch.setattr(providers, "claude_org_managed", lambda: False)
     (Path(seeded["repo"]) / ".brindle" / "agents").mkdir(parents=True, exist_ok=True)
     (Path(seeded["repo"]) / ".brindle" / "agents" / "mine.md").write_text("---\nname: mine\nextends: developer\n---\n")
-    _, body = _get("/v1/routing", AUTH, f"repo={seeded['repo']}")
+    # A profile built on one whose frontmatter never closes: shown with its lint error, its role unknown.
+    (Path(seeded["repo"]) / ".brindle" / "agents" / "child.md").write_text("---\nname: child\nextends: broken\n---\n")
+    (Path(seeded["repo"]) / ".brindle" / "agents" / "broken.md").write_text("---\nname: broken\n")
+    code, body = _get("/v1/routing", AUTH, f"repo={seeded['repo']}")
+    assert code == 200
+    child = {p["name"]: p for p in body["profiles"]}["child"]
+    assert child["lint_errors"] and child["role"] is None
     policy = body["policy"]
     assert (policy["applies"], policy["editable"], policy["allowed_providers"]) == (True, True, ["claude"])
     assert {(lock["kind"], lock["name"]) for lock in policy["locked"]} == {

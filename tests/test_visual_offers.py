@@ -253,6 +253,8 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
                  marks=pytest.mark.variant("a clause after a comma that only remarks on the plan")),
     pytest.param("don't write a plan", None,
                  marks=pytest.mark.variant("the new verbs must still be cancellable")),
+    pytest.param("I’d like to clean up the docs… please build out a plan to do this", "plan",
+                 marks=pytest.mark.variant("a plan ask following a Unicode ellipsis was missed by sentence splitting")),
 ])
 def test_complete_request_intent(db, session, text, scope):
     boss, _ = session

@@ -47,8 +47,8 @@ export const PROVIDER_ORDER = ["claude", "codex", "opencode", "antigravity", "na
 const OWN_NAMES: Record<string, string> = { native: "Local models" };
 export const productName = (provider: string): string => FACTS[provider]?.name ?? OWN_NAMES[provider] ?? provider;
 
-/* Never offered for a kind of work: the engine's own helpers. */
-const HELPERS = new Set(["coordinator", "subagent", "supervisor"]);
+/* Never offered for a kind of work: the engine's own helpers (by the role the engine gives each profile). */
+const HELPERS = new Set(["helper", "supervisor"]);
 const HELPER_PROVIDERS = new Set(["shell", "subagent"]);
 
 /* The engine says which profiles are its own (built-in); any other is one of the person's custom agents. */
@@ -194,10 +194,10 @@ export function runOrder(k: KindState): string[] {
    reviewer, the built-in developers for a size or the supervisor (one per
    model), and the person's custom agents for any. One the org refuses never shows. */
 export function offeredFor(kind: Kind, profiles: RoutingProfileDTO[]): RoutingProfileDTO[] {
-  const family = kind === "reviewer" ? "reviewer" : "developer";
+  const role = kind === "reviewer" ? "reviewer" : "developer";
   return profiles.filter((p) => {
-    if (HELPERS.has(p.name) || HELPER_PROVIDERS.has(p.provider) || p.allowed === false) return false;
-    return isCustom(p) || p.name === family || p.name.startsWith(`${family}-`);
+    if (HELPERS.has(p.role ?? "") || HELPER_PROVIDERS.has(p.provider) || p.allowed === false) return false;
+    return isCustom(p) || p.role === role;
   });
 }
 
@@ -248,7 +248,7 @@ export function draftProblem(d: Draft, taken: string[]): string | null {
 export function modelsOf(provider: string, profiles: RoutingProfileDTO[]): RoutingProfileDTO[] {
   const out = new Map<string, RoutingProfileDTO>();
   for (const p of profiles) {
-    if (p.provider !== provider || !p.model || !(p.name === "developer" || p.name.startsWith("developer-")) || p.allowed === false) continue;
+    if (p.provider !== provider || !p.model || p.role !== "developer" || isCustom(p) || p.allowed === false) continue;
     if (!out.has(p.model)) out.set(p.model, p);
   }
   return [...out.values()];

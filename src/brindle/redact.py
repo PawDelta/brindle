@@ -18,8 +18,7 @@
   environment (:func:`env_values`), wherever they appear as a whole word,
   unless the value can't be one (``false``, ``8080``, ``1.2.3``).
 
-It is applied where brindle writes or uploads text (the list, with each call
-site, is docs/investigations/secret-exposure.md), never to code, diffs,
+It is applied where brindle writes or uploads text, never to code, diffs,
 worktree files or commits. Nothing here logs, and nothing reports what was
 masked.
 """

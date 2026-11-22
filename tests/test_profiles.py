@@ -21,6 +21,25 @@ def test_a_custom_agent_that_extends_an_old_id_still_works(tmp_path):
     assert p.name == "mine" and p.provider == "codex"
 
 
+@pytest.mark.parametrize("name, text, role", [
+    ("dev.claude-opus", None, "developer"),            # inherits developer's role through extends
+    pytest.param("review.gpt", None, "reviewer", marks=pytest.mark.variant(
+        "a standalone built-in reviewer extends nothing, so only its own role: line makes it a reviewer")),
+    ("qa", None, "qa"),                                # a role of its own, though built on developer
+    ("mine", "extends: reviewer-codex", "reviewer"),   # a custom agent on an old id
+    ("auditor", "provider: codex", "auditor"),         # built on nothing: a custom role
+    ("developer-mine", "provider: codex", "developer"),  # a standalone copy under the old naming
+])
+def test_base_role_follows_the_extends_chain(tmp_path, name, text, role):
+    from brindle.profiles import base_role
+
+    if text:
+        agents = tmp_path / ".brindle" / "agents"
+        agents.mkdir(parents=True)
+        (agents / f"{name}.md").write_text(f"---\nname: {name}\n{text}\n---\nDo the task.\n")
+    assert base_role(name, str(tmp_path)) == role
+
+
 @pytest.mark.parametrize("name, model", [
     ("developer-codex-luna", "gpt-6-luna"),
     pytest.param("developer-codex", None, marks=pytest.mark.variant(

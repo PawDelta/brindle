@@ -1,5 +1,6 @@
 ---
 name: review.gpt
+role: reviewer
 description: Reviews a branch's changes for bugs and risks without editing code, using Codex for a second model's view
 provider: codex
 permission_mode: dontAsk  # nobody watches a reviewer: refuse what allowed_tools doesn't cover, never prompt

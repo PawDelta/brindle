@@ -35,7 +35,7 @@ env var into `bash -c`, `os.environ`, case/array, dotglob, nested shells, a
 symlink alias; a positive-control write) and covers the launches, the switch,
 the refusals, the allowances and the agy bypass denial.
 
-## Canary results (this Mac, 2026-11-06, synthetic data; details in docs/investigations/os-sandbox.md)
+## Canary results (this Mac, 2026-11-06, synthetic data)
 
 - Claude Code 2.1.319 via `claude -p --settings`: store read denied (also via
   `sh -c`), env var scrubbed, `allowedDomains: ["*"]` works, local bind works,

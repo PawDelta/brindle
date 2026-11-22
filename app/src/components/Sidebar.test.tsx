@@ -225,7 +225,7 @@ describe("Sidebar", () => {
   });
 
   it("branches workers from the root dot, folds from it, and opens the supervisor from the row", async () => {
-    const supervisor = { ...worker.agents![0], profile: "supervisor-sonnet", milestone: "Release page", model_display: "Claude Sonnet" };
+    const supervisor = { ...worker.agents![0], profile: "supervisor-sonnet", role: "supervisor", milestone: "Release page", model_display: "Claude Sonnet" };
     const { navigate } = mount({ workspaces: [root, { ...worker, agents: [supervisor, child] }] });
     await waitFor(() => expect(agentRow("c1")).toBeTruthy());
     expect(agentRow("sup1")).toBeNull();
@@ -643,14 +643,9 @@ describe("Sidebar", () => {
 });
 
 it.each([
-  ["developer", "developer"],
-  ["developer-codex-heavy", "developer"],
-  ["developer-or-qwen3-coder", "developer"],
-  ["developer-some-new-model", "developer"],
-  ["reviewer-gemini-low", "reviewer"],
-  ["backend-auditor", "backend-auditor"],
-  ["test-writer-sonnet", "test-writer"],
-  ["qa", "qa"],
-])("%s reads as the role %s", (profile, role) => {
-  expect(roleOf(profile)).toBe(role);
+  ["the session's root", { id: "s1", role: "developer", mode: "worker" }, "supervisor"],
+  ["a renamed built-in", { id: "w1", role: "reviewer", mode: "worker" }, "reviewer"],
+  ["a profile the engine can't name", { id: "w1", role: null, mode: "review" }, "reviewer"],
+])("%s reads as its role", (_, agent, role) => {
+  expect(roleOf(agent, "s1")).toBe(role);
 });

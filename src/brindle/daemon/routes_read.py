@@ -785,7 +785,7 @@ def _routing(db: DB, request: Request, learn: bool) -> Any:
             lint_errors=errors, lint_warnings=warnings,
             name=p.name, provider=p.provider, provider_name=provider_name(p.provider),
             model=model, **model_names.describe(p, model), builtin=p.name in builtin,
-            installed=here[p.name],
+            role=profiles.base_role(p.name, lib), installed=here[p.name],
             signed_in=here[p.name] and signed[(p.provider, tuple(sorted(p.env.items())))],
             excluded=p.provider in cfg.exclude_providers, cost_tier=autopilot.cost_tier(p.name, cfg, lib),
             allowed=refusals[p.name] is None, refusal=refusals[p.name]))

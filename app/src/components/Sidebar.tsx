@@ -296,17 +296,12 @@ interface RowRef {
   route: Route;
 }
 
-/* A profile's role: developer-* and reviewer-* are those roles whatever model
-   or tier they run on; any other name keeps its words, minus a model or tier
-   at its end (backend-auditor, qa, test-writer stay as they are). */
-const PROFILE_VARIANT = /^(sonnet|opus|haiku|fable|codex|gemini|flash|pro|opencode|local|light|heavy|low|medium|high)$/;
-
-export function roleOf(profile: string): string {
-  const family = /^(developer|reviewer)(-|$)/.exec(profile);
-  if (family) return family[1];
-  const words = profile.split("-");
-  while (words.length > 1 && PROFILE_VARIANT.test(words[words.length - 1])) words.pop();
-  return words.join("-");
+/* An agent's role in words: the session's root is its supervisor; any other
+   takes the role the engine gives its profile (developer, reviewer, qa, ...),
+   or, when the engine names none, the kind of work it was started for. */
+export function roleOf(a: Pick<AgentDTO, "id" | "role" | "mode">, root: string): string {
+  if (a.id === root) return "supervisor";
+  return a.role ?? (a.mode === "review" ? "reviewer" : "developer");
 }
 
 /* The model an agent runs, as the engine names it ("Claude Opus"); nothing when it doesn't say. */
@@ -336,9 +331,7 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
   const active = route.screen === "session" && route.root === root && (route.agent ?? root) === a.id;
   const status = cliStatus(a, node.workspace, alive);
   const key = `agent:${a.id}`;
-  const role = a.id === root ? "supervisor" : a.profile
-    ? a.profile === a.provider ? (a.mode === "review" ? "reviewer" : "developer") : roleOf(a.profile)
-    : a.mode === "review" ? "reviewer" : "developer";
+  const role = roleOf(a, root);
   // A sized worker leads with its job size (brindle's word); the model is the quieter second word.
   const size = a.id === root ? null : sizeOf(a.weight);
   const model = modelOf(a);
