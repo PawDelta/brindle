@@ -907,6 +907,8 @@ def test_routing_policy_marks_what_the_org_refuses_and_locks(seeded, monkeypatch
     monkeypatch.setattr(team_policy, "access", lambda repo: acc)
     monkeypatch.setattr(managed_models, "current", lambda repo: None)
     monkeypatch.setattr(providers, "claude_org_managed", lambda: False)
+    (Path(seeded["repo"]) / ".brindle" / "agents").mkdir(parents=True, exist_ok=True)
+    (Path(seeded["repo"]) / ".brindle" / "agents" / "mine.md").write_text("---\nname: mine\nextends: developer\n---\n")
     _, body = _get("/v1/routing", AUTH, f"repo={seeded['repo']}")
     policy = body["policy"]
     assert (policy["applies"], policy["editable"], policy["allowed_providers"]) == (True, True, ["claude"])
@@ -916,6 +918,7 @@ def test_routing_policy_marks_what_the_org_refuses_and_locks(seeded, monkeypatch
     assert (rows["developer-heavy"]["allowed"], rows["developer-heavy"]["refusal"] is None) == (heavy_ok, heavy_ok)
     assert all(rows["developer-heavy"][k] for k in ("display", "maker", "tool", "effort"))
     assert ROUTE_ID not in rows["developer-heavy"]["display"]
+    assert (rows["developer-heavy"]["builtin"], rows["mine"]["builtin"]) == (True, False)
     for refused in ("developer-light", "developer-codex"):      # a model, then a provider, the org doesn't allow
         assert not rows[refused]["allowed"] and rows[refused]["refusal"]
     assert ("developer-heavy" in policy["models"][allowed]) == heavy_ok

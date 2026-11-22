@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable
 from typing import NamedTuple
 
-from brindle import agents, bus, git, identity_lock, pipeline, providers, status_cache, tmux
+from brindle import agents, bus, git, identity_lock, model_names, pipeline, providers, status_cache, tmux
 from brindle import usage as usage_mod
 from brindle.db import DB, NATIVE_SUBAGENT_STALE, Agent, NativeSubagent, Workspace
 from brindle.view_reads import ViewReads
@@ -307,6 +307,10 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
         entry["tokens"] = usage_mod.short_summary(u)
     if u and u.model:
         entry["model"] = u.model
+    # How a person reads the worker: its job size, and its model as brindle.model_names names it.
+    if a.weight:
+        entry["weight"] = a.weight
+    entry["model_display"] = model_names.model_name(u.model if u else None, a.provider).display
     unread = db.unread_count(a.id)
     if unread:
         entry["unread"] = unread
