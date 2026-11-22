@@ -253,7 +253,7 @@ def request_intent(text: str) -> str | None:
     judge; an explicit cancel (``_cancels``) still takes it back.
     """
     scope = None
-    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text.strip()):
+    for sentence in re.split(r"(?<=[.!?…])\s+|\n+", text.strip()):
         for start in _ask_starts(sentence):
             part = sentence[start:]
             match = _REQUEST.match(part)
