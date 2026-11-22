@@ -5251,7 +5251,7 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
     from brindle.config import load_repo_config
 
     cfg = cfg or workspaces.config_for(db, ws)
-    slot = _review_claim_slot(profile, slot)
+    slot = pipeline._slot(_review_claim_slot(profile, slot), ws.repo_root)
     profile = _review_profile(db, ws, profile, cfg)
     with _review_request_run(ws.id, profile, request_id), pipeline.review_run(ws.id):
         # ``report``: the report whose review queued this helper (start_review);
@@ -5419,13 +5419,13 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     workspace already has a review at an earlier commit, the reviewer is
     pointed at just what changed since then, when that's a plain diff (see
     ``review_base``)."""
-    from brindle import gates, launch_health
+    from brindle import gates, launch_health, pipeline
     from brindle.config import load_repo_config
 
     _review_worktree_present(ws)
     _review_kill_switch(ws)
     cfg = cfg or workspaces.config_for(db, ws)
-    slot = _review_claim_slot(profile, slot)
+    slot = pipeline._slot(_review_claim_slot(profile, slot), ws.repo_root)   # a legacy id's claim is this one
     if cfg.review_sizing and slot == "" and not second:
         from brindle import review_scope
 
@@ -5442,7 +5442,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     failed = None
     for old in db.list_agents(ws.id):
         if (old.mode == "review" and old.result is None and old.review_sha == sha
-                and (profile is None or old.profile == profile)
+                and (profile is None or _same_profile(old.profile, profile, ws.repo_root))
                 and launch_health.has_mcp_failure(db, old, ws)):
             failed = old
             continue
@@ -5451,7 +5451,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         if old.unreported_noted:
             continue   # it stopped without a verdict: not the reviewer of anything
         if old.review_sha == sha:
-            if profile and old.profile != profile:
+            if profile and not _same_profile(old.profile, profile, ws.repo_root):
                 continue   # another profile's review of this commit (a second review): keep both
             return old   # one reviewer per workspace and commit
         close(db, old.id)   # a new commit replaces the reviewer of the old one
@@ -5622,6 +5622,30 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     return reviewer
 
 
+def _same_profile(a: str | None, b: str | None, repo_root: str) -> bool:
+    """Whether two profile ids name one profile in ``repo_root``: an old built-in
+    id and its renamed profile do, a custom profile under an old id does not."""
+    if a is None or b is None:
+        return a == b
+    from brindle.profiles import current_name
+
+    return current_name(a, repo_root) == current_name(b, repo_root)
+
+
+def _live_claim(db: DB, held: tuple) -> Agent | str | None:
+    """What holds a review claim ``held`` (``(agent_id, claimed_at)``): its live
+    reviewer, ``"starting"`` while its dispatcher is still starting it, or None
+    when it is finished, stopped or stale and may be taken over."""
+    agent_id, claimed_at = held
+    holder = db.get_agent(agent_id) if agent_id else None
+    if holder is not None and holder.result is None and not holder.unreported_noted \
+            and alive_or_starting(holder):
+        return holder
+    if agent_id is None and time.time() - claimed_at < LAUNCH_GRACE:
+        return "starting"
+    return None
+
+
 def _claim_review(db: DB, ws: Workspace, sha: str, slot: str) -> tuple[float | None, Agent | None]:
     """Claim in the DB the one reviewer of ``ws`` at ``sha`` (``slot``):
     ``(token, None)`` when this dispatcher is to start it, else ``(None, the
@@ -5629,19 +5653,21 @@ def _claim_review(db: DB, ws: Workspace, sha: str, slot: str) -> tuple[float | N
     still starting it. A claim whose reviewer finished, stopped without a
     verdict or died, or whose dispatcher never named one, is taken over."""
     while True:
+        # A live claim saved under this identity's old built-in id (before the rename) holds it too.
+        for legacy in (old for old, new in model_names.ALIASES.items() if new == slot):
+            held = db.review_claim(ws.id, sha, legacy)
+            live = _live_claim(db, held) if held is not None else None
+            if live is not None:
+                return None, live if isinstance(live, Agent) else None
         token = db.claim_review(ws.id, sha, slot)
         if token is not None:
             return token, None
         held = db.review_claim(ws.id, sha, slot)
         if held is None:
             continue   # given up in between
-        agent_id, claimed_at = held
-        holder = db.get_agent(agent_id) if agent_id else None
-        if holder is not None and holder.result is None and not holder.unreported_noted \
-                and alive_or_starting(holder):
-            return None, holder
-        if agent_id is None and time.time() - claimed_at < LAUNCH_GRACE:
-            return None, None
+        live = _live_claim(db, held)
+        if live is not None:
+            return None, live if isinstance(live, Agent) else None
         token = db.claim_review(ws.id, sha, slot, held)
         if token is not None:
             return token, None

@@ -1364,7 +1364,8 @@ def _listed(profile: str, allowed, repo_root: str | None) -> bool:
     which is a different profile and stays distinct."""
     from brindle.profiles import current_name
 
-    return any(a == profile or current_name(a, repo_root) == profile for a in allowed)
+    want = current_name(profile, repo_root)
+    return any(a == profile or current_name(a, repo_root) == want for a in allowed)
 
 
 @dataclass(frozen=True)

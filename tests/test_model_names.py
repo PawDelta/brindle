@@ -42,7 +42,23 @@ def test_an_org_allowlist_written_with_old_ids_still_allows_the_renamed_profiles
     from brindle.pro.team_policy import Access
 
     assert Access(allowed_profiles=("developer-codex",)).allows_profile("dev.gpt", "codex", None)
+    assert Access(allowed_profiles=("dev.gpt",)).allows_profile("developer-codex", "codex", None)
     assert not Access(allowed_profiles=("dev.claude-sonnet",)).allows_profile("dev.gpt", "codex", None)
+
+
+@pytest.mark.parametrize("legacy_claim", [
+    pytest.param(True, marks=pytest.mark.variant(
+        "a live claim saved under the old reviewer id holds the renamed reviewer's slot, so no second reviewer starts")),
+    pytest.param(False, marks=pytest.mark.variant("with no legacy claim, the renamed slot is claimed as usual")),
+])
+def test_a_legacy_claim_holds_the_renamed_review_slot(db, repo, legacy_claim):
+    from brindle import agents, workspaces
+
+    ws = workspaces.adopt_root(db, str(repo))
+    if legacy_claim:
+        db.claim_review(ws.id, "abc123", "reviewer-codex")   # claimed, its reviewer not yet started
+    token, holder = agents._claim_review(db, ws, "abc123", "review.gpt")
+    assert (token is None) is legacy_claim
 
 
 def test_handover_from_an_old_predecessor_id_is_found():
