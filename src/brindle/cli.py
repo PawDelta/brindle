@@ -567,7 +567,7 @@ def _trust_codex_hook(repo_root: str) -> None:
     workers follow the policy from their first launch. A hook the person
     turned off in Codex stays off; `brindle doctor` points at it."""
     from brindle import codex_hook
-    from brindle.providers import codex_binary, which_cli
+    from brindle.providers import codex_binary, codex_config_path, which_cli
 
     try:
         binary = codex_binary()
@@ -578,7 +578,7 @@ def _trust_codex_hook(repo_root: str) -> None:
         if before not in (codex_hook.NEW, codex_hook.MOVED):
             return
         if codex_hook.ensure(binary, command) == codex_hook.TRUSTED:
-            typer.echo("✓ trusted brindle's Codex permission hook (in ~/.codex/config.toml): "
+            typer.echo(f"✓ trusted brindle's Codex permission hook (in {codex_config_path()}): "
                        "Codex workers follow permission_policy")
     except Exception:  # noqa: BLE001 - a convenience; never block the start
         pass

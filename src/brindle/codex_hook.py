@@ -549,18 +549,26 @@ def tell_untrusted(db, agent, cwd: str | None) -> bool:
 # -- asking Codex itself ---------------------------------------------------------------
 
 
+_RPC_WAIT = 30.0
+
+
 class _AppServer:
     """A short-lived ``codex app-server`` over stdio (JSON-RPC, one per line),
     on the Codex home brindle runs Codex with (``codex_home``): the trust it
-    lists and writes is that home's."""
+    lists and writes is that home's. Model-policy queries supply the actual
+    pane environment and cwd instead, including any profile home override."""
 
-    def __init__(self, binary: str, flags: list[str], timeout: float = 30.0):
+    def __init__(self, binary: str, flags: list[str], timeout: float = _RPC_WAIT, *,
+                 env: dict[str, str] | None = None, cwd: str | None = None):
         self.timeout = timeout
+        launch = {"env": dict(env) if env is not None else {**os.environ, "CODEX_HOME": str(codex_home())}}
+        if cwd is not None:
+            launch["cwd"] = cwd
         try:
             self.proc = spawn.start([binary, "app-server", *flags], stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
                                     start_new_session=True,
-                                    env={**os.environ, "CODEX_HOME": str(codex_home())})
+                                    **launch)
         except OSError as e:
             raise CodexHookError(f"couldn't run {binary}: {e}") from e
         self.lines: queue.Queue = queue.Queue()
