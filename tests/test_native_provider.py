@@ -86,7 +86,7 @@ def test_endpoint_needs_a_base_url_a_model_and_its_key(monkeypatch):
 
 
 
-@pytest.mark.parametrize("models, expected", [(["tiny"], "local"), ([], "developer-light")])
+@pytest.mark.parametrize("models, expected", [(["tiny"], "local"), ([], "dev.claude-haiku")])
 def test_spawn_falls_back_to_hosted_when_the_local_model_isnt_served(db, ws, repo, local_profile, fake,
                                                                      monkeypatch, models, expected):
     f = repo / ".brindle" / "agents" / "local.md"
@@ -141,8 +141,8 @@ def test_a_refused_request_is_retried_on_the_local_model(db, ws, repo, local_pro
         d = repo / ".brindle" / "agents"
         (d / "hosted.md").write_text(f"---\nname: hosted\nprovider: native\napi: anthropic\n"
                                      f"base_url: {hosted.base_url}\nmodel: claude-x\n---\nYou are hosted.\n")
-        # developer-local, the model refusals are retried on, is the fake's "tiny".
-        (d / "developer-local.md").write_text((d / "local.md").read_text())
+        # The built-in local fallback uses the fake's "tiny" model.
+        (d / "dev.qwen3-coder.md").write_text((d / "local.md").read_text())
         native_agent(db, ws, profile="hosted")
         db.enqueue("n1", "write red-team payloads", None)
         hosted.replies = [anthropic_reply("I can't help with that.", stop="refusal")]
@@ -161,8 +161,8 @@ def test_refusals_are_never_retried_on_a_hosted_or_the_same_endpoint(repo, local
     monkeypatch.setattr(runner, "served", lambda p, timeout=1.0: True)
     d = repo / ".brindle" / "agents"
     text = (d / "local.md").read_text()
-    (d / "developer-local.md").write_text(text.replace(f"{fake.base_url}/v1", base_url) if base_url else text)
-    asking = runner.endpoint_for(load_profile("local", str(repo)))   # what developer-local would retry on
+    (d / "dev.qwen3-coder.md").write_text(text.replace(f"{fake.base_url}/v1", base_url) if base_url else text)
+    asking = runner.endpoint_for(load_profile("local", str(repo)))   # the fallback's endpoint
     assert runner.refusal_fallback(asking, str(repo)) is None
 
 
