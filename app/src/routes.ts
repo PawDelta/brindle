@@ -95,7 +95,7 @@ export const SETTINGS_TABS = [
   { id: "general", label: "General" },
   { id: "providers", label: "Workers & providers" },
   { id: "permissions", label: "Permissions" },
-  { id: "format", label: "Doc format" },
+  { id: "format", label: "Plan format" },
   { id: "storage", label: "Storage" },
   { id: "project", label: "Project" },
   { id: "organisation", label: "Organisation" },

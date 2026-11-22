@@ -173,7 +173,7 @@ async def visual_live(socket: WebSocket) -> None:
         doc_id = await work(open_doc)
         if relay is not None and not await relay.prepare(doc_id):
             # Initial 4404, before any live frame, selects the reader's HTTP path.
-            raise ServiceError("not_found", "no live text for this design here", 404)
+            raise ServiceError("not_found", "no live text for this plan here", 404)
         room = rooms.setdefault(doc_id, _LiveRoom())
         room.users += 1
         async with room.lock:
@@ -186,7 +186,7 @@ async def visual_live(socket: WebSocket) -> None:
                     await socket.send_json(relay.link(doc_id).state_frame())
             if teammate and lease is None:
                 # Signed out or no Team plan here: a teammate's design has no live text without the relay.
-                raise ServiceError("not_found", "no live text for this design here", 404)
+                raise ServiceError("not_found", "no live text for this plan here", 404)
             for update in await work(bootstrap):
                 await socket.send_json({"update": base64.b64encode(update).decode("ascii")})
             for section, presence in room.presence.items():
@@ -760,7 +760,7 @@ def _shared_design(repo: str | None, work: Callable[[Any], Any]) -> Any:
         return work(shared_reader)
     except (RuntimeError, auth.TransportError) as e:    # unreachable or refused
         if isinstance(e, analysis_docs.Refused) and e.status == 401:      # still refused after a token refresh; a 401 would read as the daemon's
-            raise ServiceError("signed_out", "sign in to brindle again to read this design", 402) from e
+            raise ServiceError("signed_out", "sign in to brindle again to read this plan", 402) from e
         if isinstance(e, analysis_docs.Refused) and e.code == "key_unavailable":
             raise ServiceError(e.code, redact.mask(str(e)), 503) from e   # the org's key is revoked: the doc is gone for now
         err = actions.upstream_error(e)
@@ -947,7 +947,7 @@ def library_design_plan(db: DB, request: Request) -> Any:
     except ServiceError:
         me = None
     if row is None or row["access_refused"] or me is None or row["owner"] != me:
-        raise ServiceError("not_found", "this design wasn't shared from here by this account", 404)
+        raise ServiceError("not_found", "this plan wasn't shared from here by this account", 404)
     v = visuals.get(db, row["plan_id"])
     visuals._unlocked(v["root_id"])
     return visuals.to_dto(db, v)

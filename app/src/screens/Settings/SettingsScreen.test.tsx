@@ -98,7 +98,7 @@ describe("settings screen", () => {
       ["General", "your-settings"],
       ["Workers & providers", "providers"],
       ["Permissions", "permissions-settings"],
-      ["Doc format", "doc-format"],
+      ["Plan format", "doc-format"],
       ["Storage", "storage"],
       ["Project", "project-settings"],
       ["About", "engine"],

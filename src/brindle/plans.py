@@ -80,7 +80,7 @@ GATE_SHUT = (WAITING, CHANGES, CONFLICT)
 OFFLINE, SIGN_IN, KEY_UNAVAILABLE, LIBRARY_ERROR, OTHER_ACCOUNT, ACCESS_REFUSED = (
     "offline", "sign_in", "key_unavailable", "library_error", "other_account", "access_refused")
 UNCONFIRMED = {
-    ACCESS_REFUSED: "The Library refused this account access to the plan's shared doc, so its review can't be "
+    ACCESS_REFUSED: "The Library refused this account access to the shared plan, so its review can't be "
                     "confirmed. Stop sharing, or edit the reviewers.",
     OFFLINE: "brindle can't reach the Library right now, so it can't confirm this plan's review.",
     SIGN_IN: "Your brindle sign-in has expired, so the Library can't confirm this plan's review.",
@@ -837,7 +837,7 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     except ServiceError as e:
         if e.code == "visual_request_required":
             raise ServiceError("plan_request_required", "a plan needs the person to ask for one: propose_plan "
-                               "only after they asked for a planning doc, said yes to planning the goal "
+                               "only after they asked for a plan, said yes to planning the goal "
                                "first, or redirected this one", 403) from e
         raise
     if any(numbered):

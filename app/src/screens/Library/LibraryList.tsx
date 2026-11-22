@@ -78,7 +78,7 @@ export function LibraryList({ groups, queue, records, scopes, matches, onOpen }:
   return (
     <div className="flex flex-col" data-testid="library-list">
       <div className={`${COLUMNS} sticky top-0 z-[2] border-b border-line-strong bg-canvas pb-1.5 text-[11px] font-medium uppercase tracking-[0.07em] text-ink-3`} aria-hidden>
-        <span>Design</span>
+        <span>Plan</span>
         <span>Stage</span>
         <span>Sign-offs</span>
         <span>Open</span>
@@ -86,7 +86,7 @@ export function LibraryList({ groups, queue, records, scopes, matches, onOpen }:
         <span className="text-right text-branch" title="Most recently changed first">Changed ↓</span>
       </div>
       {groups.map((group) => (
-        <section key={group.key} aria-label={group.label || "Designs"} data-group={group.key}>
+        <section key={group.key} aria-label={group.label || "Plans"} data-group={group.key}>
           <GroupHead group={group} queue={queue} />
           <ul className="flex flex-col">
             {group.docs.map((d) => <Row key={d.id} doc={d} record={records.get(d.id)} queue={queue} scopes={scopes} match={matches?.get(d.id)} onOpen={() => onOpen(d.id)} />)}

@@ -339,7 +339,7 @@ def require_entitlement(store=None):
     except Exception as e:  # noqa: BLE001
         raise RuntimeError("not logged in to brindle Pro (`brindle account login`)") from e
     if FEATURE not in ent.features or ent.in_grace:
-        raise RuntimeError("your plan has no analysis doc library (the `analysis_docs` entitlement)")
+        raise RuntimeError("your subscription has no plan library (the `analysis_docs` entitlement)")
     return ent
 
 

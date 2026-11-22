@@ -47,7 +47,7 @@ function WhenCell({ rule }: { rule: ReviewPolicyRule }) {
     <span>
       {kind === "paths" && <><b className="font-medium text-ink">Touches</b> <code>{paths.join(" or ")}</code></>}
       {kind === "label" && <><b className="font-medium text-ink">Has the label</b> <code>{label}</code></>}
-      {kind === "any" && <b className="font-medium text-ink">Every design</b>}
+      {kind === "any" && <b className="font-medium text-ink">Every plan</b>}
       <small className="block text-xs text-ink-3">{rule.name}</small>
     </span>
   );
@@ -235,11 +235,11 @@ function Policies({ client }: { client: DaemonClient }) {
     <section className="space-y-s3" aria-label="Review policies" data-testid="review-policies">
       <div className="space-y-1">
         <h2 className="text-base font-semibold">Review policies</h2>
-        <p className="text-sm text-ink-2">Who must approve a design before brindle builds it. Members can add reviewers on top, but can't remove these. A policy is checked against the files a design says it will change, and again on every revision.</p>
+        <p className="text-sm text-ink-2">Who must approve a plan before brindle builds it. Members can add reviewers on top, but can't remove these. A policy is checked against the files a plan says it will change, and again on every revision.</p>
       </div>
       <div role="table" aria-label="Policies">
         <div role="row" className="grid grid-cols-[minmax(0,1.35fr)_minmax(0,1.25fr)_minmax(0,.9fr)_max-content] gap-s2 pb-1 text-[11px] font-medium uppercase tracking-wider text-ink-3">
-          <span role="columnheader">When a design</span><span role="columnheader">It needs</span><span role="columnheader">Applies now</span><span role="columnheader" />
+          <span role="columnheader">When a plan</span><span role="columnheader">It needs</span><span role="columnheader">Applies now</span><span role="columnheader" />
         </div>
         {rules.map((rule) => {
           const n = covered(rule.id)?.count ?? 0;
@@ -248,7 +248,7 @@ function Policies({ client }: { client: DaemonClient }) {
               <div role="row" data-testid={`review-policy-${rule.id}`} data-count={n} className="grid grid-cols-[minmax(0,1.35fr)_minmax(0,1.25fr)_minmax(0,.9fr)_max-content] items-center gap-s2 border-t border-line py-s1 text-sm text-ink-2">
                 <WhenCell rule={rule} />
                 <NeedsCell rule={rule} />
-                <span>{n === 0 ? "None right now" : `${n} design${n === 1 ? "" : "s"} in review`}</span>
+                <span>{n === 0 ? "None right now" : `${n} plan${n === 1 ? "" : "s"} in review`}</span>
                 <span className="flex justify-self-end gap-s1">
                   <button type="button" className={quiet} aria-label={`Edit ${rule.name}`} onClick={() => edit(rule)}>Edit</button>
                   <button type="button" className={quiet} aria-label={`Remove ${rule.name}`} onClick={() => setRemoving({ id: rule.id, org: state.org_id, opening: ++openings.current })}>Remove</button>
@@ -257,11 +257,11 @@ function Policies({ client }: { client: DaemonClient }) {
               {removing?.id === rule.id && (
                 <div className="space-y-1 border-b border-line pb-s1 text-sm text-ink-2" data-testid={`review-policy-remove-${rule.id}`}>
                   <p>{`Remove ${rule.name}?`}</p>
-                  {!removalAnswer && <p role="status" className="text-xs text-ink-3">Counting the designs the rest would cover…</p>}
-                  {removalAnswer && !removalAnswer.result && <p role="alert" className={alert}>Couldn't count the designs, so nothing can be removed yet. Keep it, then choose Remove again.</p>}
+                  {!removalAnswer && <p role="status" className="text-xs text-ink-3">Counting the plans the rest would cover…</p>}
+                  {removalAnswer && !removalAnswer.result && <p role="alert" className={alert}>Couldn't count the plans, so nothing can be removed yet. Keep it, then choose Remove again.</p>}
                   {removal && (
                     <p className={notice} data-testid="review-policy-remove-applies" data-count={removal.count} data-truncated={removal.truncated || undefined}>
-                      {`Without it, ${removal.truncated ? "at least " : ""}${removal.count} design${removal.count === 1 ? "" : "s"} in review ${removal.count === 1 ? "is" : "are"} still covered by the policies left`}
+                      {`Without it, ${removal.truncated ? "at least " : ""}${removal.count} plan${removal.count === 1 ? "" : "s"} in review ${removal.count === 1 ? "is" : "are"} still covered by the policies left`}
                     </p>
                   )}
                   <div className="flex justify-end gap-s1">
@@ -275,17 +275,17 @@ function Policies({ client }: { client: DaemonClient }) {
         })}
         {rules.length === 0 && <p className="border-t border-line py-s1 text-sm text-ink-3">No policies yet.</p>}
       </div>
-      {state.in_review.truncated && <p className="text-xs text-ink-3">Counts cover the newest designs you can open.</p>}
+      {state.in_review.truncated && <p className="text-xs text-ink-3">Counts cover the newest plans you can open.</p>}
 
       <form className="grid gap-s2 border-t border-branch pt-s2 text-sm text-ink-2" aria-label={draft.editing ? "Edit policy" : "New policy"} onBlur={() => setSettled(draft)} onSubmit={(e) => { e.preventDefault(); void save(); }}>
         <span className="text-xs font-medium uppercase tracking-wider text-branch">{draft.editing ? "Edit policy" : "New policy"}</span>
         <label className="grid gap-1 sm:grid-cols-[118px_minmax(0,1fr)] sm:items-center"><span className="text-ink-3">Name</span>
           <input className={field} value={draft.name} onChange={(e) => set("name", e.target.value)} />
         </label>
-        <div className="grid gap-1 sm:grid-cols-[118px_minmax(0,1fr)] sm:items-center"><span className="text-ink-3">When a design</span>
+        <div className="grid gap-1 sm:grid-cols-[118px_minmax(0,1fr)] sm:items-center"><span className="text-ink-3">When a plan</span>
           <div className="flex flex-wrap items-center gap-2">
-            <select className={field} aria-label="When a design" value={draft.kind} onChange={(e) => set("kind", e.target.value as Draft["kind"])}>
-              <option value="paths">Touches paths</option><option value="label">Has a label</option><option value="any">Is any design</option>
+            <select className={field} aria-label="When a plan" value={draft.kind} onChange={(e) => set("kind", e.target.value as Draft["kind"])}>
+              <option value="paths">Touches paths</option><option value="label">Has a label</option><option value="any">Is any plan</option>
             </select>
             {draft.kind === "paths" && <input className={`${field} min-w-52 flex-1 font-mono`} aria-label="Paths" placeholder="payments/**, billing/ledger/**" value={draft.paths} onChange={(e) => set("paths", e.target.value)} />}
             {draft.kind === "label" && <input className={`${field} min-w-52 flex-1 font-mono`} aria-label="Label" value={draft.label} onChange={(e) => set("label", e.target.value)} />}
@@ -308,10 +308,10 @@ function Policies({ client }: { client: DaemonClient }) {
         </label>
         {shown && (
           <p className={notice} data-testid="review-policy-applies" data-count={shown.count} data-truncated={shown.truncated || undefined}>
-            <b className="font-medium">{`Saving applies it to ${shown.truncated ? "at least " : ""}${shown.count} design${shown.count === 1 ? "" : "s"} in review now`}</b>
+            <b className="font-medium">{`Saving applies it to ${shown.truncated ? "at least " : ""}${shown.count} plan${shown.count === 1 ? "" : "s"} in review now`}</b>
             {shown.designs.length > 0 && ` (${shown.designs.map((d) => d.title).join(", ")}${shown.count > shown.designs.length ? ", …" : ""})`}
             {shown.reopened > 0 && `. ${shown.reopened} that ${shown.reopened === 1 ? "is" : "are"} ready now would stop being ready until the new reviewers sign off`}
-            {". Only designs you can open are counted; designs already building aren't stopped."}
+            {". Only plans you can open are counted; plans already building aren't stopped."}
           </p>
         )}
         {error && <p role="alert" className={alert}>{error}</p>}

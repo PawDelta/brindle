@@ -2653,7 +2653,7 @@ def library_work_items(db: DB, params: dict, body: Body) -> Any:
 
     ids = [i for i in (params.get("ids") or "").split(",") if i]
     if len(ids) > 50:
-        raise ServiceError("invalid", "ask for at most 50 designs at a time")
+        raise ServiceError("invalid", "ask for at most 50 plans at a time")
     return _work_call(params, body, lambda org, api, who: wi.summaries(org, ids, api=api, who=who, fetch=10))
 
 
@@ -2704,8 +2704,8 @@ def delete_doc(db: DB, params: dict, body: Body) -> Any:
     stranded = sd.open_shares_of(db, ids)
     if stranded and not _get(body, "confirm", bool, default=False):
         names = ", ".join(f"“{s['title']}”" for s in stranded)
-        raise ServiceError("shared_plan", f"This doc is shared for review on an open plan ({names}). Deleting it "
-                           "stops sharing that plan: it becomes a personal doc again.", 409, plans=stranded)
+        raise ServiceError("shared_plan", f"This plan is being reviewed ({names}). Deleting it from the Library "
+                           "stops sharing that plan: it becomes a personal plan again.", 409, plans=stranded)
     if kept is None:
         got = docs_api("DELETE", _doc_path(params), repo=params.get("repo"))
     else:

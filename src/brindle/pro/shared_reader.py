@@ -33,7 +33,7 @@ THREAD_ACTIONS = ("resolve", "reopen")
 ANCHOR_FIELDS = ("kind", "section", "start", "end", "quote", "decision", "option", "state")
 ANCHOR_KINDS = ("text", "diagram", "decision", "section")
 REVISION_SOURCES = ("proposal", "edit", "suggestion")
-UNTITLED = "Design doc"
+UNTITLED = "Plan"
 
 
 def _who(sub: Any, me: str) -> str:
@@ -88,7 +88,7 @@ def _gate(view: dict, me: str) -> dict:
     rows, policies, required, met, unmet, changes = plans.tally(people, rules, plans._signed(view), asked,
                                                                 read is not None, me)
     if read is None:
-        state, reason = "waiting", "brindle can't read this design's review state."
+        state, reason = "waiting", "brindle can't read this plan's review state."
     elif changes:
         state, reason = plans.CHANGES, f"Changes requested by {', '.join(changes)}."
     elif unmet:
@@ -261,7 +261,7 @@ def comparison(doc_id: str, rev: int, *, client=None, store=None) -> dict:
 def comment(doc_id: str, rev: Any, anchor: Any, text: Any, *, question: bool = False, client=None, store=None) -> dict:
     """A comment on the revision on screen, or (``question``) one for this person's own supervisor."""
     if not isinstance(anchor, dict):
-        raise ServiceError("invalid", "a comment is anchored on part of the doc", 400)
+        raise ServiceError("invalid", "a comment is anchored on part of the plan", 400)
     body = {"rev": _rev(rev), "anchor": anchor, "text": _text(text), **({"question": True} if question else {})}
     return _ask(doc_id, "POST", "/comments", body, client, store)
 
@@ -309,7 +309,7 @@ def _answer_id(answer_id: Any) -> str:
     from brindle import plan_answers
 
     if not isinstance(answer_id, str) or not plan_answers.ID.fullmatch(answer_id):
-        raise ServiceError("invalid", "name one of the answers on this doc", 400)
+        raise ServiceError("invalid", "name one of the answers on this plan", 400)
     return answer_id
 
 
@@ -402,7 +402,7 @@ def read_link(token: Any, *, client=None, store=None) -> dict:
     doc_id = resp.get("doc_id")
     if doc_id is not None:
         if not isinstance(doc_id, str) or not DOC_ID.fullmatch(doc_id):
-            raise ServiceError("upstream", "the Library named a design brindle can't read", 502)
+            raise ServiceError("upstream", "the Library named a plan brindle can't read", 502)
         member = _as_member(doc_id, resp.get("title"), client, store)
         if member is not None:
             return member

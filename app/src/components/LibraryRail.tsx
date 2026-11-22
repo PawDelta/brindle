@@ -122,7 +122,7 @@ function NewFolder({ folders, repos, defaultRepo, onCreate, onDone }: { folders:
         </select>
       </label>
       <label className={labelled}>
-        Who can add designs
+        Who can add plans
         <select aria-label="Who can add" className={FIELD} value={canAdd} onChange={(e) => setCanAdd(e.target.value as "owner" | "members")}>
           <option value="owner">Only me</option>
           <option value="members">Anyone who can see it</option>
@@ -169,7 +169,7 @@ export function LibraryRail({ route, counts = {}, folders = [], docs = NO_DOCS, 
       await onMoveDoc?.(readerDoc!, scope, folder);
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Couldn't move the design");
+      setError(e instanceof Error ? e.message : "Couldn't move the plan");
     }
   };
   return (
@@ -178,7 +178,7 @@ export function LibraryRail({ route, counts = {}, folders = [], docs = NO_DOCS, 
         ← Sessions
       </button>
       <nav aria-label="Library" className="flex flex-col gap-px">
-        <Row glyph="▤" label="All designs" count={counts.all} on={picked} onClick={() => go({})} />
+        <Row glyph="▤" label="All plans" count={counts.all} on={picked} onClick={() => go({})} />
         {LIBRARY_STAGES.map((stage) => (
           <Row key={stage.id} glyph={STAGE_GLYPH[stage.id]} label={stage.label} count={counts.stages?.[stage.id]} mine={stage.id === "needs-you"} on={designs && route.stage === stage.id} onClick={() => go({ stage: stage.id })} />
         ))}
@@ -195,7 +195,7 @@ export function LibraryRail({ route, counts = {}, folders = [], docs = NO_DOCS, 
         {tree.map((t) => (
           <div key={t.key} className="flex flex-col gap-px" data-testid={`folders-${t.key}`}>
             {t.repo ? (
-              <Row glyph="▾" label={t.label} count={t.count} title="This repo's folders: open to see all its designs" on={designs && route.repo === t.repo && !route.folder} onClick={() => go({ repo: t.repo! })} />
+              <Row glyph="▾" label={t.label} count={t.count} title="This repo's folders: open to see all its plans" on={designs && route.repo === t.repo && !route.folder} onClick={() => go({ repo: t.repo! })} />
             ) : (
               <div className="flex items-center gap-2 px-2 py-1 text-[12.5px] text-ink-2">
                 <span className="w-3.5 shrink-0 text-center text-[12px] text-ink-3" aria-hidden>▾</span>

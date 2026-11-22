@@ -138,6 +138,6 @@ it("a folder made and a design moved there from the reader show in that folder a
   // Open again, then All designs: the reader closes on the whole Library.
   fireEvent.click(within(row("release")).getByRole("button"));
   expect(await screen.findByTestId("reader")).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: /^All designs/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^All plans/ }));
   await waitFor(() => expect(rows()).toHaveLength(4));
 });

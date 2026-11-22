@@ -257,7 +257,7 @@ def add(files: list[dict], source: dict | None, *, repo_root: str | None = None,
     unless ``doc_id``. Raises on a failed write."""
     doc_id = doc_id or f"local-{secrets.token_hex(8)}"
     if not ID_RE.fullmatch(doc_id):
-        raise ValueError(f"not a doc id: {doc_id!r}")
+        raise ValueError(f"not a plan id: {doc_id!r}")
     path = _dir(store) / f"{doc_id}.json"
     record = {k: v for k, v in (meta or {}).items() if k in LISTED}
     record.update(doc_id=doc_id, files=list(files), source=dict(source or {}), repo_root=repo_root,

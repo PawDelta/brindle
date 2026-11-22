@@ -117,7 +117,7 @@ def link(db: DB, plan_id: str) -> dict | None:
 def _require_team(store):
     ent = ad.require_entitlement(store)
     if TEAM_FEATURE not in ent.features:
-        raise RuntimeError("sharing a design doc needs a Team plan (the `analysis_docs_team` entitlement)")
+        raise RuntimeError("sharing a plan needs a Team plan (the `analysis_docs_team` entitlement)")
     return ent
 
 
@@ -551,7 +551,7 @@ def set_reviewers(db: DB, plan_id: str, reviewers: Any, *, client=None, store=No
     client, store = ad._session(client, store)
     share_ = _shared(db, p["id"], store)
     if share_["access_refused"] == NOT_FOUND:
-        raise ServiceError("share_not_found", "the Library has no document for this plan's share, so its reviewers "
+        raise ServiceError("share_not_found", "the Library has no saved plan for this share, so its reviewers "
                            "can't be changed. Stop sharing and build, then share it again.", 409)
     people = _reviewers(reviewers)
     _grant(db, p, share_["doc_id"], people, None, client, store)
@@ -1529,7 +1529,7 @@ def _unshare(doc_id: str, client, store) -> None:
         raise
     owner = doc.get("scope")
     if not isinstance(owner, dict):
-        raise RuntimeError("the Library didn't say who owns this document")
+        raise RuntimeError("the Library didn't say who owns this plan")
     for scope in doc.get("scopes") or []:
         if scope == owner:
             continue

@@ -617,7 +617,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     } catch (e) {
       writes.end(null);
       refused?.(e);
-      if (alive.current) setError(e instanceof DaemonError && e.code === "gate_unverified" ? message(e) : e instanceof DaemonError && e.status === 409 && e.code !== "gate_closed" && e.code !== "review_closed" ? "This design changed since you opened it (a new revision, or it was already decided). It is being read again."
+      if (alive.current) setError(e instanceof DaemonError && e.code === "gate_unverified" ? message(e) : e instanceof DaemonError && e.status === 409 && e.code !== "gate_closed" && e.code !== "review_closed" ? "This plan changed since you opened it (a new revision, or it was already decided). It is being read again."
         : e instanceof DaemonError && e.status === 403 ? `The Library refused this for your account: ${message(e)}` : `Couldn't send: ${message(e)}`);
       return null;
     } finally {
@@ -849,7 +849,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     gate && !useLiveReview && gate.required > 0 && `${gate.signed} of ${plural(gate.required, "required sign-off")}.`,
     suggestions > 0 && !teammate && `${plural(suggestions, "suggestion")} to accept.`,
     openThreads.length - suggestions > 0 && `${plural(openThreads.length - suggestions, "comment")} open.`,
-    plan.queued > 0 && `${plural(plan.queued, "assigned task waits", "assigned tasks wait")} on this design.`,
+    plan.queued > 0 && `${plural(plan.queued, "assigned task waits", "assigned tasks wait")} on this plan.`,
   ].filter(Boolean).slice(0, 2).join(" ");
   const signName = frozen ? `Sign off version ${frozen.id}` : "Sign off";
 
@@ -1009,7 +1009,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           {(gate.unconfirmed.reason === "sign_in" || gate.unconfirmed.reason === "other_account") && <LibrarySignIn />}
           {gate.unconfirmed.can_stop_sharing && !next && sharing?.stopSharingPlan && (
             <span>
-              <button type="button" className={`${quiet} -my-0.5 text-xs`} disabled={busy} title="Your teammates lose this doc the next time brindle reaches the Library" onClick={() => void stopSharing()}>Stop sharing and build</button>
+              <button type="button" className={`${quiet} -my-0.5 text-xs`} disabled={busy} title="Your teammates lose this plan the next time brindle reaches the Library" onClick={() => void stopSharing()}>Stop sharing and build</button>
             </span>
           )}
         </div>
@@ -1034,7 +1034,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       <div className="grid min-w-0 gap-0.5" data-testid="plan-next" data-state="suggesting">
         <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
           <span className={`${label} text-[11px]`}>Suggesting</span>
-          <span className="truncate">{suggestionReady ? "1 change not sent" : "Type your change in the doc"}</span>
+          <span className="truncate">{suggestionReady ? "1 change not sent" : "Type your change in the plan"}</span>
         </span>
         <span className="text-xs text-ink-3">{teammate ? `Your edits are suggestions. ${authorName} accepts or rejects each one.` : "Your edits are suggestions. You accept or reject each one."}</span>
       </div>
@@ -1072,7 +1072,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           ? <p data-testid="plan-closed">Closed: its session ended</p>
           : plan.state === "cancelled"
           ? <p data-testid="plan-closed">This planning is closed without approval. The tasks it held wait for the supervisor's decision on each.</p>
-          : <p>{plan.state === "approved" ? `You signed off r${plan.rev}. Its workers start now.` : plan.state === "writing" ? "The supervisor is writing this plan." : plan.state === "superseded" ? "A newer plan replaced this one." : "You asked for changes. The supervisor is revising the design."}</p>}
+          : <p>{plan.state === "approved" ? `You signed off r${plan.rev}. Its workers start now.` : plan.state === "writing" ? "The supervisor is writing this plan." : plan.state === "superseded" ? "A newer plan replaced this one." : "You asked for changes. The supervisor is revising the plan."}</p>}
         {plan.verdict?.note && <p className="text-ink-2"><span className="text-ink-3">your note · </span>{plan.verdict.note}</p>}
         {plan.verdict?.comments?.map((c, i) => (
           <p key={i} className="text-ink-2">
@@ -1222,7 +1222,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                 <div className={`font-serif text-[15.5px] leading-[1.68] text-ink-2 ${noted ? "w-[min(660px,100%_-_292px)] max-[1180px]:mx-auto max-[1180px]:w-[min(660px,100%)]" : "mx-auto w-[min(660px,100%)]"}`}>
                   <h1 className="m-0 min-w-0 [overflow-wrap:anywhere] font-serif text-[31px] font-semibold leading-[1.16] tracking-[-0.012em] text-ink [text-wrap:balance]">{plan.title}</h1>
                   {status}
-                  {plan.team_ended && <p className="m-0 mt-2 font-sans text-[12.5px] text-ink-2" data-testid="plan-team-ended">Your Team plan ended, so this is now a personal design doc.</p>}
+                  {plan.team_ended && <p className="m-0 mt-2 font-sans text-[12.5px] text-ink-2" data-testid="plan-team-ended">Your Team plan ended, so this is now a personal plan.</p>}
                   {textPlan.lede && (
                     <Annotated notes={notesFor(LEDE)} className="mt-[26px]">
                       <div id="plan-lede" className="grid gap-2.5 text-[18.5px] leading-[1.55] text-ink">
@@ -1358,7 +1358,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                 byline={byline} workItem={workItem}
                 brief={!!plan.ask} briefOpen={briefOpen} onBrief={() => setBriefOpen((o) => !o)}
                 state={plan.state} held={policyHeld ? "policy" : undefined} />
-              {plan.team_ended && <p className="m-0 text-[12.5px] text-ink-2" data-testid="plan-team-ended">Your Team plan ended, so this is now a personal design doc.</p>}
+              {plan.team_ended && <p className="m-0 text-[12.5px] text-ink-2" data-testid="plan-team-ended">Your Team plan ended, so this is now a personal plan.</p>}
               {gateNotes}
               {plan.ask && briefOpen && (
                 <p id="plan-ask" className="m-0 flex flex-wrap items-baseline gap-x-2 border-l-2 border-line-strong pl-3 text-[12.5px] text-ink-2" data-testid="plan-ask">
@@ -1436,7 +1436,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             <div className="grid min-w-0 gap-0.5" data-testid="plan-next">
               <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
                 <span className={`${label} text-[11px]`}>Next</span>
-                <span className="truncate">{next ? next.title : gate ? (gate.state === "ready" ? "Ready to build" : gateWhy) : "Sign off this design"}</span>
+                <span className="truncate">{next ? next.title : gate ? (gate.state === "ready" ? "Ready to build" : gateWhy) : "Sign off this plan"}</span>
               </span>
               <span className="text-xs text-ink-3">
                 {summary}
