@@ -55,36 +55,45 @@ _STRICT_JSON_FRAGMENT_RE = re.compile(r'^"[a-zA-Z_][a-zA-Z0-9_-]*"\s*:')
 _QUOTED_KEY_RE = re.compile(r'^"([a-zA-Z_][a-zA-Z0-9_-]*)"$')
 _TABLE_KEY_HEADERS = frozenset({"key", "setting", "option", "config key"})
 
-# Prose invocation lead-ins and English stop words that terminate a prose command.
-_PROSE_LEADIN_RE = re.compile(
+# Prose invocation patterns and English stop words that terminate a prose command.
+_PROSE_BRINDLE_RE = re.compile(r"(?<![./\w-])brindle(?=\s)")
+_PROSE_LEADIN_BEFORE_RE = re.compile(
     r"(?:^|[\s(\[,;—–-])"
     r"(?:run|running|use|using|try|trying|call|calling|invoke|invoking|"
-    r"execute|executing|type|typing|via|command)\s+"
-    r"brindle(?=\s)",
+    r"execute|executing|type|typing|via|command)\s+$",
+    re.I,
+)
+_PROSE_CONJ_BEFORE_RE = re.compile(r"(?:(?:^|[\s,])(?:and|or|then)\s+|,\s*|/\s*|->\s*)$", re.I)
+_PROSE_DETERMINER_BEFORE_RE = re.compile(
+    r"(?:^|[\s(\[,;—–-])"
+    r"(?:a|an|any|each|every|free|its|my|new|no|one|other|our|some|that|their|this|your)\s+$",
     re.I,
 )
 _PROSE_QUOTED_RE = re.compile(r"""(?<![\w=])(["'])brindle\s+([^"'\n]+?)\1""")
 _PROSE_PROMPT_RE = re.compile(r"^\s*(?:\$|%)\s+brindle\s+(.+)$")
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+_MD_EMPHASIS_RE = re.compile(r"(?<!\w)\*\*?([^\s*][^*\n]*?)\*\*?(?!\w)")
+_PROSE_CMD_SUFFIX_WORDS = frozenset({"command", "commands", "subcommand", "subcommands"})
 _PROSE_STOP_WORDS = frozenset({
     "a", "about", "above", "across", "after", "again", "against", "all",
     "alone", "already", "also", "although", "always", "an", "and", "another",
     "any", "are", "around", "as", "at", "automatically", "be", "because",
     "been", "before", "being", "below", "beside", "between", "both", "briefly",
-    "but", "by", "can", "continuously", "could", "desktop", "did", "directly",
-    "do", "does", "during", "each", "either", "enterprise", "every", "exactly",
-    "first", "for", "frequently", "from", "had", "has", "have", "her", "here",
-    "his", "however", "if", "in", "inside", "instead", "interactively", "into",
-    "is", "it", "its", "itself", "just", "later", "like", "locally", "manually",
-    "may", "might", "more", "most", "must", "my", "neither", "never", "no",
-    "normally", "not", "now", "of", "on", "once", "only", "onto", "or", "other",
-    "our", "outside", "over", "pro", "regularly", "remotely", "safely", "shall",
-    "should", "since", "so", "some", "still", "such", "team", "than", "that",
-    "the", "their", "then", "there", "these", "they", "this", "those", "though",
-    "through", "to", "today", "too", "twice", "unattended", "under", "unless",
-    "until", "was", "we", "were", "when", "where", "whether", "which", "while",
-    "who", "will", "with", "within", "without", "work", "would", "yet", "you",
-    "your",
+    "but", "by", "can", "command", "commands", "continuously", "could",
+    "desktop", "did", "directly", "do", "does", "during", "each", "either",
+    "enterprise", "every", "exactly", "first", "for", "frequently", "from",
+    "had", "has", "have", "her", "here", "his", "however", "if", "in",
+    "inside", "instead", "interactively", "into", "is", "it", "its", "itself",
+    "just", "later", "like", "locally", "manually", "may", "might", "more",
+    "most", "must", "my", "neither", "never", "no", "normally", "not", "now",
+    "of", "on", "once", "only", "onto", "or", "other", "our", "outside",
+    "over", "pro", "regularly", "remotely", "safely", "shall", "should",
+    "since", "so", "some", "still", "subcommand", "subcommands", "such",
+    "team", "than", "that", "the", "their", "then", "there", "these", "they",
+    "this", "those", "though", "through", "to", "today", "too", "twice",
+    "unattended", "under", "unless", "until", "was", "we", "were", "when",
+    "where", "whether", "which", "while", "who", "will", "with", "within",
+    "without", "work", "would", "yet", "you", "your",
 })
 # Bare `-s` / `--supervisor` accepts an optional value in brindle.cli._bare_supervisor_flag.
 _OPTIONAL_VALUE_GLOBAL_OPTS = frozenset({"-s", "--supervisor"})
@@ -221,7 +230,7 @@ def _consume_global_options(
     while i < n:
         tok = tokens[i]
         if tok == "--":
-            return []
+            return tokens[i + 1:]
         if not tok.startswith("-"):
             break
         if "=" in tok:
@@ -365,17 +374,116 @@ def _validate_command_tokens(
     return None
 
 
-def _extract_prose_command_tokens(
-    tail: str,
+def _has_command_suffix(tokens: list[str]) -> bool:
+    """True when ``tokens`` look like ``<subcommand...> command|subcommand``."""
+    for idx in range(1, min(len(tokens), 4)):
+        if tokens[idx].rstrip(",.:;)").lower() in _PROSE_CMD_SUFFIX_WORDS:
+            return all(_is_candidate_token(t) for t in tokens[:idx])
+    return False
+
+
+def _scan_prose_text(
+    text: str,
+    char_lines: list[int],
     tree: dict[str, dict | None],
     global_options: dict[str, int],
-) -> list[list[str]]:
-    """Slice a prose clause after ``brindle `` up to punctuation boundaries."""
-    # Stop before sentence/clause punctuation, quotes, or backticks.
-    clause = re.split(r"""[.,;:?!)\]}"'`—–·]""", tail, maxsplit=1)[0].strip()
-    if not clause:
-        return []
-    return _parse_after_brindle(clause, tree, global_options)
+    record,
+    *,
+    prior_cmd_offsets: set[int] | None = None,
+    prior_cmd_at_start: bool = False,
+) -> bool:
+    """Find ``brindle <subcommand>`` invocations across visible prose ``text``.
+
+    Uses ``char_lines[offset]`` for exact 1-based source line numbers. Returns
+    whether ``text`` ends in a sentence containing a ``brindle`` CLI invocation.
+    """
+    cmd_positions: list[int] = sorted(prior_cmd_offsets) if prior_cmd_offsets else []
+    if prior_cmd_at_start:
+        cmd_positions.insert(0, 0)
+
+    def has_prior_cmd_in_sentence(pos: int) -> bool:
+        prev = None
+        for p in cmd_positions:
+            if p <= pos:
+                prev = p
+            else:
+                break
+        if prev is None:
+            return False
+        between = text[prev:pos]
+        return not re.search(r"\n\s*\n|[.;?!]", between)
+
+    if "brindle" not in text:
+        return has_prior_cmd_in_sentence(len(text))
+
+    # 1. Shell-prompt lines in plain text (`$ brindle ...`).
+    for m in re.finditer(r"(?m)^\s*(?:\$|%)\s+brindle\s+(.+)$", text):
+        lineno = char_lines[m.start()]
+        for tokens in _extract_command_candidates(
+            _strip_shell_comment(m.group(0)), tree, global_options
+        ):
+            bad = _validate_command_tokens(tokens, tree)
+            if bad:
+                record(lineno, "command", bad)
+        cmd_positions.append(m.end())
+
+    # 2. Quoted invocations (`"brindle bogus-cmd"` or `'brindle bogus-cmd'`).
+    for qm in _PROSE_QUOTED_RE.finditer(text):
+        lineno = char_lines[qm.start()]
+        for tokens in _parse_after_brindle(qm.group(2).strip(), tree, global_options):
+            bad = _validate_command_tokens(tokens, tree, prose=True)
+            if bad:
+                record(lineno, "command", bad)
+        cmd_positions.append(qm.end())
+
+    cmd_positions.sort()
+
+    # 3. Standalone `brindle ...` invocation boundaries anywhere in visible prose.
+    for bm in _PROSE_BRINDLE_RE.finditer(text):
+        pos = bm.start()
+        lineno = char_lines[pos]
+        before_raw = text[max(0, pos - 60):pos]
+        before_clause = re.split(r"\n\s*\n|[.;?!]", before_raw)[-1]
+        tail = text[bm.end():].lstrip()
+        if not tail:
+            continue
+        clause = re.split(r"""\n\s*\n|[.,;:?!)\]}"'`—–·]""", tail, maxsplit=1)[0].strip()
+        if not clause:
+            continue
+        raw_tokens = clause.split()
+        if not raw_tokens:
+            continue
+
+        # Decide whether this occurrence is a CLI command reference vs a product mention:
+        # - explicit option/delimiter (`brindle -s ...`, `brindle -- ...`)
+        # - lead-in verb (`Run brindle ...`) or conjunction after a prior command in the same sentence
+        # - followed by `command`/`subcommand` (`The brindle foo command ...`)
+        # - standalone hyphen/underscore command token (`brindle bogus-cmd`, not `a brindle ...`)
+        starts_with_opt = raw_tokens[0].startswith("-")
+        has_leadin = bool(_PROSE_LEADIN_BEFORE_RE.search(before_clause))
+        has_conj = has_prior_cmd_in_sentence(pos) and bool(
+            _PROSE_CONJ_BEFORE_RE.search(before_clause)
+        )
+        post_opt_tokens = _consume_global_options(raw_tokens, tree, global_options)
+        has_cmd_suffix = _has_command_suffix(post_opt_tokens)
+        is_hyphen_cmd = (
+            bool(post_opt_tokens)
+            and _is_candidate_token(post_opt_tokens[0])
+            and ("-" in post_opt_tokens[0] or "_" in post_opt_tokens[0])
+            and not _PROSE_DETERMINER_BEFORE_RE.search(before_clause)
+        )
+
+        if not (starts_with_opt or has_leadin or has_conj or has_cmd_suffix or is_hyphen_cmd):
+            continue
+
+        for tokens in _parse_after_brindle(clause, tree, global_options):
+            bad = _validate_command_tokens(tokens, tree, prose=True)
+            if bad:
+                record(lineno, "command", bad)
+        cmd_positions.append(bm.end())
+        cmd_positions.sort()
+
+    return has_prior_cmd_in_sentence(len(text))
 
 
 def _scan_prose_line(
@@ -384,38 +492,18 @@ def _scan_prose_line(
     tree: dict[str, dict | None],
     global_options: dict[str, int],
     record,
-) -> None:
+    *,
+    prior_cmd_offsets: set[int] | None = None,
+) -> bool:
     """Find ``brindle <subcommand>`` invocations in a single line of plain prose."""
-    if "brindle" not in line_text:
-        return
-
-    # 1. Shell-prompt line in plain text (`$ brindle ...`).
-    pm = _PROSE_PROMPT_RE.match(line_text)
-    if pm:
-        for tokens in _extract_command_candidates(
-            _strip_shell_comment(line_text), tree, global_options
-        ):
-            bad = _validate_command_tokens(tokens, tree)
-            if bad:
-                record(lineno, "command", bad)
-        return
-
-    # 2. Quoted invocations (`"brindle bogus-cmd"` or `'brindle bogus-cmd'`).
-    for qm in _PROSE_QUOTED_RE.finditer(line_text):
-        for tokens in _parse_after_brindle(qm.group(2).strip(), tree, global_options):
-            bad = _validate_command_tokens(tokens, tree, prose=True)
-            if bad:
-                record(lineno, "command", bad)
-
-    # 3. Lead-in CLI invocations (`Run brindle bogus-cmd to diagnose problems.`).
-    for lm in _PROSE_LEADIN_RE.finditer(line_text):
-        tail = line_text[lm.end():].lstrip()
-        if not tail:
-            continue
-        for tokens in _extract_prose_command_tokens(tail, tree, global_options):
-            bad = _validate_command_tokens(tokens, tree, prose=True)
-            if bad:
-                record(lineno, "command", bad)
+    return _scan_prose_text(
+        line_text,
+        [lineno] * len(line_text),
+        tree,
+        global_options,
+        record,
+        prior_cmd_offsets=prior_cmd_offsets,
+    )
 
 
 # -- JSON config key extraction -----------------------------------------------
@@ -705,24 +793,46 @@ def _check_markdown(
 
     code_spans: list[tuple[int, int, int, str]] = []
     prose_parts: list[str] = []
+    cmd_marker = "\x01"
     last_end = 0
     for m in re.finditer(r"(`+)([^`]+?)\1", unmasked):
         start_pos, end_pos = m.start(), m.end()
         prose_parts.append(unmasked[last_end:start_pos])
-        # Replace inline code spans with newlines-preserving spaces for prose scanning.
-        prose_parts.append("\n" * m.group(0).count("\n") or " ")
-        last_end = end_pos
         span_line = unmasked.count("\n", 0, start_pos) + 1
         span_text = " ".join(m.group(2).split())
         code_spans.append((start_pos, end_pos, span_line, span_text))
+        is_cmd_span = bool(_extract_command_candidates(span_text, cli_tree, global_options))
+        # Preserve exact newline count; mark code-span command positions for conjunction tracking.
+        nl_count = m.group(0).count("\n")
+        if is_cmd_span:
+            prose_parts.append(("\n" * nl_count) + cmd_marker)
+        else:
+            prose_parts.append("\n" * nl_count or " ")
+        last_end = end_pos
         check_command_snippet(span_text, span_line)
     prose_parts.append(unmasked[last_end:])
 
     # Scan plain prose lines for unformatted `brindle <subcommand>` invocations.
-    # Strip raw inline HTML tags (e.g. `<img alt="brindle logo">`) while preserving line count.
+    # Strip raw inline HTML tags (e.g. `<img alt="brindle logo">`) and markdown emphasis
+    # while preserving exact line numbers and code-command positions.
     prose_text = _HTML_TAG_RE.sub(lambda m: "\n" * m.group(0).count("\n"), "".join(prose_parts))
     for lineno, prose_line in enumerate(prose_text.splitlines(), start=1):
-        _scan_prose_line(prose_line, lineno, cli_tree, global_options, record)
+        clean_line = _MD_EMPHASIS_RE.sub(r"\1", prose_line)
+        cmd_offsets: set[int] = set()
+        stripped_chars: list[str] = []
+        for ch in clean_line:
+            if ch == cmd_marker:
+                cmd_offsets.add(len(stripped_chars))
+            else:
+                stripped_chars.append(ch)
+        _scan_prose_line(
+            "".join(stripped_chars),
+            lineno,
+            cli_tree,
+            global_options,
+            record,
+            prior_cmd_offsets=cmd_offsets,
+        )
 
     # Inline config.json key references.
     after_target_re = re.compile(
@@ -987,12 +1097,38 @@ def _check_html(
         re.I,
     )
     for block in parser.inline_blocks:
+        prior_cmd = False
+        prose_chars: list[str] = []
+        prose_char_lines: list[int] = []
+
+        def flush_prose() -> None:
+            nonlocal prior_cmd
+            if not prose_chars:
+                return
+            prior_cmd = _scan_prose_text(
+                "".join(prose_chars),
+                prose_char_lines,
+                cli_tree,
+                global_options,
+                record,
+                prior_cmd_at_start=prior_cmd,
+            )
+            prose_chars.clear()
+            prose_char_lines.clear()
+
         for i, (is_code, line, seg_text) in enumerate(block):
             if not is_code:
-                for offset, prose_line in enumerate(seg_text.split("\n")):
-                    _scan_prose_line(prose_line, line + offset, cli_tree, global_options, record)
+                cur_line = line
+                for ch in seg_text:
+                    prose_chars.append(ch)
+                    prose_char_lines.append(cur_line)
+                    if ch == "\n":
+                        cur_line += 1
                 continue
 
+            flush_prose()
+            if _extract_command_candidates(seg_text, cli_tree, global_options):
+                prior_cmd = True
             check_command_snippet(seg_text, line)
             if _CONFIG_JSON_RE.search(seg_text):
                 continue
@@ -1010,6 +1146,8 @@ def _check_html(
             if html_before_target_re.search(before_clause):
                 for kl, kn in _extract_inline_config_keys(seg_text, line):
                     check_key(kl, kn)
+
+        flush_prose()
 
     return findings
 
