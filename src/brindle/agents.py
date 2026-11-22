@@ -6574,6 +6574,17 @@ def _codex_pre_tool_hook(db: DB, agent_id: str, payload: dict) -> dict:
     return answer
 
 
+def _brindle_input(db: DB, agent_id: str, text: str) -> bool:
+    """Whether input the CLI took in is brindle's own, never the person speaking:
+    anything carrying brindle's tag (reminders, possibly wrapped or never
+    recorded as delivered), a message brindle just delivered, or a waiter's
+    hand-over as Claude Code submits it (wake.handed_over)."""
+    from brindle import wake
+
+    return ("[brindle" in text or db.recently_delivered(agent_id, text)
+            or wake.handed_over(db, agent_id, text))
+
+
 ABSORBED_MARK = "absorbed-prompts"   # {"path": transcript, "offset": bytes of it already read}
 _ABSORBED_READ_MAX = 32 << 20        # more unread transcript than this at once is skipped, not read
 
@@ -6633,7 +6644,7 @@ def _note_staged_prompt(db: DB, agent: Agent, payload: dict) -> None:
         said_at = _transcript_time(stamp)
         if said_at is None:
             return
-        if "[brindle" not in text and not db.recently_delivered(agent.id, text):
+        if not _brindle_input(db, agent.id, text):
             visual_offers.person_spoke(db, agent, text, cli_prompt=True, said_at=said_at,
                                        staged_only=True, mid_turn=mid_turn)
         return
@@ -6707,7 +6718,7 @@ def _note_absorbed_prompts(db: DB, agent: Agent, path: str) -> None:
         # In the order they were sent, each with its own time: a cancel read back
         # here ends only what the person typed before it, not a newer staged ask.
         for prompt, said_at in prompts:
-            if "[brindle" not in prompt and not db.recently_delivered(agent.id, prompt):
+            if not _brindle_input(db, agent.id, prompt):
                 visual_offers.person_spoke(db, agent, prompt, cli_prompt=True, said_at=said_at, mid_turn=True)
     except Exception:  # noqa: BLE001 - a hook must never fail over this
         log.exception("brindle: couldn't read the messages absorbed into %s's turn", agent.id)
@@ -6873,9 +6884,13 @@ def _handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | Non
         # prompt carrying brindle's tag is not the user speaking. Judged before
         # an acknowledgement below marks anything delivered; sending a stopped
         # delivery with their reply typed onto it is the user speaking, though.
-        person = "[brindle" not in prompt and not db.recently_delivered(agent_id, prompt)
+        # A waiter's hand-over (wake.take) is brindle's alone: no reply of theirs rides on it.
+        from brindle import wake
+
+        handed_over = wake.handed_over(db, agent_id, prompt)
+        person = not _brindle_input(db, agent_id, prompt)
         carries_delivery = _acknowledge_submitted(db, agent_id, prompt)
-        person = carries_delivery or person
+        person = not handed_over and (carries_delivery or person)
         db.set_status(agent_id, "processing")
         from brindle import launch_health
         launch_health.accepted(db, agent)

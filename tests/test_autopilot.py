@@ -874,6 +874,23 @@ def test_delivered_worker_result_is_not_the_user_replying(db, root, monkeypatch)
         assert db.get_autopilot("boss").state == "stalled"
 
 
+def test_stop_hook_delivery_is_not_the_person_answering(db, root):
+    from brindle import wake
+
+    agent, _ = root
+    with_goal(db)
+    autopilot.need_user(db, "boss", "Q?")
+    db.enqueue("boss", "Assigned task finished.", "w1")
+    handed, _ = wake.take(db, agent)   # the Stop hook's waiter hands it over
+    # As Claude Code submits an asyncRewake hand-over: its envelope, then the waiter's stderr.
+    prompt = ("<task-notification>\n<summary>Stop hook feedback</summary>\n</task-notification>\n"
+              f'<system-reminder>\nStop hook blocking error from command "Stop": {handed}\n\n</system-reminder>')
+    agents.handle_hook(db, "boss", "prompt-submit", {"prompt": prompt})
+    assert db.get_autopilot("boss").state == "blocked"
+    agents.handle_hook(db, "boss", "prompt-submit", {"prompt": "SQLite"})
+    assert db.get_autopilot("boss").state == "running"
+
+
 def test_auditor_liveness_recovery_on_stop(db, root, repo, monkeypatch):
     agent, ws = root
     with_goal(db)
