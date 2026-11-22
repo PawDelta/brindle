@@ -436,9 +436,13 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
     # Paused sessions keep theirs, but dismissed/replaced workers do not ask
     # for attention again just because a historical request is still stored.
     hidden = dismissed_keys(db)
+    shown_items = [i for i in all_items if _dismiss_key(i) not in hidden and (not i.agent_id
+                   or (a := db.get_agent(i.agent_id)) is None or not view.past_worker(a))]
+    # A session asking through a choice visual answers there: its open question
+    # folds into the visual's row instead of offering a second place to answer.
+    choosing = {i.root_id for i in shown_items if i.kind == "visual" and i.reason == "asks you to choose"}
     return [i.model_copy(update={"inbox_group": inbox_team.group(i.kind)})
-            for i in all_items if _dismiss_key(i) not in hidden and (not i.agent_id
-            or (a := db.get_agent(i.agent_id)) is None or not view.past_worker(a))]
+            for i in shown_items if not (i.kind == "question" and i.root_id in choosing)]
 
 
 def _idle_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
