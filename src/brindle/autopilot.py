@@ -1117,13 +1117,13 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
 
     info_str = model_cost_info(name, cfg, repo_root)
 
-    why = f"weight {weight} -> {name}{info_str}"
+    why = f"{weight.title()} job → {info_str}"
     picked = f"learning picked it: {reason}" if reason else "learning picked it"
     kept = learning.kept_note(cfg, repo_root)
     detail = [picked if pick else (f"learning kept it: {kept}" if kept else ""), *skipped]
     detail = [d for d in detail if d]
     if detail:
-        why += f" ({', '.join(detail)})"
+        why += f", picked because {', '.join(detail)}"
     return name, bool(pick), why
 
 
@@ -1180,20 +1180,21 @@ def effective_profile_model(p, repo_root: str | None = None) -> str:
 
 
 def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
-    """Format model name, effort, and cost tier as a cost signal string."""
+    """Format the worker's display name, effort, id and cost tier."""
     try:
+        from brindle.model_names import describe
         from brindle.profiles import load_profile
         p = load_profile(name, repo_root)
         eff = effective_profile_model(p, repo_root)
-        model_name = eff or p.model or "inherited CLI default"
-        model_info = [model_name]
-        if p.effort:
-            model_info.append(f"{p.effort} effort")
+        named = describe(p, eff)
+        worker = named["display"]
+        if named["effort"]:
+            worker += f" ({named['effort']})"
         tier = cost_tier(name, cfg, repo_root)
         label = {"high": "most expensive tier", "low": "lowest cost tier"}.get(tier, "medium cost tier")
-        return f" ({', '.join(model_info)}; {label})"
+        return f"{worker} · {p.name} · {label}"
     except Exception:
-        return ""
+        return name
 
 
 def cost_tier(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
@@ -1312,7 +1313,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             raise AutopilotError(f"profile {req!r} exceeds configured max_weight {ceiling!r}")
         name = req
         if why is not None:
-            why.append(f"requested profile -> {name}{model_cost_info(name, cfg, repo_root)}")
+            why.append(f"Requested worker → {model_cost_info(name, cfg, repo_root)}")
     else:
         name = ""
 
@@ -1329,11 +1330,11 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                 candidates = cfg.routing.get(ceiling, [cfg.default_agent])
                 name = candidates[0] if candidates else cfg.default_agent
                 if why is not None:
-                    why.append(f"milestone profile {m_profile} capped to {name}{model_cost_info(name, cfg, repo_root)} by max_weight {ceiling}")
+                    why.append(f"Milestone worker {m_profile} capped to {model_cost_info(name, cfg, repo_root)} by max_weight {ceiling}")
             else:
                 name = m_profile
                 if why is not None:
-                    why.append(f"milestone profile -> {name}{model_cost_info(name, cfg, repo_root)}")
+                    why.append(f"Milestone worker → {model_cost_info(name, cfg, repo_root)}")
     if not name:
         from brindle import learning
         from brindle.config import normalize_weight
@@ -1453,10 +1454,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     if why is not None:
         info_str = model_cost_info(name, cfg, repo_root)
         if info_str and not any("cost tier" in w for w in why):
-            if why:
-                why[-1] += info_str
-            else:
-                why.append(f"{name}{info_str}")
+            why.append(info_str)
     return name, learned
 
 
