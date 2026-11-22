@@ -156,7 +156,7 @@ def mark_read(db: DB, keys: list[str], *, client=None, store=None) -> list[str]:
     read for the signed-in account, in the Library first: a progress row's key
     stands for every sign-off it covers. Returns the keys now read; the next
     read of the feed, on any machine, shows them read."""
-    from brindle.pro import review_queue
+    from brindle.pro import auth, review_queue
     from brindle.service.errors import ServiceError
 
     try:
@@ -174,7 +174,7 @@ def mark_read(db: DB, keys: list[str], *, client=None, store=None) -> list[str]:
     marked: set[str] = set()
     for i in range(0, len(server), MAX_KEYS):
         try:
-            status, body = client.call("POST", READ, {"item_keys": server[i:i + MAX_KEYS]}, token=token)
+            status, body = client.call("POST", READ, auth.JSONBody({"item_keys": server[i:i + MAX_KEYS]}), token=token)
         except Exception as e:  # noqa: BLE001 - offline: nothing is marked here either
             raise ServiceError("unavailable", "couldn't reach the Library to mark Inbox rows read", 503) from e
         if status != 200:
