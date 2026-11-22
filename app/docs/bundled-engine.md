@@ -34,8 +34,8 @@ Contents/Library/LoginItems/brindle.app/
 process*. The daemon is a launchd job, so that is the daemon itself, and tmux
 and every agent's pane descend from it. As the engine's bare `python3` it had
 no name to show and no usage strings: privacy prompts and System Settings said
-"python3" (docs/investigations/macos-prompts.md). So the daemon's job runs the
-helper instead (`engine::launcher_exec`):
+"python3". So the daemon's job runs the helper instead
+(`engine::launcher_exec`):
 
 - It is an app bundle of its own, `com.pawdelta.brindle.engine`, named
   brindle, with a usage string for each thing an agent's work can make macOS

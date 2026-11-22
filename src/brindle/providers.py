@@ -1334,9 +1334,9 @@ class ClaudeCode(Provider):
         # A subscriber's interactive Claude Code, on a config with no Chrome
         # choice yet (brindle's home starts with none), lists seven browsers'
         # profile folders at every start to decide whether to offer Claude in
-        # Chrome. Run from brindle, macOS holds that against brindle's engine
-        # (docs/investigations/macos-prompts.md). /chrome still works: once it
-        # turns the setting on, this flag is left off from the next launch.
+        # Chrome. Run from brindle, macOS holds that against brindle's engine.
+        # /chrome still works: once it turns the setting on, this flag is left
+        # off from the next launch.
         if not (claude_chrome_chosen(p.env) if ctx.chrome_chosen is None else ctx.chrome_chosen):
             argv.append("--no-chrome")
         argv += [
