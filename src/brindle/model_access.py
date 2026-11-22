@@ -248,8 +248,15 @@ def refuse(profile: str, cause: Cause, swapped_to: str | None = None, *,
 
 def refused(profile: str, repo_root: str | None = None, fp: str | None = None) -> Cause | None:
     """The cause ``profile``'s model was refused for, here, within the last hour."""
+    from brindle.profiles import current_name
+
     fp = fingerprint(profile, repo_root) if fp is None else fp
-    entry = _load(time.time())["refused"].get(_key(profile, fp))
+    entries = _load(time.time())["refused"]
+    entry = entries.get(_key(profile, fp))
+    if entry is None:
+        name = current_name(profile, repo_root)
+        entry = next((e for e in entries.values() if e.get("fp") == fp
+                      and current_name(e.get("profile", ""), repo_root) == name), None)
     return next((c for c in CAUSES if entry and c.key == entry.get("cause")), None)
 
 
@@ -296,13 +303,17 @@ def next_profile(routing: Mapping[str, list[str]], weight: str | None, profile: 
                  repo_root: str | None = None) -> str | None:
     """The profile after ``profile`` in its weight tier that is not refused and
     ``usable``. Without a ``weight``, the first tier that lists ``profile``."""
+    from brindle.profiles import current_name
+
+    profile = current_name(profile, repo_root)
     tiers = [weight] if weight in routing else list(routing)
     for tier in tiers:
         order = routing.get(tier, [])
-        if profile not in order:
+        names = [current_name(name, repo_root) for name in order]
+        if profile not in names:
             continue
-        for name in order[order.index(profile) + 1:]:
-            if refused(name, repo_root) is None and usable(name):
+        for name in order[names.index(profile) + 1:]:
+            if current_name(name, repo_root) != profile and refused(name, repo_root) is None and usable(name):
                 return name
     return None
 

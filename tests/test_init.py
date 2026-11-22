@@ -186,7 +186,7 @@ def test_demo_repo_has_failing_goal(brindle_home):
     assert subprocess.run(["python3", "-m", "unittest", "-q"], cwd=root, capture_output=True).returncode != 0
     assert subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True).stdout == ""
     assert demo.create() != root
-    assert load_repo_config(demo.create(local=True)).default_agent == "developer-local"
+    assert load_repo_config(demo.create(local=True)).default_agent == "dev.qwen3-coder"
 
 
 

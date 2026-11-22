@@ -66,7 +66,7 @@ def test_an_upgrade_under_the_mcp_server_leaves_it_serving_the_version_it_starte
 
     def upgrade_install():
         monkeypatch.setattr(upgrade, "_stamp", lambda: None)     # brindle/__init__.py being rewritten
-        (install / "builtin_agents" / "developer-heavy.md").unlink()
+        (install / "builtin_agents" / "dev.claude-opus.md").unlink()
         (install / "builtin_agents" / "developer.md").write_text("---\nprovider: half-writ")
         shutil.rmtree(install / "builtin_rules")
 
@@ -79,7 +79,7 @@ def test_an_upgrade_under_the_mcp_server_leaves_it_serving_the_version_it_starte
 
     for result in asyncio.run(session()):
         assert not result.is_error
-        assert "developer-heavy (claude)" in result.content[0].text
+        assert "dev.claude-opus (claude)" in result.content[0].text
         assert "developer (claude)" in result.content[0].text
     assert exits == []
 
