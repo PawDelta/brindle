@@ -31,6 +31,8 @@ import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
+from brindle.model_names import canonical
+
 log = logging.getLogger(__name__)
 
 TIERS = ("light", "medium", "heavy", "advanced")
@@ -43,12 +45,12 @@ MIN_MINUTES = 0.1      # a run measured at ~0 minutes still takes some time: sco
 MIN_P = 0.01
 
 # Built-in profiles a role falls back to once its configured candidates are out.
-DEVELOPERS = ("developer-codex", "developer-sonnet", "developer", "developer-light", "developer-heavy",
-              "developer-gemini", "developer-opencode", "developer-fable", "developer-local")
-REVIEWERS = ("reviewer-sonnet-high", "reviewer", "reviewer-codex", "reviewer-gemini", "reviewer-opencode",
-             "reviewer-local")
+DEVELOPERS = ("dev.gpt", "dev.claude-sonnet", "developer", "dev.claude-haiku", "dev.claude-opus",
+              "dev.gemini", "dev.opencode", "dev.claude-fable", "dev.qwen3-coder")
+REVIEWERS = ("review.claude-sonnet.high", "reviewer", "review.gpt", "review.gemini", "review.opencode",
+             "review.qwen3-coder")
 # The supervisor takes its provider, model and effort from one of these.
-SUPERVISORS = ("supervisor", "developer-codex", "developer-gemini", "developer-opencode")
+SUPERVISORS = ("supervisor", "dev.gpt", "dev.gemini", "dev.opencode")
 
 
 def balanced() -> dict[str, float]:
@@ -89,7 +91,7 @@ class Table:
     def cell(self, profile: str, role: str, kind: str | None = None) -> dict | None:
         """``profile``'s measured cell for ``role`` (the ``role/kind`` cell
         before the ``role`` one), or None when it has none with ``min_runs``."""
-        mine = self.profiles.get(profile) or {}
+        mine = self.profiles.get(canonical(profile)) or {}
         for key in ([f"{role}/{kind}"] if kind else []) + [role]:
             c = mine.get(key)
             if isinstance(c, dict) and _measured(c, self.min_runs):
@@ -98,7 +100,7 @@ class Table:
 
     def handover_p(self, src: str, dst: str) -> float | None:
         """The success rate of ``dst`` taking over from ``src``, when measured."""
-        c = self.handover.get(f"{src}>{dst}")
+        c = self.handover.get(f"{canonical(src)}>{canonical(dst)}")
         return float(c["p"]) if isinstance(c, dict) and c.get("runs", 0) >= self.min_runs else None
 
 
@@ -136,7 +138,50 @@ def parse(raw) -> Table:
             isinstance(k, str) and ">" in k and isinstance(c, dict) and _valid(c.get("p"), "p")
             and isinstance(c.get("runs"), int) for k, c in handover.items()):
         raise TableError("handover must map from>to pairs to {p, runs}")
-    return Table(min_runs, tiers, profiles, handover)
+    # The table's rows predate the renames: an old id's cells count for its renamed profile.
+    return Table(min_runs, tiers, _by_identity(profiles), _handover_by_identity(handover))
+
+
+def _by_identity(profiles: dict) -> dict:
+    """``profiles`` keyed by current ids. An identity named twice (an old and a
+    new id) keeps the evidence of both, whichever comes first."""
+    out: dict = {}
+    for name, cells in profiles.items():
+        mine = out.setdefault(canonical(name), {})
+        for role, cell in cells.items():
+            mine[role] = _merge_cells(mine[role], cell) if role in mine else cell
+    return out
+
+
+def _handover_by_identity(handover: dict) -> dict:
+    out: dict = {}
+    for pair, cell in handover.items():
+        key = ">".join(canonical(p) for p in pair.split(">", 1))
+        out[key] = _merge_cells(out[key], cell) if key in out else cell
+    return out
+
+
+def _merge_cells(a: dict, b: dict) -> dict:
+    """One cell from two cells of the same identity, the same whichever is
+    first. Runs add up. ``p`` and ``first_try`` are weighted by runs. ``usd``
+    and ``minutes`` are medians, and a median of two medians is not the median
+    of the pooled runs, so they take the cell with more runs (the larger sample
+    speaks for both) rather than an average. The pooled median would need the
+    runs themselves, which a table keeps only as summaries."""
+    wa, wb = a.get("runs") or 0, b.get("runs") or 0
+    if wa + wb == 0:
+        return {**b, **a}
+    out = {**b, **a}
+    for k in set(a) & set(b):
+        if k == "runs":
+            out[k] = wa + wb
+        elif k in ("usd", "minutes"):
+            out[k] = a[k] if (wa, repr(a[k])) >= (wb, repr(b[k])) else b[k]
+        elif _num(a[k]) and _num(b[k]):
+            out[k] = (a[k] * wa + b[k] * wb) / (wa + wb)
+        else:
+            out[k] = max(a[k], b[k], key=repr)
+    return out
 
 
 _warned = False
@@ -271,7 +316,9 @@ def worker_pool(cfg, repo_root: str, tier: str, ceiling: str | None = None) -> l
         heavier = [t for t in TIERS[i + 1:top + 1]]
         lighter = list(reversed(TIERS[:i]))
         names = own + [n for t in heavier + lighter for n in autopilot.tier_order(cfg, t)] + list(DEVELOPERS)
-    names = list(dict.fromkeys(names))
+    from brindle.profiles import current_name
+
+    names = list(dict.fromkeys(current_name(n, repo_root) for n in names))
     if ceiling in rank:
         names = [n for n in names if rank.get(_weight(autopilot.profile_weight(n, cfg, repo_root)), 3)
                  <= rank[ceiling]]

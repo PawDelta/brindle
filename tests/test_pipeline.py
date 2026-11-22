@@ -83,7 +83,7 @@ def test_dead_reviewer_restarts_once_then_needs_the_person(db, repo, monkeypatch
     elif guard == "running":
         add(db, ws, "other", "review", "reviewer", parent="boss", review_sha=sha)
     elif guard == "queued":
-        agents._review_request_file(ws.id, "reviewer-gemini").write_text(f"queued\n{sha}\n{time.time()}\n")
+        agents._review_request_file(ws.id, "review.gemini").write_text(f"queued\n{sha}\n{time.time()}\n")
     elif guard == "moved":
         db.update_agent("rev0", review_sha="old-commit")
     elif guard == "standalone":
@@ -181,7 +181,7 @@ def test_reviewer_dead_of_provider_failure_moves_to_another_provider(db, repo, m
     ws = workspaces.create(db, str(repo), "feat").workspace
     sha = gates.head(ws)
     add(db, ws, "w1", "assign", parent="boss", result="done", pipeline="reviewing")
-    add(db, ws, "rev0", "review", "reviewer-codex", parent="boss", review_sha=sha)
+    add(db, ws, "rev0", "review", "review.gpt", parent="boss", review_sha=sha)
     db.update_agent("rev0", provider="codex", review_slot="", status="processing", created_at=1)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: False)
     monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
@@ -229,7 +229,7 @@ def test_reviewer_without_verdict_gets_fallback_then_an_escalation_event(db, rep
     add(db, root, "boss", "interactive", "supervisor", status="processing")  # busy: messages queue
     ws = workspaces.create(db, str(repo), "feat").workspace
     add(db, ws, "w1", "assign", parent="boss", result="done", pipeline="reviewing")
-    add(db, ws, "rev0", "review", "reviewer-gemini", parent="boss")
+    add(db, ws, "rev0", "review", "review.gemini", parent="boss")
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss")
     monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)  # supervisor stays busy
     monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
@@ -245,11 +245,11 @@ def test_reviewer_without_verdict_gets_fallback_then_an_escalation_event(db, rep
     db.add_review(ws.id, gates.head(ws), "rev-second", True, "lgtm")
 
     agents.tell_parent_unreported(db, db.get_agent("rev0"))
-    assert started == ["reviewer-sonnet-high"]
+    assert started == ["review.claude-sonnet.high"]
     assert db.get_agent("w1").pipeline == "reviewing"
 
     agents.tell_parent_unreported(db, db.get_agent("rev1"))   # the fallback stops too
-    assert started == ["reviewer-sonnet-high"]
+    assert started == ["review.claude-sonnet.high"]
     assert db.get_agent("w1").pipeline is None
     assert any("review of `feat` never came back" in b for b in drain(db))
     assert [(e["agent_id"], e["root_id"], e["payload"]["actor"])
@@ -320,8 +320,8 @@ def test_stalled_reviewer_reopens_own_session_once_before_fallback(db, repo, tmp
 
 def test_fallback_reviewer_reuses_cached_checks_and_partial_findings(db, repo, tmp_path, monkeypatch):
     (repo / ".brindle" / "agents").mkdir(parents=True)
-    (repo / ".brindle" / "agents" / "reviewer-light.md").write_text(
-        "---\nname: reviewer-light\nextends: reviewer\nmodel: haiku\neffort: low\n---\n"
+    (repo / ".brindle" / "agents" / "review.claude-sonnet.low.md").write_text(
+        "---\nname: review.claude-sonnet.low\nextends: reviewer\nmodel: haiku\neffort: low\n---\n"
     )
     (repo / ".brindle" / "config.json").write_text(json.dumps({"checks": ["pytest -q"]}))
     root = workspaces.adopt_root(db, str(repo))
@@ -351,11 +351,11 @@ def test_fallback_reviewer_reuses_cached_checks_and_partial_findings(db, repo, t
     # before it starts the reviewer.
     monkeypatch.setattr(agents, "_detach", lambda argv: spawned.append(argv))
 
-    # Unpinned config -> routes to the cheaper reviewer-light tier and carries the findings.
+    # Unpinned config -> routes to the cheaper review.claude-sonnet.low tier and carries the findings.
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
     assert len(spawned) == 1
     argv = spawned[0]
-    assert argv[argv.index("--profile") + 1] == "reviewer-light"
+    assert argv[argv.index("--profile") + 1] == "review.claude-sonnet.low"
     assert "Blocker in big.py line 12" in argv[argv.index("--focus") + 1]
 
     # Pinned config -> keeps the pinned reviewer profile instead of downgrading.
@@ -430,7 +430,7 @@ def test_reviewer_stopping_on_a_deleted_worktree_tells_the_supervisor(db, repo, 
     add(db, root, "boss", "interactive", "supervisor", status="processing")
     ws = workspaces.create(db, str(repo), "feat").workspace
     add(db, ws, "w1", "assign", parent="boss", result="done", pipeline="reviewing")
-    add(db, ws, "rev0", "review", "reviewer-gemini", parent="boss")
+    add(db, ws, "rev0", "review", "review.gemini", parent="boss")
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
     monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
     shutil.rmtree(ws.path)   # removed outside brindle: the row outlives it
@@ -1018,31 +1018,48 @@ def test_issue186_review_state_tells_silence_apart(db, repo, tmp_path, monkeypat
     assert watch.awaiting_review(w1, entry) == state
 
 
-@pytest.mark.parametrize("base_file, reused", [
-    ("other.py", True),          # disjoint from the branch's files
-    pytest.param("web/npm-shrinkwrap.json", False, marks=pytest.mark.variant(
-        "review finding: a nested lockfile not named *.lock / *-lock.*")),
+@pytest.mark.parametrize("base_change, merges, runs", [
+    pytest.param("disjoint", False, 2, marks=pytest.mark.variant(
+        "incident: a pre-sync pass must not be reused after a base merge changes the tree")),
+    pytest.param("empty", True, 1, marks=pytest.mark.variant(
+        "an empty base commit leaves the merged tree identical, so check_tree_cache still hits")),
 ])
-def test_merge_reuses_checks_only_when_the_base_brought_in_disjoint_files(db, repo, base_file, reused):
-    """A clean sync with the base keeps the branch's passing checks when the
-    base touched none of its files; the check here fails whenever it runs."""
+def test_merge_reuses_checks_only_when_the_merged_tree_is_unchanged(
+        db, repo, monkeypatch, base_change, merges, runs):
+    """A pre-sync pass must not be reused once merging the base changes the
+    tree contents (even for disjoint files); an identical tree still hits the
+    tree cache."""
     (repo / "shared.py").write_text("".join(f"line{i}\n" for i in range(10)))
     sh("git add shared.py && git commit -qm shared", repo)
     (repo / ".brindle").mkdir()
-    (repo / ".brindle" / "config.json").write_text(json.dumps({"checks": ["false"]}))
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"checks": ["fake-check"]}))
     workspaces.adopt_root(db, str(repo))
     ws = workspaces.create(db, str(repo), "feat").workspace
     path = Path(ws.path)
     (path / "shared.py").write_text("changed\n" + "".join(f"line{i}\n" for i in range(1, 10)))
     sh("git commit -qam work", path)
-    db.set_check(ws.id, gates.head(ws), "false", True, "1 passed")
-    target = repo / base_file
-    target.parent.mkdir(exist_ok=True)
-    target.write_text("".join(f"line{i}\n" for i in range(9)) + "base\n" if base_file == "shared.py" else "x = 1\n")
-    sh(f"git add {base_file} && git commit -qm base", repo)
+
+    seen = []
+
+    def fake_run(cmd, cwd, env, timeout, cancel=None):
+        seen.append(cmd)
+        # Fails once the base's disjoint file is present in the merged tree.
+        if (Path(cwd) / "other.py").exists():
+            return False, "broken by base change"
+        return True, "1 passed"
+
+    monkeypatch.setattr(autopilot, "run_check", fake_run)
+    assert gates.run_checked(db, ws, "fake-check", {}, 30)[0]
+
+    if base_change == "disjoint":
+        (repo / "other.py").write_text("x = 1\n")
+        sh("git add other.py && git commit -qm base", repo)
+    else:
+        sh("git commit --allow-empty -qm noop", repo)
 
     out = pipeline.merge(db, None, ws)
-    assert out.startswith("Merged") is reused, out
+    assert out.startswith("Merged") is merges, out
+    assert len(seen) == runs
 
 
 @pytest.mark.parametrize("amend, base_file, second, delta", [

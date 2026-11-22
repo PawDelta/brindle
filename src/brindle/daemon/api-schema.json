@@ -343,6 +343,18 @@
           "default": null,
           "title": "Model"
         },
+        "model_display": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model Display"
+        },
         "parent_id": {
           "anyOf": [
             {
@@ -386,6 +398,18 @@
           ],
           "default": null,
           "title": "Reported"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
         },
         "status": {
           "title": "Status",
@@ -446,6 +470,18 @@
           ],
           "default": null,
           "title": "Unread"
+        },
+        "weight": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Weight"
         },
         "window": {
           "anyOf": [
@@ -11210,9 +11246,38 @@
               "title": "Allowed",
               "type": "boolean"
             },
+            "builtin": {
+              "default": false,
+              "title": "Builtin",
+              "type": "boolean"
+            },
             "cost_tier": {
               "title": "Cost Tier",
               "type": "string"
+            },
+            "display": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Display"
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Effort"
             },
             "excluded": {
               "title": "Excluded",
@@ -11237,6 +11302,18 @@
               },
               "title": "Lint Warnings",
               "type": "array"
+            },
+            "maker": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Maker"
             },
             "model": {
               "anyOf": [
@@ -11282,9 +11359,33 @@
               "default": null,
               "title": "Refusal"
             },
+            "role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Role"
+            },
             "signed_in": {
               "title": "Signed In",
               "type": "boolean"
+            },
+            "tool": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Tool"
             }
           },
           "required": [
@@ -11691,9 +11792,38 @@
           "title": "Allowed",
           "type": "boolean"
         },
+        "builtin": {
+          "default": false,
+          "title": "Builtin",
+          "type": "boolean"
+        },
         "cost_tier": {
           "title": "Cost Tier",
           "type": "string"
+        },
+        "display": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Display"
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effort"
         },
         "excluded": {
           "title": "Excluded",
@@ -11718,6 +11848,18 @@
           },
           "title": "Lint Warnings",
           "type": "array"
+        },
+        "maker": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maker"
         },
         "model": {
           "anyOf": [
@@ -11763,9 +11905,33 @@
           "default": null,
           "title": "Refusal"
         },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
+        },
         "signed_in": {
           "title": "Signed In",
           "type": "boolean"
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool"
         }
       },
       "required": [
@@ -14544,6 +14710,18 @@
               "default": null,
               "title": "Model"
             },
+            "model_display": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Model Display"
+            },
             "parent_id": {
               "anyOf": [
                 {
@@ -14587,6 +14765,18 @@
               ],
               "default": null,
               "title": "Reported"
+            },
+            "role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Role"
             },
             "status": {
               "title": "Status",
@@ -14647,6 +14837,18 @@
               ],
               "default": null,
               "title": "Unread"
+            },
+            "weight": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Weight"
             },
             "window": {
               "anyOf": [

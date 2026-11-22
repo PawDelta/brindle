@@ -49,7 +49,7 @@ def boss(db, repo, monkeypatch):
     """Session ``boss`` in ``repo``, routing two medium candidates through a recording learner."""
     from brindle.pro import learning as pro
 
-    _session(db, repo, monkeypatch, learning="cloud", routing={"medium": ["developer", "developer-codex"]})
+    _session(db, repo, monkeypatch, learning="cloud", routing={"medium": ["developer", "dev.gpt"]})
     asked = Asked()
     plugins.reset()
     monkeypatch.setattr(pro, "CloudLearner", lambda repo_root: asked)
@@ -125,21 +125,21 @@ def test_an_org_lock_refuses_a_put_and_get_shows_the_org_goal(db, repo, boss, mo
         {"cost": 0.2, "speed": 0.1, "first_try": 0.7}, "org", True)
 
 
-# developer-sonnet: dear and quick; developer-codex: cheap, slow and likelier to merge first time.
+# dev.claude-sonnet: dear and quick; dev.gpt: cheap, slow and likelier to merge first time.
 TRADEOFF = {
     "version": 2, "measured": "2026-11-15", "source": "test", "min_runs": 5, "handover": {},
     "token_mix": {"input": 0.8, "output": 0.2}, "default_mix": {"medium": 1.0},
     "tiers": {t: {"mtok": 1.0, "minutes": 30, "first_try": 0.3, "p": 0.8}
               for t in ("light", "medium", "heavy", "advanced")},
-    "profiles": {"developer-sonnet": {"medium": {"usd": 2.0, "minutes": 10, "first_try": 0.5, "p": 0.8, "runs": 9}},
-                 "developer-codex": {"medium": {"usd": 1.0, "minutes": 80, "first_try": 0.6, "p": 0.8, "runs": 9}}},
+    "profiles": {"dev.claude-sonnet": {"medium": {"usd": 2.0, "minutes": 10, "first_try": 0.5, "p": 0.8, "runs": 9}},
+                 "dev.gpt": {"medium": {"usd": 1.0, "minutes": 80, "first_try": 0.6, "p": 0.8, "runs": 9}}},
 }
 
 
 @pytest.fixture
 def offline(db, repo, monkeypatch):
     """Session ``boss`` without hosted learning, medium routing sonnet then codex, on TRADEOFF priors."""
-    _session(db, repo, monkeypatch, learning="off", routing={"medium": ["developer-sonnet", "developer-codex"]})
+    _session(db, repo, monkeypatch, learning="off", routing={"medium": ["dev.claude-sonnet", "dev.gpt"]})
     plugins.reset()
     monkeypatch.setattr(routing_goal, "priors", lambda: TRADEOFF)
     yield
@@ -158,10 +158,10 @@ def test_the_preview_reflects_this_repos_routing_and_goal(db, repo, offline):
     # Without hosted learning the goal orders the tier by the priors; the
     # opposite trade-off keeps the quick candidate first.
     assert (_dispatch(db, repo), _dispatch(db, repo, goal="cheap"), _dispatch(db, repo, goal="fast")) == (
-        "developer-sonnet", "developer-codex", "developer-sonnet")
+        "dev.claude-sonnet", "dev.gpt", "dev.claude-sonnet")
     cheap = routing_goal.preview(CHEAP, str(repo), db)
     fast = routing_goal.preview(routing_goal.PRESETS["fast"], str(repo), db)
-    assert (_medium(cheap)["profile"], _medium(cheap)["previous"]) == ("developer-codex", "developer-sonnet")
+    assert (_medium(cheap)["profile"], _medium(cheap)["previous"]) == ("dev.gpt", "dev.claude-sonnet")
     assert fast["you"]["usd"] / cheap["you"]["usd"] == pytest.approx(2.0, rel=0.01)
     # The point and the table share one yardstick: the shipped Fable alone reference.
     fable = next(r for r in cheap["references"] if r["name"] == "Fable 5.2 alone")
@@ -169,7 +169,7 @@ def test_the_preview_reflects_this_repos_routing_and_goal(db, repo, offline):
     # A candidate routing can't run is never proposed: the preview's pick is dispatch's.
     config.set_repo(str(repo), "exclude_providers", ["codex"])
     proposed = _medium(routing_goal.preview(CHEAP, str(repo), db))["profile"]
-    assert proposed == "developer-sonnet" == _dispatch(db, repo, goal="cheap")
+    assert proposed == "dev.claude-sonnet" == _dispatch(db, repo, goal="cheap")
 
 
 @pytest.mark.parametrize("weights,signals,sent", [
@@ -180,5 +180,5 @@ def test_the_preview_reflects_this_repos_routing_and_goal(db, repo, offline):
 ])
 def test_the_goal_reaches_the_suggest_payload_only_when_taken(weights, signals, sent):
     task = learning.TaskInfo(repo_root="/r", task="fix the login bug", weight="medium", weights=weights)
-    body = pro_learning.suggest_payload(KEY, "repo", task, ["developer", "developer-codex"], signals=signals)
+    body = pro_learning.suggest_payload(KEY, "repo", task, ["developer", "dev.gpt"], signals=signals)
     assert body.get("weights") == sent

@@ -366,6 +366,25 @@ def test_dismiss_tells_the_agent_once_clears_the_inbox_and_a_new_revision_asks_a
     assert not [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
 
 
+@pytest.mark.parametrize("close", ["answer", pytest.param("dismiss", marks=pytest.mark.variant(
+    "a dismissed visual must hand the question back to the Inbox, not leave it hidden"))])
+@pytest.mark.variant("answering and dismissing are separate lifecycles that must each restore the question")
+def test_open_choice_visual_is_the_one_place_to_answer_its_sessions_question(db, session, close):
+    from brindle import autopilot
+
+    _, boss, worker = session
+    db.add_autopilot(boss.id)
+    autopilot.need_user(db, boss.id, "Which flow?", ask=True)
+    v = visuals.publish(db, worker, "Release flow", "<p>flow</p>", "Which flow?", OPTIONS)
+
+    def kinds():
+        return [i.kind for i in inbox.items(db, None, panes={}) if i.root_id == boss.id]
+
+    assert "visual" in kinds() and "question" not in kinds()
+    visuals.answer(db, v["id"], 1, "A") if close == "answer" else visuals.dismiss(db, v["id"], 1)
+    assert "question" in kinds()
+
+
 def test_answer_attachments_reach_receiver_and_kept_visual(db, session, client, tmp_path, monkeypatch):
     ws, boss, worker = session
     receiving = tmp_path / "receiving"

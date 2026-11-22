@@ -1,5 +1,5 @@
 ---
-name: developer-heavy
+name: dev.claude-opus
 description: Implements a design-heavy or subtle task on its own branch, on Opus with high effort (the heavy tier of weight routing)
 extends: developer
 model: opus

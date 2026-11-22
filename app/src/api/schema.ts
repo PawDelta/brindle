@@ -171,17 +171,20 @@ export interface AgentDTO {
   milestone?: string | null;
   mode: string;
   model?: string | null;
+  model_display?: string | null;
   parent_id?: string | null;
   pending?: number | null;
   profile: string;
   provider: string;
   reported?: boolean | null;
+  role?: string | null;
   status: string;
   status_since?: number | null;
   subagents?: NativeSubagentDTO[];
   tmux_server?: string | null;
   tokens?: string | null;
   unread?: number | null;
+  weight?: string | null;
   window?: string | null;
 }
 /**
@@ -1569,17 +1572,23 @@ export interface RoutingLockDTO {
  */
 export interface RoutingProfileDTO {
   allowed?: boolean;
+  builtin?: boolean;
   cost_tier: string;
+  display?: string | null;
+  effort?: string | null;
   excluded: boolean;
   installed: boolean;
   lint_errors?: string[];
   lint_warnings?: string[];
+  maker?: string | null;
   model?: string | null;
   name: string;
   provider: string;
   provider_name?: string | null;
   refusal?: string | null;
+  role?: string | null;
   signed_in: boolean;
+  tool?: string | null;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

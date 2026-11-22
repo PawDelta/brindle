@@ -1,5 +1,6 @@
 ---
 name: backend-auditor
+role: backend-auditor
 description: Reviews a branch as a backend security audit (extends reviewer)
 extends: reviewer
 rules: security/backend

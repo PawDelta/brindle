@@ -1,9 +1,8 @@
 ---
-name: reviewer-light
-description: Reviews small or docs/test-only branches with Sonnet at low effort
-extends: reviewer
-provider: claude
-model: sonnet
+name: review.gpt.low
+description: Reviews small branches with the existing Codex model at low effort
+extends: review.gpt
+provider: codex
 effort: low
 ---
 Use the scoped context pack in your task as the starting point. Read beyond

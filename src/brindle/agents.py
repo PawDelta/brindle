@@ -29,6 +29,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from brindle import bus, cloud_credential, company_identity, company_login, debuglog, git, keystore, knowledge, pane_auth, providers, secrets, tmux, upgrade, workspaces
+from brindle import model_names
 from brindle import spawn as processes   # this module's own spawn() starts an agent
 from brindle.assembler import DECISIONS, DOCUMENT_CHUNKS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
@@ -227,7 +228,7 @@ def is_review_profile(profile_name: str, repo_root: str) -> bool:
     name: str | None = profile_name
     seen: set[str] = set()
     while name and name not in seen:
-        if name.startswith("reviewer"):
+        if model_names.is_reviewer_id(name):
             return True
         seen.add(name)
         try:
@@ -4843,7 +4844,7 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
     a Claude worker reviewed by a Claude reviewer is fine."""
     if cfg.review_profile:
         return cfg.review_profile
-    if cfg.reviewer and cfg.reviewer != "reviewer-sonnet-high":
+    if cfg.reviewer and cfg.reviewer != "review.claude-sonnet.high":
         return cfg.reviewer
     if db is None or not repo_root or cfg.routing_locked.get("reviewer"):
         return cfg.reviewer
@@ -4854,18 +4855,18 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
     candidates = [cfg.reviewer]
     if unusable("antigravity") is None:
         try:
-            load_profile("reviewer-gemini", repo_root)
-            candidates.append("reviewer-gemini")
+            load_profile("review.gemini", repo_root)
+            candidates.append("review.gemini")
         except Exception:
             pass
     if unusable("codex") is None:
         try:
-            load_profile("reviewer-codex", repo_root)
-            candidates.append("reviewer-codex")
+            load_profile("review.gpt", repo_root)
+            candidates.append("review.gpt")
         except Exception:
             pass
     if _local_reviewer_available():
-        candidates.append("reviewer-local")
+        candidates.append("review.qwen3-coder")
     candidates = list(dict.fromkeys(candidates))
     files, weight = learning._task_files(db, worker, repo_root) if worker else ((), None)
     pick, _ = learning.choose_why(db, cfg, repo_root, task, candidates=candidates,
@@ -4875,13 +4876,13 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
 
 
 def _local_reviewer_available() -> bool:
-    """Whether the built-in ``reviewer-local`` profile's model is served
+    """Whether the built-in ``review.qwen3-coder`` profile's model is served
     right now and fits in free memory. Any failure counts as not available."""
     from brindle.local_setup import memory_problem
     from brindle.native import runner
 
     try:
-        profile = load_profile("reviewer-local")
+        profile = load_profile("review.qwen3-coder")
         return runner.served(profile) and not memory_problem(profile)
     except Exception:
         return False
@@ -4978,7 +4979,7 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
         worker = workspace_worker(db, ws)
         pick = default_review_profile(cfg, worker, db, ws.repo_root, worker.task if worker else None)
         candidates = list(dict.fromkeys([pick, *cfg.reviewer_fallbacks]))
-        if pick == "reviewer-sonnet-high" and not cfg.review_profile and not cfg.routing_locked.get("reviewer"):
+        if pick == "review.claude-sonnet.high" and not cfg.review_profile and not cfg.routing_locked.get("reviewer"):
             if "reviewer" not in candidates:
                 candidates.append("reviewer")
         if cfg.review_sizing and not cfg.review_profile and not cfg.routing_locked.get("reviewer"):
@@ -5250,7 +5251,7 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
     from brindle.config import load_repo_config
 
     cfg = cfg or workspaces.config_for(db, ws)
-    slot = _review_claim_slot(profile, slot)
+    slot = pipeline._slot(_review_claim_slot(profile, slot), ws.repo_root)
     profile = _review_profile(db, ws, profile, cfg)
     with _review_request_run(ws.id, profile, request_id), pipeline.review_run(ws.id):
         # ``report``: the report whose review queued this helper (start_review);
@@ -5418,19 +5419,20 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     workspace already has a review at an earlier commit, the reviewer is
     pointed at just what changed since then, when that's a plain diff (see
     ``review_base``)."""
-    from brindle import gates, launch_health
+    from brindle import gates, launch_health, pipeline
     from brindle.config import load_repo_config
 
     _review_worktree_present(ws)
     _review_kill_switch(ws)
     cfg = cfg or workspaces.config_for(db, ws)
-    slot = _review_claim_slot(profile, slot)
+    slot = pipeline._slot(_review_claim_slot(profile, slot), ws.repo_root)   # a legacy id's claim is this one
     if cfg.review_sizing and slot == "" and not second:
         from brindle import review_scope
 
         # Recheck a queued cheap pick against the current branch. Keep explicit
         # strong profiles, including the pipeline's recovery fallback.
-        if profile in (review_scope.LIGHT_PROFILE, review_scope.CODEX_LIGHT_PROFILE):
+        if profile and any(_same_profile(profile, name, ws.repo_root)
+                           for name in (review_scope.LIGHT_PROFILE, review_scope.CODEX_LIGHT_PROFILE)):
             profile = None
     profile = _review_profile(db, ws, profile, cfg)
     if second and not slot:
@@ -5441,7 +5443,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     failed = None
     for old in db.list_agents(ws.id):
         if (old.mode == "review" and old.result is None and old.review_sha == sha
-                and (profile is None or old.profile == profile)
+                and (profile is None or _same_profile(old.profile, profile, ws.repo_root))
                 and launch_health.has_mcp_failure(db, old, ws)):
             failed = old
             continue
@@ -5450,7 +5452,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         if old.unreported_noted:
             continue   # it stopped without a verdict: not the reviewer of anything
         if old.review_sha == sha:
-            if profile and old.profile != profile:
+            if profile and not _same_profile(old.profile, profile, ws.repo_root):
                 continue   # another profile's review of this commit (a second review): keep both
             return old   # one reviewer per workspace and commit
         close(db, old.id)   # a new commit replaces the reviewer of the old one
@@ -5621,6 +5623,30 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     return reviewer
 
 
+def _same_profile(a: str | None, b: str | None, repo_root: str) -> bool:
+    """Whether two profile ids name one profile in ``repo_root``: an old built-in
+    id and its renamed profile do, a custom profile under an old id does not."""
+    if a is None or b is None:
+        return a == b
+    from brindle.profiles import current_name
+
+    return current_name(a, repo_root) == current_name(b, repo_root)
+
+
+def _live_claim(db: DB, held: tuple) -> Agent | str | None:
+    """What holds a review claim ``held`` (``(agent_id, claimed_at)``): its live
+    reviewer, ``"starting"`` while its dispatcher is still starting it, or None
+    when it is finished, stopped or stale and may be taken over."""
+    agent_id, claimed_at = held
+    holder = db.get_agent(agent_id) if agent_id else None
+    if holder is not None and holder.result is None and not holder.unreported_noted \
+            and alive_or_starting(holder):
+        return holder
+    if agent_id is None and time.time() - claimed_at < LAUNCH_GRACE:
+        return "starting"
+    return None
+
+
 def _claim_review(db: DB, ws: Workspace, sha: str, slot: str) -> tuple[float | None, Agent | None]:
     """Claim in the DB the one reviewer of ``ws`` at ``sha`` (``slot``):
     ``(token, None)`` when this dispatcher is to start it, else ``(None, the
@@ -5628,19 +5654,23 @@ def _claim_review(db: DB, ws: Workspace, sha: str, slot: str) -> tuple[float | N
     still starting it. A claim whose reviewer finished, stopped without a
     verdict or died, or whose dispatcher never named one, is taken over."""
     while True:
+        # A live claim saved under this identity's old built-in id (before the rename) holds it too.
+        for legacy in (old for old, new in model_names.ALIASES.items() if new == slot):
+            if not _same_profile(legacy, slot, ws.repo_root):
+                continue   # a custom profile under the old id is its own identity: its claim is not this one's
+            held = db.review_claim(ws.id, sha, legacy)
+            live = _live_claim(db, held) if held is not None else None
+            if live is not None:
+                return None, live if isinstance(live, Agent) else None
         token = db.claim_review(ws.id, sha, slot)
         if token is not None:
             return token, None
         held = db.review_claim(ws.id, sha, slot)
         if held is None:
             continue   # given up in between
-        agent_id, claimed_at = held
-        holder = db.get_agent(agent_id) if agent_id else None
-        if holder is not None and holder.result is None and not holder.unreported_noted \
-                and alive_or_starting(holder):
-            return None, holder
-        if agent_id is None and time.time() - claimed_at < LAUNCH_GRACE:
-            return None, None
+        live = _live_claim(db, held)
+        if live is not None:
+            return None, live if isinstance(live, Agent) else None
         token = db.claim_review(ws.id, sha, slot, held)
         if token is not None:
             return token, None

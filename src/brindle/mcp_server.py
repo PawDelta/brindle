@@ -24,7 +24,7 @@ from brindle import agents, autopilot, coordinator, cost_estimate, git, history,
 from brindle.pro import brief_learning
 from brindle.config import load_repo_config, normalize_weight
 from brindle.db import DB, Agent, Task, Workspace, migrated_by_newer, migration_incompatibility
-from brindle.profiles import list_profiles
+from brindle.profiles import list_profiles, load_profile
 from brindle.view import last_activity
 
 MAX_DIFF_CHARS = 60_000
@@ -957,7 +957,7 @@ def _route_clash(req: _Request, db: DB, caller: Agent, ws: Workspace, profile: s
             tasks.note_cross_wait(db, t.id, clash.holder)
         outcome = f"queued as task {t.id} until {clash.holder} merges"
         reply = _remind_goal(db, caller, f"Queued task {t.id} until {clash.holder} merges: this task "
-                             f"{clash.warning}." + "".join(f"\nprofile: {w}" for w in why), fast=fast_path)
+                             f"{clash.warning}." + "".join(f"\nrouting: {w}" for w in why), fast=fast_path)
     elif how == "block":
         outcome = "refused"
         reply = (f"Not started: this task {clash.warning}. Two workers editing the same files "
@@ -1023,7 +1023,7 @@ async def handoff(
     milestone: the goal milestone (its number or title) the worker works on;
     default the first unverified one. Shown as in progress while it runs.
 
-    dry_run=true starts and queues nothing: it reports the resolved profile,
+    dry_run=true starts and queues nothing: it reports the selected worker,
     the files each `files` glob matches (warning for any that match none),
     overlaps with active workers, and whether it would queue.
 
@@ -1032,16 +1032,17 @@ async def handoff(
     worktree in that repo, that repo's own checks and review, and merges into
     that repo's branch. Default: this repo.
 
-    agent_profile is optional: when empty, the current unverified milestone's
-    profile is used, else `weight` routes to an available profile, else the
-    repo's default agent.
+    agent_profile is an optional worker id (dev.* or review.*; old ids remain
+    aliases). When empty, the current unverified milestone's worker is used,
+    else `weight` routes to an available worker, else the repo's default agent.
 
-    weight: "light", "medium", "heavy" or "advanced" (when you don't need a specific
-    profile): brindle picks an available profile for the tier and the reply says
-    which and why. light = small, well-specified, mechanical (docs, renames,
-    simple tests); medium = normal feature work or bugfixes; heavy = system
-    architecture, broad refactoring; advanced = complex, long-running
-    system-design and implementation tasks.
+    weight is brindle's job size: "light", "medium", "heavy" or "advanced".
+    It describes the job, not the model. brindle picks an available worker;
+    the reply gives its display name (effort), worker id, cost tier and reason.
+    Light = small, well-specified, mechanical (docs, renames, simple tests);
+    Medium = normal feature work or bugfixes; Heavy = system architecture,
+    broad refactoring; Advanced = complex, long-running system-design and
+    implementation tasks.
 
     Replies at once with the task id (or the worker id, if it started that
     fast): the worker starts in the background, once the machine has room.
@@ -1103,6 +1104,7 @@ async def handoff(
             return str(e)
         except routing_goal.GoalError as e:
             return f"Not started: {e}"
+        profile = load_profile(profile, ws.repo_root).name
         refused = _policy_refusal(db, caller, ws, profile, task, "handoff", files, weight, branch)
         if refused:
             return refused
@@ -1133,7 +1135,7 @@ async def handoff(
             savings.record(db, ws.repo_root, decision, task_id=t.id)
             return _remind_goal(db, caller,
                                 f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
-                                + "".join(f"\nprofile: {w}" for w in why))
+                                + "".join(f"\nrouting: {w}" for w in why))
         reply, warning = _route_clash(
             req, db, caller, ws, profile, task, "handoff", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
@@ -1149,7 +1151,7 @@ async def handoff(
             weight=effective_weight, milestone=ms_title, start=True,
         )
         savings.record(db, ws.repo_root, decision, task_id=t.id)
-        notes = "".join(f"\nprofile: {w}" for w in why)
+        notes = "".join(f"\nrouting: {w}" for w in why)
         late = [w for w in (warning, brief_learning.warning(db, ws.repo_root, task, done_when, files, weight)) if w]
         return lambda: _reply(caller, t, "handoff", profile, branch, repo, notes, late)
 
@@ -1183,7 +1185,7 @@ async def assign(
     """Start a worker agent on a task and return immediately.
 
     fast_path: a small, well-scoped request (repos with the `fast_path`
-    setting on): one light or medium worker (weight defaults to medium) with
+    setting on): one worker for a Light or Medium job (weight defaults to medium) with
     a required done_when, one light review and the repo's checks, then the
     merge; no goal, milestones or completion audit. Ignored when the setting is off.
 
@@ -1201,7 +1203,7 @@ async def assign(
     milestone: the goal milestone (its number or title) the worker works on;
     default the first unverified one. Shown as in progress while it runs.
 
-    dry_run=true starts and queues nothing: it reports the resolved profile,
+    dry_run=true starts and queues nothing: it reports the selected worker,
     the files each `files` glob matches (warning for any that match none),
     overlaps with active workers, and whether it would queue.
 
@@ -1211,20 +1213,21 @@ async def assign(
     that repo's branch. depends_on may name a task in any repo of the session.
     Default: this repo.
 
-    agent_profile is optional: when empty, the current unverified milestone's
-    profile is used, else `weight` routes to an available profile, else the
-    repo's default agent.
+    agent_profile is an optional worker id (dev.* or review.*; old ids remain
+    aliases). When empty, the current unverified milestone's worker is used,
+    else `weight` routes to an available worker, else the repo's default agent.
 
-    weight: "light", "medium", "heavy" or "advanced" (when you don't need a specific
-    profile): brindle picks an available profile for the tier and the reply says
-    which and why. light = small, well-specified, mechanical (docs, renames,
-    simple tests); medium = normal feature work or bugfixes; heavy = system
-    architecture, broad refactoring; advanced = complex, long-running
-    system-design and implementation tasks.
+    weight is brindle's job size: "light", "medium", "heavy" or "advanced".
+    It describes the job, not the model. brindle picks an available worker;
+    the reply gives its display name (effort), worker id, cost tier and reason.
+    Light = small, well-specified, mechanical (docs, renames, simple tests);
+    Medium = normal feature work or bugfixes; Heavy = system architecture,
+    broad refactoring; Advanced = complex, long-running system-design and
+    implementation tasks.
 
     design_heavy: shared designs, interfaces or tricky architecture where Fable
     is best suited. With fable_for_design_only enabled, this makes Fable eligible
-    in the task's routing tier; it does not change the task's weight. Keep a
+    for the job size; it does not change the job's size. Keep a
     design_heavy task to the design itself (interfaces, data model, a short
     plan doc); assign the implementation as separate tasks without it.
 
@@ -1294,6 +1297,7 @@ async def assign(
             return str(e)
         except routing_goal.GoalError as e:
             return f"Not started: {e}"
+        profile = load_profile(profile, ws.repo_root).name
         refused = _policy_refusal(db, caller, ws, profile, task, "assign", files, route_weight, branch)
         if refused:
             return refused
@@ -1324,7 +1328,7 @@ async def assign(
             savings.record(db, ws.repo_root, decision, task_id=t.id)
             return _remind_goal(db, caller,
                                 f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
-                                + "".join(f"\nprofile: {w}" for w in why), fast=fast)
+                                + "".join(f"\nrouting: {w}" for w in why), fast=fast)
         from brindle import plans
 
         plan = plans.holding(db, autopilot.root_of(db, caller.id))
@@ -1343,7 +1347,7 @@ async def assign(
                       else "behind brindle's offer to plan this goal first: it starts once the person chooses "
                       "not to, or approves the plan")
             return _remind_goal(db, caller, f"Queued task {t.id} {behind}. Don't assign it again."
-                                + "".join(f"\nprofile: {w}" for w in why), fast=fast)
+                                + "".join(f"\nrouting: {w}" for w in why), fast=fast)
         reply, warning = _route_clash(
             req, db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
@@ -1360,9 +1364,9 @@ async def assign(
             weight=effective_weight, milestone=ms_title, start=True, fast_path=fast,
         )
         savings.record(db, ws.repo_root, decision, task_id=t.id)
-        notes = "".join(f"\nprofile: {w}" for w in why)
+        notes = "".join(f"\nrouting: {w}" for w in why)
         if learned and not why:
-            notes += f"\nprofile chosen by learning: {profile}"
+            notes += f"\nWorker chosen by learning: {profile}"
         if req.alongside:
             notes += (f"\nRunning alongside plan {req.alongside[0]}: the plan's reader lists it with your reason, "
                       "and the person can stop it there.")
@@ -1799,7 +1803,8 @@ def propose_decision(topic: str, decision: str, rationale: str,
 
 @mcp.tool()
 def list_agent_profiles() -> str:
-    """Agent profiles available to handoff/assign."""
+    """Workers available to handoff/assign, identified by dev.* or review.* ids.
+    Old built-in profile ids remain aliases; custom worker ids are also accepted."""
     db = DB()
     _, here = _caller(db)
     from brindle.providers import unusable
@@ -1887,8 +1892,8 @@ async def request_review(workspace: str, focus: str | None = None, profile: str 
     instead of blocking on the full suite, and the review survives even if
     this MCP server exits first). focus: anything the reviewer should look
     at especially.
-    profile: the reviewer profile to use; defaults to the repo's
-    `review_profile` config, else the built-in `reviewer-codex` profile (a
+    profile: the reviewer worker id to use; defaults to the repo's
+    `review_profile` config, else the built-in `review.gpt` worker (a
     different model from a Claude worker) when Codex is installed, else
     `reviewer`. repo: look the workspace up in that attached repo (alias or
     path); the reviewer and checks are that repo's own.

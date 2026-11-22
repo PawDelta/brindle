@@ -36,6 +36,7 @@ from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
 
+from brindle import model_names
 from brindle.config import CONFIG_DIR, brindle_home, user_profiles_dir
 
 
@@ -81,6 +82,11 @@ def _builtin_names(package: str) -> list[str]:
     if _frozen is not None:
         return list(_frozen[package])
     return [name for name, _ in _builtin_files(package)]
+
+
+def builtin_names() -> set[str]:
+    """The names of brindle's own (built-in) profiles."""
+    return set(_builtin_names("brindle.builtin_agents"))
 
 
 class ProfileError(ValueError):
@@ -546,6 +552,16 @@ def _pinned_over(kind: str, name: str, found: list[Path]) -> None:
 
 
 def _read(name: str, repo_root: str | None) -> tuple[str, str] | None:
+    """The text of ``<name>.md`` and where it came from. An old built-in id
+    (see ``model_names.ALIASES``) that no file has under its own name reads
+    the renamed profile."""
+    found = _read_exact(name, repo_root)
+    if found is None and name in model_names.ALIASES:
+        found = _read_exact(model_names.ALIASES[name], repo_root)
+    return found
+
+
+def _read_exact(name: str, repo_root: str | None) -> tuple[str, str] | None:
     """The text of ``<name>.md`` and where it came from, by lookup order:
     the repo, the user, the org's library, the built-ins. A pinned org
     profile comes before the repo and user files."""
@@ -563,6 +579,54 @@ def _read(name: str, repo_root: str | None) -> tuple[str, str] | None:
     if builtin is not None:
         return builtin, f"built-in profile {name}"
     return None
+
+
+def current_name(name: str, repo_root: str | None = None) -> str:
+    """The id ``name`` runs as. An old built-in id becomes its renamed profile,
+    unless the repo, the person or the org has a profile file under the old
+    name: that custom profile keeps its own name."""
+    if name in model_names.ALIASES and _read_exact(name, repo_root) is None:
+        return model_names.ALIASES[name]
+    return name
+
+
+# The base profiles a role is named after; brindle's own helpers share one role.
+_BASE_ROLES = {"developer": "developer", "reviewer": "reviewer", "supervisor": "supervisor",
+               "coordinator": "helper", "subagent": "helper"}
+# Before profiles stated a role, developer-* and reviewer-* were those roles by name.
+_LEGACY_ROLE = re.compile(r"^(developer|reviewer)(?:-|$)")
+
+
+def base_role(name: str, repo_root: str | None = None) -> str | None:
+    """The role ``name`` works in: developer, reviewer, supervisor, helper
+    (brindle's coordinator and subagent) or a custom role. It is the
+    ``role:`` nearest ``name`` along its ``extends`` chain (a built-in base
+    profile states its own, and a profile built on it inherits it); with
+    none, the base of the chain names it. None when there is no such profile,
+    or a profile along the chain can't be read."""
+    current, seen = name, set()
+    while True:
+        found = _read(current, repo_root)
+        if found is None:
+            if current == name:
+                return None
+            break    # a missing parent is still the base it names
+        try:
+            meta = _frontmatter(found[0])[0]
+        except ProfileError:
+            return None     # unreadable along the chain: the role is unknown (lint reports why)
+        if meta.get("role"):
+            return meta["role"]
+        parent = meta.get("extends", "")
+        if not parent or parent in seen or len(seen) > MAX_EXTENDS_DEPTH:
+            break
+        seen.add(current)
+        current = parent
+    if current in _BASE_ROLES:
+        return _BASE_ROLES[current]
+    # A standalone profile under the old naming (a person's copy of developer-heavy, say).
+    legacy = _LEGACY_ROLE.match(current)
+    return legacy.group(1) if legacy else current
 
 
 def profile_source(name: str, repo_root: str | None = None) -> str | None:
@@ -613,6 +677,8 @@ def _resolve(name: str, repo_root: str | None, chain: tuple[str, ...] = ()) -> t
 
 
 def _load(name: str, repo_root: str | None) -> Profile:
+    if name in model_names.ALIASES and _read_exact(name, repo_root) is None:
+        name = model_names.ALIASES[name]     # an old built-in id: load the renamed profile
     meta, body = _resolve(name, repo_root)
     profile = replace(_build(meta, body, name), name=name)
     if "auth" in meta:
@@ -625,8 +691,9 @@ def _load(name: str, repo_root: str | None) -> Profile:
 
 def load_profile(name: str, repo_root: str | None = None) -> Profile:
     """The profile in ``<name>.md``, with its ``extends`` parent folded in.
-    Its ``name`` is always ``name``, even if the file's frontmatter says
-    otherwise (a copied profile whose name wasn't changed): agents record it,
+    An old built-in id loads its renamed profile, and that is the ``name``
+    then. Otherwise ``name`` is always ``name``, even if the file's
+    frontmatter says otherwise (a copied profile whose name wasn't changed): agents record it,
     and a resume or relaunch loads the profile again by that name, so it must
     find this same file, permissions and all. Raises KeyError when there is
     no such profile (or no such parent) and ProfileError on an extends cycle."""

@@ -1,6 +1,46 @@
 import pytest
 
+from brindle import model_names
 from brindle.profiles import _frontmatter, _list, load_profile
+
+
+@pytest.mark.variant("configs naming an old built-in id must keep loading after the rename")
+def test_an_old_built_in_id_loads_its_renamed_profile():
+    for old, new in model_names.ALIASES.items():
+        p = load_profile(old)
+        assert p.name == new
+        assert p.provider == load_profile(new).provider
+
+
+@pytest.mark.variant("custom agents extending an old id must still inherit the renamed built-in")
+def test_a_custom_agent_that_extends_an_old_id_still_works(tmp_path):
+    agents = tmp_path / ".brindle" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "mine.md").write_text(
+        "---\nname: mine\ndescription: a custom Codex agent\nextends: developer-codex\n---\nDo the task.\n")
+
+    p = load_profile("mine", str(tmp_path))
+    assert p.name == "mine" and p.provider == "codex"
+
+
+@pytest.mark.parametrize("name, text, role", [
+    ("dev.claude-opus", None, "developer"),            # inherits developer's role through extends
+    pytest.param("review.gpt", None, "reviewer", marks=pytest.mark.variant(
+        "a standalone built-in reviewer extends nothing, so only its own role: line makes it a reviewer")),
+    ("qa", None, "qa"),                                # a role of its own, though built on developer
+    ("mine", "extends: reviewer-codex", "reviewer"),   # a custom agent on an old id
+    ("auditor", "provider: codex", "auditor"),         # built on nothing: a custom role
+    ("developer-mine", "provider: codex", "developer"),  # a standalone copy under the old naming
+])
+@pytest.mark.variant("each row is a distinct way a profile gets its role: own line, built-in, or inherited")
+def test_base_role_follows_the_extends_chain(tmp_path, name, text, role):
+    from brindle.profiles import base_role
+
+    if text:
+        agents = tmp_path / ".brindle" / "agents"
+        agents.mkdir(parents=True)
+        (agents / f"{name}.md").write_text(f"---\nname: {name}\n{text}\n---\nDo the task.\n")
+    assert base_role(name, str(tmp_path)) == role
 
 
 @pytest.mark.parametrize("name, model", [
@@ -57,3 +97,58 @@ def test_an_unknown_user_in_add_dirs_is_reported_not_raised(tmp_path):
     p = load_profile("developer", str(repo))
     assert p.add_dirs == ["~no-such-user-brindle/cache"]
     assert missing_add_dirs(p) == ["~no-such-user-brindle/cache"]
+
+
+def test_doctor_offers_to_rewrite_old_ids_in_config_and_writes_only_when_told(tmp_path):
+    import json
+
+    from brindle import doctor
+
+    repo = tmp_path / "proj"
+    (repo / ".brindle").mkdir(parents=True)
+    config = repo / ".brindle" / "config.json"
+    config.write_text(json.dumps({"reviewer": "reviewer-codex", "routing": {"light": ["developer-codex"]}}))
+
+    [check] = doctor._profile_id_checks(str(repo))
+    assert check.level == doctor.WARN and "reviewer-codex -> review.gpt" in check.detail
+
+    lines: list[str] = []
+    doctor._rewrite_profile_ids(config, {"reviewer-codex": "review.gpt"}, lambda prompt: False, lines, str(repo))
+    assert json.loads(config.read_text())["reviewer"] == "reviewer-codex" and not lines
+
+    doctor._rewrite_profile_ids(config, {"reviewer-codex": "review.gpt"}, lambda prompt: True, lines, str(repo))
+    rewritten = json.loads(config.read_text())
+    assert rewritten["reviewer"] == "review.gpt" and rewritten["routing"] == {"light": ["dev.gpt"]}
+
+
+@pytest.mark.parametrize("custom, routed", [
+    pytest.param(True, "developer-codex", marks=pytest.mark.variant(
+        "a custom profile under an old id keeps its own name in routing, so its rules and provider still apply")),
+    pytest.param(False, "dev.gpt", marks=pytest.mark.variant(
+        "with no custom profile under the old id, routing names the renamed built-in")),
+])
+def test_routing_keeps_a_custom_profile_under_an_old_id(tmp_path, custom, routed):
+    from brindle.config import load_repo_config
+
+    repo = tmp_path / "proj"
+    (repo / ".brindle").mkdir(parents=True)
+    if custom:
+        (repo / ".brindle" / "agents").mkdir()
+        (repo / ".brindle" / "agents" / "developer-codex.md").write_text(
+            "---\nname: developer-codex\nprovider: claude\n---\nDo it.\n")
+    (repo / ".brindle" / "config.json").write_text('{"routing": {"medium": ["developer-codex"]}}')
+
+    assert load_repo_config(repo).routing["medium"][0] == routed
+
+
+@pytest.mark.variant("primary and second review must normalise old ids the same way")
+def test_second_review_names_the_same_profile_as_the_primary(tmp_path):
+    from brindle.config import load_repo_config
+
+    repo = tmp_path / "proj"
+    (repo / ".brindle").mkdir(parents=True)
+    (repo / ".brindle" / "config.json").write_text(
+        '{"reviewer": "reviewer-codex", "second_review": {"heavy": "reviewer-codex"}}')
+
+    cfg = load_repo_config(repo)
+    assert cfg.reviewer == cfg.second_review["heavy"] == "review.gpt"

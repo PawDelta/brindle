@@ -1,5 +1,6 @@
 ---
 name: qa
+role: qa
 description: Writes and fixes tests without touching the code under test (extends developer)
 extends: developer
 rules: tests/only

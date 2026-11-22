@@ -6,6 +6,7 @@ import pytest
 from brindle import agents, autopilot, cost_estimate, learned_rules, local_setup, quota
 from brindle.config import RepoConfig
 from brindle.db import Agent, Workspace
+from brindle.model_names import canonical
 from brindle.profiles import Profile
 from brindle.native import client, runner, serve
 
@@ -59,10 +60,10 @@ def test_routing_and_suggestions_respect_memory(db, tmp_path, monkeypatch, ollam
                      routing_locked={'light': True})
     monkeypatch.setattr(autopilot, 'load_repo_config', lambda *a: cfg)
     picked, _ = autopilot.choose_profile(db, '', str(repo), weight='light')
-    assert picked == expected
-    assert autopilot.choose_profile(db, '', str(repo), requested='developer-local', weight='light')[0] == expected
+    assert canonical(picked) == canonical(expected)
+    assert canonical(autopilot.choose_profile(db, '', str(repo), requested='developer-local', weight='light')[0]) == canonical(expected)
     candidates = cost_estimate.available_reviewers(str(repo))
-    assert ('reviewer-local' in candidates) == (expected == 'developer-local')
+    assert ('review.qwen3-coder' in candidates) == (expected == 'developer-local')
     alternative = cost_estimate.cheaper([cost_estimate.TaskSpec('developer-light', 'light')], 'reviewer', ['reviewer-local'],
                                        dists={}, price=lambda *a: 1, repo_root=str(repo))
     assert (alternative is not None) == (expected == 'developer-local')

@@ -21,6 +21,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Callable
 
+from brindle import model_names
 from brindle.config import WEIGHTS
 from brindle.db import DB
 from brindle.usage import format_tokens
@@ -344,12 +345,12 @@ def available_reviewers(repo_root: str | None) -> list[str]:
 
     out = []
     for p in list_profiles(repo_root):
-        if not p.name.startswith("reviewer"):
+        if not model_names.is_reviewer_id(p.name):
             continue
         if p.provider == "native":
             if memory_problem(p):
                 continue
-            if p.name == "reviewer-local" and not agents._local_reviewer_available():
+            if p.name == "review.qwen3-coder" and not agents._local_reviewer_available():
                 continue
         elif p.provider in ("claude", "codex", "antigravity"):
             try:

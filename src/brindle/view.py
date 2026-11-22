@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable
 from typing import NamedTuple
 
-from brindle import agents, bus, git, identity_lock, pipeline, providers, status_cache, tmux
+from brindle import agents, bus, git, identity_lock, model_names, pipeline, providers, status_cache, tmux
 from brindle import usage as usage_mod
 from brindle.db import DB, NATIVE_SUBAGENT_STALE, Agent, NativeSubagent, Workspace
 from brindle.view_reads import ViewReads
@@ -242,7 +242,7 @@ def workspace_entry(db: DB, ws: Workspace, *, detail: bool = False,
             agent_entry(db, a, detail=detail,
                        native_subagents=None if native_subagents is None else native_subagents.get(a.id, []),
                        now=now, panes=panes, alive=None if alive is None else a.id in alive,
-                       read_screen=read_screens)
+                       read_screen=read_screens, repo_root=ws.repo_root)
             for a in (db.list_agents(ws.id) if agent_list is None else agent_list)
         ],
     }
@@ -261,19 +261,36 @@ def _visible_native_subagents(subs: list[NativeSubagent], now: float) -> list[di
     return out
 
 
+def _agent_role(db: DB, a: Agent, repo_root: str | None) -> str | None:
+    """The role of ``a``'s profile (profiles.base_role); None when it can't be read."""
+    from brindle import profiles
+
+    if repo_root is None:
+        ws = db.get_workspace(a.workspace_id)
+        repo_root = ws.repo_root if ws else None
+    try:
+        return profiles.base_role(a.profile, repo_root)
+    except Exception:  # noqa: BLE001 - a display extra: a bad profile file never breaks the sidebar
+        log.exception("brindle: couldn't read the role of %s", a.profile)
+        return None
+
+
 def agent_entry(db: DB, a: Agent, *, detail: bool = False,
                 native_subagents: list[NativeSubagent] | None = None,
                 now: float | None = None,
                 panes: dict[str, bool] | None = None,
-                alive: bool | None = None, read_screen: bool = True) -> dict:
+                alive: bool | None = None, read_screen: bool = True,
+                repo_root: str | None = None) -> dict:
     """``read_screen``: correct a running agent's status from its screen
-    (agents.reconcile, a tmux capture); False takes the status as recorded."""
+    (agents.reconcile, a tmux capture); False takes the status as recorded.
+    ``repo_root``: where its profile is looked up (default: its workspace's repo)."""
+    role = _agent_role(db, a, repo_root)
     who = identity_lock.locked_by(a.id)
     if who:
         # Another identity's session: structure only, nothing read from its
         # conversation (usage, last activity, unread messages, subagents).
         entry = {"id": a.id, "profile": a.profile, "provider": a.provider,
-                 "status": f"locked: {who}", "mode": a.mode, "locked": who}
+                 "status": f"locked: {who}", "mode": a.mode, "locked": who, "role": role}
         if detail:
             entry.update(parent_id=a.parent_id, dismissed_at=a.dismissed_at, status_since=a.status_since, pending=0,
                          reported=a.result is not None, window=None, tmux_server=None,
@@ -296,7 +313,7 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
     else:
         status = "exited"
     entry = {"id": a.id, "profile": a.profile, "provider": a.provider,
-             "status": status, "mode": a.mode,
+             "status": status, "mode": a.mode, "role": role,
              "accepts_files": providers.PROVIDERS.get(a.provider, providers.Provider()).accepts_files}
     if status == "failed" and a.failed_why:
         entry["failed_why"] = a.failed_why
@@ -307,6 +324,10 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
         entry["tokens"] = usage_mod.short_summary(u)
     if u and u.model:
         entry["model"] = u.model
+    # How a person reads the worker: its job size, and its model as brindle.model_names names it.
+    if a.weight:
+        entry["weight"] = a.weight
+    entry["model_display"] = model_names.model_name(u.model if u else None, a.provider).display
     unread = db.unread_count(a.id)
     if unread:
         entry["unread"] = unread

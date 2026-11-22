@@ -1,5 +1,6 @@
 ---
 name: reviewer
+role: reviewer
 description: Reviews a branch's changes for bugs and risks without editing code
 provider: claude
 model: sonnet

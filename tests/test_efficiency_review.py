@@ -207,7 +207,7 @@ def test_review_dispatch_scopes_docs_then_keeps_risky_rereview_strong(
     monkeypatch.setattr(agents, "unusable", lambda *a: None)
     first = commit(Path(ws.path), "docs/usage.md", "A scoped review.\n")
     reviewer = agents.start_review(db, None, ws, cfg=load_repo_config(repo))
-    assert reviewer.profile == light_profile
+    assert reviewer.profile == load_profile(light_profile, ws.repo_root).name
     if writer_provider == "claude":
         assert load_profile(reviewer.profile, ws.repo_root).provider != writer_provider
     pack = reviewer.task.split("Scoped review context pack:")[1]
@@ -220,7 +220,7 @@ def test_review_dispatch_scopes_docs_then_keeps_risky_rereview_strong(
     second = commit(Path(ws.path), "src/auth.py", "def authorize():\n    return False\n")
     # A preflight pick must not pin the cheap profile after the branch grows risky.
     reviewer = agents.request_review(db, None, ws, light_profile, cfg=load_repo_config(repo), slot="")
-    assert reviewer.profile == "reviewer-codex"
+    assert load_profile(reviewer.profile, ws.repo_root).name == "review.gpt"
     pack = reviewer.task.split("Scoped review context pack:")[1]
     assert "src/auth.py" in pack and "docs/usage.md" not in pack
     assert first in pack
@@ -228,23 +228,23 @@ def test_review_dispatch_scopes_docs_then_keeps_risky_rereview_strong(
     db.set_result(reviewer.id, "reviewed")
     commit(Path(ws.path), "docs/usage.md", "A scoped review with auth.\n")
     reviewer = agents.request_review(db, None, ws, cfg=load_repo_config(repo))
-    assert reviewer.profile == "reviewer-codex"  # earlier risky code still sizes the branch
+    assert reviewer.profile == "review.gpt"  # earlier risky code still sizes the branch
     pack = reviewer.task.split("Scoped review context pack:")[1]
     assert "src/auth.py" not in pack and "docs/usage.md" in pack
 
 
 @pytest.mark.parametrize("enabled,path,stats,options,expected", [
-    pytest.param(True, "src/a.py", "2\t1", {}, "reviewer-light",
+    pytest.param(True, "src/a.py", "2\t1", {}, "review.claude-sonnet.low",
                  marks=pytest.mark.variant("small production changes qualify independently of docs-only branches")),
-    pytest.param(True, "src/a.py", "2\t1", {"review_small_max_lines": 2}, "reviewer-sonnet-high",
+    pytest.param(True, "src/a.py", "2\t1", {"review_small_max_lines": 2}, "review.claude-sonnet.high",
                  marks=pytest.mark.variant("line-count ceiling prevents downsizing code above the configured limit")),
-    pytest.param(True, "src/a.py", "2\t1", {"review_small_max_files": 0}, "reviewer-sonnet-high",
+    pytest.param(True, "src/a.py", "2\t1", {"review_small_max_files": 0}, "review.claude-sonnet.high",
                  marks=pytest.mark.variant("file-count threshold must apply independently of changed-line count")),
-    pytest.param(True, "tests/test_a.py", "900\t0", {}, "reviewer-light",
+    pytest.param(True, "tests/test_a.py", "900\t0", {}, "review.claude-sonnet.low",
                  marks=pytest.mark.variant("test-only branches qualify beyond the small-code threshold too")),
-    pytest.param(True, "src/sensitive.py", "1\t0", {"review_risky_paths": ["src/sensitive.py"]}, "reviewer-sonnet-high",
+    pytest.param(True, "src/sensitive.py", "1\t0", {"review_risky_paths": ["src/sensitive.py"]}, "review.claude-sonnet.high",
                  marks=pytest.mark.variant("custom risky globs must override size eligibility just like built-in auth paths")),
-    (True, "image.png", "-\t-", {}, "reviewer-sonnet-high"),
+    (True, "image.png", "-\t-", {}, "review.claude-sonnet.high"),
 ])
 def test_review_size_selection(db, tmp_path, monkeypatch, enabled, path, stats, options, expected):
     ws = SimpleNamespace(id="ws", path=str(tmp_path), repo_root=str(tmp_path), base_branch="main")
@@ -262,7 +262,7 @@ def test_disabled_review_preserves_prompt_and_explicit_profile(db, repo, monkeyp
         disabled.setattr(review_scope, "small_branch", lambda *a: pytest.fail("sizing was not requested"))
         disabled.setattr(review_scope, "context_pack", lambda *a: pytest.fail("pack was not requested"))
         reviewer = agents.request_review(db, None, ws, cfg=RepoConfig(review_sizing=False, learning="off"))
-        assert reviewer.profile == "reviewer-sonnet-high"
+        assert reviewer.profile == "review.claude-sonnet.high"
         assert "Scoped review context pack:" not in reviewer.task
         # Explicit selection also bypasses automatic sizing when the feature is on.
         assert agents._review_choice(db, ws, "reviewer", RepoConfig(review_sizing=True))[0] == "reviewer"
@@ -285,7 +285,7 @@ def test_unresolved_sizing_profile_preserves_candidate_fallback(db, repo, monkey
     monkeypatch.setattr(git, "out", lambda *a: "1\t0\tdocs/a.md\0")
     monkeypatch.setattr(agents, "unusable", lambda *a: None)
     if missing == "cheap":
-        profile = repo / ".brindle" / "agents" / "reviewer-light.md"
+        profile = repo / ".brindle" / "agents" / "review.claude-sonnet.low.md"
         profile.parent.mkdir(parents=True, exist_ok=True)
         profile.write_text("---\nextends: missing-reviewer-profile\n---\n")
     cfg = RepoConfig(review_sizing=True, learning="off", reviewer_fallbacks=["reviewer"],
@@ -335,7 +335,7 @@ def test_sizing_keeps_strong_reviewer_when_light_is_unsafe_or_unavailable(db, tm
     monkeypatch.setattr(git, "out", lambda *a: "1\t0\tdocs/a.md\0")
     light = load_profile("reviewer-light", str(tmp_path))
     light.model = model
-    monkeypatch.setattr(agents, "load_profile", lambda name, repo: light if name == "reviewer-light"
+    monkeypatch.setattr(agents, "load_profile", lambda name, repo: light if name == light.name
                         else load_profile(name, repo))
     monkeypatch.setattr(agents, "unusable", lambda provider, *a:
                         "unavailable" if model == "sonnet" and provider == "claude" else None)

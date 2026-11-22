@@ -31,11 +31,11 @@ def test_routing_reserves_headroom_for_task_size(db, repo, boss, everything_avai
     def choose(weight):
         return autopilot.choose_profile(db, boss.id, str(repo), None, "task", None, weight)[0]
 
-    assert choose("heavy") == "developer-codex"
-    assert choose("medium") == "developer-gemini"
+    assert choose("heavy") == "dev.gpt"
+    assert choose("medium") == "dev.gemini"
     room = 16
-    assert choose("medium") == "developer-codex"
-    assert choose("light") == "developer-gemini"
+    assert choose("medium") == "dev.gpt"
+    assert choose("light") == "dev.gemini"
     cfg = load_repo_config(repo)
     cfg.limit_headroom = 0
     assert autopilot._unavailable("developer-gemini", cfg, str(repo), weight="heavy") is None

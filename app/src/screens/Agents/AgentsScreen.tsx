@@ -56,12 +56,12 @@ import {
   move,
   newDraft,
   offeredFor,
-  prettyModel,
+  displayOf,
+  madeBy,
   problemCount,
   productName,
   providersOf,
   runOrder,
-  speedOf,
   type Choice,
   type Draft,
   type Kind,
@@ -110,13 +110,40 @@ function CostTag({ cost }: { cost: string | null }) {
   );
 }
 
+/* A model's effort, as a small chip beside its name. */
+function EffortChip({ effort }: { effort: string | null }) {
+  if (!effort) return null;
+  return (
+    <span className={`${pill} text-ink-3`} data-effort={effort}>
+      {effort}
+    </span>
+  );
+}
+
+/* A worker named by its model: the engine's display name ("Claude Opus"), or
+   a custom agent's own name with its model quieter beside it. */
 function ChoiceName({ c }: { c: Choice }) {
   return (
     <>
       <Mark provider={c.provider} />
-      <span className={c.custom ? mono : ""}>{c.label}</span>
-      {c.custom && c.model && <span className="text-ink-3">· {prettyModel(c.model)}</span>}
+      <span className={c.custom ? mono : ""} data-model-name={c.custom ? undefined : c.display}>
+        {c.label}
+      </span>
+      {c.custom && c.model && <span className="text-ink-3">· {c.display}</span>}
+      <EffortChip effort={c.effort} />
     </>
+  );
+}
+
+/* The second line: "<maker> · runs in <tool>", then the cost. */
+function MadeBy({ c }: { c: Choice }) {
+  if (!c.madeBy && !c.cost) return null;
+  return (
+    <span className="flex items-baseline gap-1 text-xs text-ink-3" data-made-by>
+      {c.madeBy}
+      {c.madeBy && c.cost && <span aria-hidden>·</span>}
+      <CostTag cost={c.cost} />
+    </span>
   );
 }
 
@@ -172,31 +199,29 @@ function Choices({ name, choices, current, skip = [], fresh, onPick, onMake, mis
   const option = (c: Choice) => (
     <li key={c.id}>
       {!c.ok ? (
-        <span className="grid w-full grid-cols-[minmax(0,14rem)_5rem_minmax(0,1fr)] items-baseline gap-x-s2 px-s1 py-0.5 text-sm text-ink-3" data-choice-off={c.id}>
-          <span className="flex min-w-0 items-center gap-1">
-            <ChoiceName c={c} />
-          </span>
-          <span className="flex items-baseline gap-1 text-xs">
-            <CostTag cost={c.cost} />
-            {c.speed}
+        <span className="grid w-full grid-cols-[minmax(0,18rem)_minmax(0,1fr)] items-baseline gap-x-s2 px-s1 py-0.5 text-sm text-ink-3" data-choice-off={c.id}>
+          <span className="flex min-w-0 flex-col">
+            <span className="flex min-w-0 items-center gap-1">
+              <ChoiceName c={c} />
+            </span>
+            <MadeBy c={c} />
           </span>
           <span className="truncate text-xs text-sap">{c.why}</span>
         </span>
       ) : (
       <button
         type="button"
-        className={`grid w-full grid-cols-[minmax(0,14rem)_5rem_minmax(0,1fr)] items-baseline gap-x-s2 rounded-md px-s1 py-0.5 text-left text-sm hover:bg-surface-2 ${c.id === current ? "bg-pass-soft" : ""}`}
+        className={`grid w-full grid-cols-[minmax(0,18rem)_minmax(0,1fr)] items-baseline gap-x-s2 rounded-md px-s1 py-0.5 text-left text-sm hover:bg-surface-2 ${c.id === current ? "bg-pass-soft" : ""}`}
         aria-current={c.id === current ? "true" : undefined}
         data-choice={c.id}
         onClick={() => onPick(c.id)}
       >
-        <span className="flex min-w-0 items-center gap-1">
-          <ChoiceName c={c} />
-          {fresh === c.id && <span className={`${pill} text-pass`}>new</span>}
-        </span>
-        <span className="flex items-baseline gap-1 text-xs text-ink-3">
-          <CostTag cost={c.cost} />
-          {c.speed}
+        <span className="flex min-w-0 flex-col">
+          <span className="flex min-w-0 items-center gap-1">
+            <ChoiceName c={c} />
+            {fresh === c.id && <span className={`${pill} text-pass`}>new</span>}
+          </span>
+          <MadeBy c={c} />
         </span>
         <span className="truncate text-xs text-ink-2">{c.good}</span>
       </button>
@@ -433,8 +458,6 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
             onClick={() => toggle("pick")}
           >
             <ChoiceName c={first} />
-            <CostTag cost={first.cost} />
-            {first.speed && <span className="text-ink-3">{first.speed}</span>}
             {learned && <span className={`${pill} text-pass`}>learned</span>}
             <span className="text-ink-3" aria-hidden>
               ▾
@@ -445,6 +468,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
             Pick a model ▾
           </button>
         )}
+        {first && <MadeBy c={first} />}
         {first && problems(first)}
         {note}
       </div>
@@ -576,9 +600,9 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
             <div className="grid gap-1 sm:grid-cols-2 xl:grid-cols-3" role="group" aria-label="Model">
               {models.map((m) => (
                 <button key={m.name} type="button" aria-pressed={draft.model === m.model} className={`flex flex-col items-start rounded-md border px-s1 py-0.5 text-left ${draft.model === m.model ? "border-pass/55 bg-pass-soft" : "border-line hover:bg-surface-2"}`} onClick={() => set({ model: m.model ?? null })}>
-                  <span className="text-sm font-semibold">{prettyModel(m.model)}</span>
+                  <span className="text-sm font-semibold" data-model-name={displayOf(m)}>{displayOf(m)}</span>
                   <span className={`text-xs ${draft.model === m.model ? "text-ink-2" : "text-ink-3"}`}>
-                    {COST_MARK[m.cost_tier]} {COST_WORDS[m.cost_tier]} · {speedOf(m)}
+                    {[madeBy(m), `${COST_MARK[m.cost_tier]} ${COST_WORDS[m.cost_tier]}`].filter(Boolean).join(" · ")}
                   </span>
                   <span className="text-xs text-ink-2">{info(m.name).good}</span>
                 </button>
@@ -648,7 +672,7 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
                 <span className={mono}>
                   <b>{name || "…"}</b>
                 </span>{" "}
-                runs on {prettyModel(picked.model)} ({productName(picked.provider)}) <CostTag cost={picked.cost_tier} /> · {draft.effort} effort
+                runs on {displayOf(picked)} ({picked.tool ?? productName(picked.provider)}) <CostTag cost={picked.cost_tier} /> · {draft.effort} effort
                 {draft.rules.length > 0 && <> · rules {draft.rules.join(", ")}</>}, and {useFor ? <>runs <b>{KIND_INFO[useFor].name}</b> work{before ? `, ahead of ${info(before).label}` : ""}</> : "can work at any level, picked from any model list"}.
               </>
             ) : (

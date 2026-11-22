@@ -47,16 +47,20 @@ export const PROVIDER_ORDER = ["claude", "codex", "opencode", "antigravity", "na
 const OWN_NAMES: Record<string, string> = { native: "Local models" };
 export const productName = (provider: string): string => FACTS[provider]?.name ?? OWN_NAMES[provider] ?? provider;
 
-/* The built-in profiles (the engine's brindle/builtin_agents): any other is one of the person's custom agents. */
-export const BUILT_IN = new Set([
-  "backend-auditor", "coordinator", "developer", "developer-codex", "developer-fable", "developer-gemini", "developer-heavy", "developer-light",
-  "developer-local", "developer-opencode", "qa", "reviewer", "reviewer-codex", "reviewer-gemini", "reviewer-local", "reviewer-opencode", "subagent", "supervisor",
-]);
-/* Never offered for a kind of work: the engine's own helpers. */
-const HELPERS = new Set(["coordinator", "subagent", "supervisor"]);
+/* Never offered for a kind of work: the engine's own helpers (by the role the engine gives each profile). */
+const HELPERS = new Set(["helper", "supervisor"]);
 const HELPER_PROVIDERS = new Set(["shell", "subagent"]);
 
-export const isCustom = (p: Pick<RoutingProfileDTO, "name">): boolean => !BUILT_IN.has(p.name);
+/* The engine says which profiles are its own (built-in); any other is one of the person's custom agents. */
+export const isCustom = (p: Pick<RoutingProfileDTO, "builtin">): boolean => !p.builtin;
+
+/* A model as the engine names it to a person ("Claude Opus"); its id only when an older engine sends no name. */
+export const displayOf = (p: Pick<RoutingProfileDTO, "display" | "model" | "name">): string => p.display ?? p.model ?? p.name;
+
+/* Who made the model and the tool that runs it: "Anthropic · runs in Claude Code". */
+export function madeBy(p: Pick<RoutingProfileDTO, "maker" | "tool">): string {
+  return [p.maker, p.tool && `runs in ${p.tool}`].filter(Boolean).join(" · ");
+}
 
 /* A provider is connected when one of its profiles can run here: installed and signed in. */
 export function connectedProviders(profiles: RoutingProfileDTO[]): Set<string> {
@@ -70,33 +74,20 @@ export function providersOf(profiles: RoutingProfileDTO[]): string[] {
   return seen.sort((a, b) => at(a) - at(b) || a.localeCompare(b));
 }
 
-/* How fast a model is, as its cost and build say it: no engine field yet. */
-export function speedOf(p: Pick<RoutingProfileDTO, "name" | "cost_tier">): string {
-  if (/-(fable|advanced|reasoning)/.test(p.name)) return "slowest";
-  return p.cost_tier === "low" ? "fast" : p.cost_tier === "high" ? "slower" : "steady";
-}
-
-/* A model's name as the person reads it: "sonnet" → "Sonnet", "gpt-5.5" → "GPT-5.5". */
-export function prettyModel(model: string | null | undefined): string {
-  if (!model) return "the CLI's default model";
-  if (/^gpt/i.test(model)) return model.replace(/^gpt/i, "GPT");
-  return model
-    .split("-")
-    .map((w) => (/^\d/.test(w) ? w : w[0].toUpperCase() + w.slice(1)))
-    .join(" ");
-}
-
 /* What one entry of a kind's list is, and whether it can run here now. */
 export interface Choice {
   /* What the engine is given: a profile name, or (the supervisor's) a provider. */
   id: string;
-  /* How it reads: the model, or the custom agent's name. */
+  /* How it reads: the model's display name, or the custom agent's name. */
   label: string;
   custom: boolean;
   provider: string;
   model: string | null;
+  /* The model as the engine names it ("Claude Opus"), and "<maker> · runs in <tool>". */
+  display: string;
+  madeBy: string;
+  effort: string | null;
   cost: string | null;
-  speed: string;
   /* What it's good at: the profile's own description. */
   good: string;
   ok: boolean;
@@ -143,12 +134,14 @@ export function choiceOf(p: RoutingProfileDTO, connected: Set<string>, describe:
   const blocker = blockerOf(p);
   return {
     id: p.name,
-    label: isCustom(p) ? p.name : prettyModel(p.model),
+    label: isCustom(p) ? p.name : displayOf(p),
     custom: isCustom(p),
     provider: p.provider,
     model: p.model ?? null,
+    display: displayOf(p),
+    madeBy: madeBy(p),
+    effort: p.effort ?? null,
     cost: p.cost_tier,
-    speed: speedOf(p),
     good: describe[p.name] ?? "",
     ok: blocker === null,
     blocker,
@@ -158,7 +151,7 @@ export function choiceOf(p: RoutingProfileDTO, connected: Set<string>, describe:
 }
 
 /* A name in a list that no profile has any more. */
-export const missingChoice = (id: string): Choice => ({ id, label: id, custom: true, provider: "", model: null, cost: null, speed: "", good: "", ok: false, blocker: null, why: "no such agent here", problems: [] });
+export const missingChoice = (id: string): Choice => ({ id, label: id, custom: true, provider: "", model: null, display: id, madeBy: "", effort: null, cost: null, good: "", ok: false, blocker: null, why: "no such agent here", problems: [] });
 
 export const problemCount = (n: number): string => (n === 1 ? "1 problem" : `${n} problems`);
 
@@ -201,10 +194,10 @@ export function runOrder(k: KindState): string[] {
    reviewer, the built-in developers for a size or the supervisor (one per
    model), and the person's custom agents for any. One the org refuses never shows. */
 export function offeredFor(kind: Kind, profiles: RoutingProfileDTO[]): RoutingProfileDTO[] {
-  const family = kind === "reviewer" ? "reviewer" : "developer";
+  const role = kind === "reviewer" ? "reviewer" : "developer";
   return profiles.filter((p) => {
-    if (HELPERS.has(p.name) || HELPER_PROVIDERS.has(p.provider) || p.allowed === false) return false;
-    return isCustom(p) || p.name === family || p.name.startsWith(`${family}-`);
+    if (HELPERS.has(p.role ?? "") || HELPER_PROVIDERS.has(p.provider) || p.allowed === false) return false;
+    return isCustom(p) || p.role === role;
   });
 }
 
@@ -255,7 +248,7 @@ export function draftProblem(d: Draft, taken: string[]): string | null {
 export function modelsOf(provider: string, profiles: RoutingProfileDTO[]): RoutingProfileDTO[] {
   const out = new Map<string, RoutingProfileDTO>();
   for (const p of profiles) {
-    if (p.provider !== provider || !p.model || !(p.name === "developer" || p.name.startsWith("developer-")) || p.allowed === false) continue;
+    if (p.provider !== provider || !p.model || p.role !== "developer" || isCustom(p) || p.allowed === false) continue;
     if (!out.has(p.model)) out.set(p.model, p);
   }
   return [...out.values()];

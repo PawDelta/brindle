@@ -296,29 +296,19 @@ interface RowRef {
   route: Route;
 }
 
-/* A profile's role: developer-* and reviewer-* are those roles whatever model
-   or tier they run on; any other name keeps its words, minus a model or tier
-   at its end (backend-auditor, qa, test-writer stay as they are). */
-const PROFILE_VARIANT = /^(sonnet|opus|haiku|fable|codex|gemini|flash|pro|opencode|local|light|heavy|low|medium|high)$/;
-
-export function roleOf(profile: string): string {
-  const family = /^(developer|reviewer)(-|$)/.exec(profile);
-  if (family) return family[1];
-  const words = profile.split("-");
-  while (words.length > 1 && PROFILE_VARIANT.test(words[words.length - 1])) words.pop();
-  return words.join("-");
+/* An agent's role in words: the session's root is its supervisor; any other
+   takes the role the engine gives its profile (developer, reviewer, qa, ...),
+   or, when the engine names none, the kind of work it was started for. */
+export function roleOf(a: Pick<AgentDTO, "id" | "role" | "mode">, root: string): string {
+  if (a.id === root) return "supervisor";
+  return a.role ?? (a.mode === "review" ? "reviewer" : "developer");
 }
 
-/* The model an agent runs, in a word: what its transcript last ran on, else the variant its profile names. */
-const MODEL_WORD = /^(sonnet|opus|haiku|fable|codex|gemini|flash|opencode|local)$/;
+/* The model an agent runs, as the engine names it ("Claude Opus"); nothing when it doesn't say. */
+const modelOf = (a: { model_display?: string | null }): string => a.model_display ?? "";
 
-function modelOf(a: { model?: string | null; profile: string; provider: string }): string {
-  // Codex and Gemini name their models by version (gpt-6-luna), which says less than the CLI; Claude's family word says it.
-  if (a.model) return /^(codex|gemini)$/.test(a.provider) ? a.provider : /(sonnet|opus|haiku|fable)/.exec(a.model)?.[1] ?? a.model;
-  // No transcript yet: a model word in the profile name; a routing tier (heavy, low…) is not a model, so the provider stands in.
-  const word = a.profile.split("-").find((w, i) => i > 0 && MODEL_WORD.test(w));
-  return word ?? (a.profile === a.provider ? "" : a.provider);
-}
+/* A worker's job size in brindle's words: "heavy" → "Heavy". */
+const sizeOf = (weight: string | null | undefined): string | null => (weight ? weight[0].toUpperCase() + weight.slice(1) : null);
 
 /* The stage word and colour a row shares with the milestones view; none when at rest. */
 type RowStage = "code" | "checks" | "review" | "done";
@@ -341,9 +331,10 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
   const active = route.screen === "session" && route.root === root && (route.agent ?? root) === a.id;
   const status = cliStatus(a, node.workspace, alive);
   const key = `agent:${a.id}`;
-  const role = a.id === root ? "supervisor" : a.profile
-    ? a.profile === a.provider ? (a.mode === "review" ? "reviewer" : "developer") : roleOf(a.profile)
-    : a.mode === "review" ? "reviewer" : "developer";
+  const role = roleOf(a, root);
+  // A sized worker leads with its job size (brindle's word); the model is the quieter second word.
+  const size = a.id === root ? null : sizeOf(a.weight);
+  const model = modelOf(a);
   const tone = dotTone(status, a.status);
   const stage = stageOf(tone, a, node.workspace.review_state);
   const info = [`id: ${a.id}`, `role: ${role}`, `profile: ${a.profile}`, `branch: ${node.workspace.branch}`, `milestone: ${a.milestone ?? ""}`].join("\n");
@@ -356,7 +347,7 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
         current={active ? "page" : undefined}
         treeAgent={a.id}
         row={key}
-        title={`${a.id} · ${status.glyph} ${status.label} · ${role} · ${a.profile} · ${a.model || modelOf(a) || "no model"} · ${node.workspace.branch}${a.milestone ? ` · milestone: ${a.milestone}` : ""} (double-click to copy its info)`}
+        title={`${a.id} · ${status.glyph} ${status.label} · ${role} · ${a.profile} · ${a.model || model || "no model"} · ${node.workspace.branch}${a.milestone ? ` · milestone: ${a.milestone}` : ""} (double-click to copy its info)`}
         className={`flex w-full items-center gap-s1 rounded-r-md py-[3px] pr-s1 text-left hover:bg-surface ${active ? "bg-branch-soft" : ""} ${cursor === key ? CURSOR : ""}`}
         onOpen={() => {
           setCursor(key);
@@ -365,7 +356,10 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
       >
         <Dot tone={tone} className={stage ? `st-${STAGE_CLASS[stage]}` : ""} />
         <span className="min-w-0 flex-1 truncate text-xs text-ink">
-          <span className="text-ink-3" data-testid="agent-role">{[role, modelOf(a)].filter(Boolean).join(" · ")}</span>
+          <span className="text-ink-3" data-testid="agent-role" data-size={size ? a.weight! : undefined} data-model-name={model || undefined}>
+            {size ? <span className="text-ink-2">{size}</span> : role}
+            {model && <span className="text-ink-3">{` · ${model}`}</span>}
+          </span>
         </span>
         <span className={`max-w-[50%] shrink truncate text-[11px] ${stage ? `st-${STAGE_CLASS[stage]} stage-word` : "text-ink-3"}`} data-testid="agent-status" data-state={stage ?? undefined}>
           {stage ?? plainLabel(status, a.status)}
@@ -548,7 +542,7 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
           }}
         >
           <span data-testid="session-title" title={session.name || goal?.goal || session.goal || undefined} className="min-w-0 flex-1 truncate text-[13px] font-medium leading-[1.35] text-ink">{session.name || goal?.summary || session.goal || goal?.goal || <span className="italic text-ink-3">No goal set</span>}</span>
-          <span className="shrink-0 text-[11px] text-ink-3" data-testid="session-model">{tree ? modelOf(tree.agent) : modelOf({ profile: session.profile, provider: "", model: null })}</span>
+          <span className="shrink-0 text-[11px] text-ink-3" data-testid="session-model">{tree ? modelOf(tree.agent) : ""}</span>
           <SessionStatus word={word} />
         </SessionGoal>
         {!resuming && <RowClose root={root} done={done} onClose={onClose} list={list} />}

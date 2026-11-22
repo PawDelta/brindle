@@ -100,12 +100,15 @@ describe("visuals", () => {
     expect(frame.contentDocument!.querySelector("script")).toBeNull();
     fireEvent.click(frame.contentDocument!.querySelector('[data-choice="sharing"] [data-option="A"]')!);
     expect((screen.getByTestId("visual-send") as HTMLButtonElement).disabled).toBe(true);
+    // A disabled Send says which group still needs a pick.
+    expect(screen.getByTestId("visual-unpicked").dataset).toMatchObject({ state: "needs-picks", missing: "layout" });
     const richOption = frame.contentDocument!.querySelector('[data-choice="layout"] [data-option="B"]')!;
     const preview = richOption.querySelector("svg rect");
     expect(preview).not.toBeNull();
     expect(richOption.querySelector(".preview-detail")).not.toBeNull();
     fireEvent.click(preview!);
     expect(richOption.getAttribute("aria-checked")).toBe("true");
+    expect(screen.queryByTestId("visual-unpicked")).toBeNull();
     fireEvent.change(screen.getByRole("textbox", { name: "Add a note" }), { target: { value: "Keep it simple" } });
     fireEvent.click(screen.getByTestId("visual-send"));
     await waitFor(() => expect(sent).toEqual([{ rev: 2, picks: { sharing: "A", layout: "B" }, note: "Keep it simple" }]));

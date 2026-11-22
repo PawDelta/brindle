@@ -817,10 +817,10 @@ def test_repeating_an_assign_queued_for_room_never_starts_a_second_worker(db, re
 
 def test_assign_dry_run_starts_and_queues_nothing(db, repo, boss):
     out = asyncio.run(mcp_server.assign(
-        "developer", "do A", branch="feat-a", files=["app.py", "nope/**", "src/*.py"],
+        "developer-sonnet", "do A", branch="feat-a", files=["app.py", "nope/**", "src/*.py"],
         dry_run=True))
     assert out.startswith("Dry run")
-    assert "profile: developer" in out
+    assert "dev.claude-sonnet" in out and "developer-sonnet" not in out
     assert "app.py matches 1" in out
     assert "glob 'src/*.py' matches nothing" in out
     assert "Warning: files glob 'nope/**' matches nothing" in out

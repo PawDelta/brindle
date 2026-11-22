@@ -85,7 +85,7 @@ DEPTH_DAYS = 90
 ADD_RATE = 0.10        # escape rate that suggests a second review...
 ADD_MERGES = 10        # ...over at least this many merges by that reviewer profile
 DROP_MERGES = 20       # no escapes over at least this many merges suggests dropping one
-ALT_REVIEWERS = ("reviewer-codex", "reviewer")
+ALT_REVIEWERS = ("review.gpt", "reviewer")
 
 
 def depth_entitled() -> bool:
