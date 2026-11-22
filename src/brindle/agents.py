@@ -5655,6 +5655,8 @@ def _claim_review(db: DB, ws: Workspace, sha: str, slot: str) -> tuple[float | N
     while True:
         # A live claim saved under this identity's old built-in id (before the rename) holds it too.
         for legacy in (old for old, new in model_names.ALIASES.items() if new == slot):
+            if not _same_profile(legacy, slot, ws.repo_root):
+                continue   # a custom profile under the old id is its own identity: its claim is not this one's
             held = db.review_claim(ws.id, sha, legacy)
             live = _live_claim(db, held) if held is not None else None
             if live is not None:

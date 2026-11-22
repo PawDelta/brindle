@@ -46,19 +46,25 @@ def test_an_org_allowlist_written_with_old_ids_still_allows_the_renamed_profiles
     assert not Access(allowed_profiles=("dev.claude-sonnet",)).allows_profile("dev.gpt", "codex", None)
 
 
-@pytest.mark.parametrize("legacy_claim", [
-    pytest.param(True, marks=pytest.mark.variant(
+@pytest.mark.parametrize("claim, shadowed, blocks", [
+    pytest.param(True, False, True, marks=pytest.mark.variant(
         "a live claim saved under the old reviewer id holds the renamed reviewer's slot, so no second reviewer starts")),
-    pytest.param(False, marks=pytest.mark.variant("with no legacy claim, the renamed slot is claimed as usual")),
+    pytest.param(False, False, False, marks=pytest.mark.variant("with no legacy claim, the renamed slot is claimed as usual")),
+    pytest.param(True, True, False, marks=pytest.mark.variant(
+        "a custom profile under the old id is its own identity: its claim must not block the built-in")),
 ])
-def test_a_legacy_claim_holds_the_renamed_review_slot(db, repo, legacy_claim):
+def test_a_legacy_claim_holds_the_renamed_review_slot(db, repo, claim, shadowed, blocks):
     from brindle import agents, workspaces
 
     ws = workspaces.adopt_root(db, str(repo))
-    if legacy_claim:
+    if shadowed:
+        (repo / ".brindle" / "agents").mkdir(parents=True)
+        (repo / ".brindle" / "agents" / "reviewer-codex.md").write_text(
+            "---\nname: reviewer-codex\nprovider: claude\n---\nDo it.\n")
+    if claim:
         db.claim_review(ws.id, "abc123", "reviewer-codex")   # claimed, its reviewer not yet started
     token, holder = agents._claim_review(db, ws, "abc123", "review.gpt")
-    assert (token is None) is legacy_claim
+    assert (token is None) is blocks
 
 
 def test_handover_from_an_old_predecessor_id_is_found():
