@@ -20,14 +20,6 @@ Moved to https://pawdelta.com/brindle/docs/recommended-use/
 
 Moved to https://pawdelta.com/brindle/docs/autopilot/
 
-## Settings API
-
-Moved to https://pawdelta.com/brindle/docs/config/
-
-## Settings UI
-
-Moved to https://pawdelta.com/brindle/docs/config/
-
 ## Commands
 
 [Commands](https://pawdelta.com/brindle/docs/commands/)
