@@ -173,7 +173,7 @@ With no `WS` argument, commands act on the workspace you're in. The
 | Open-weight models, through brindle's own agent loop | no | yes | any OpenAI- or Anthropic-style endpoint: Ollama, LM Studio, llama.cpp or a hosted API |
 
 brindle only offers a profile whose CLI is installed and signed in. The built-in
-`developer-local` and `reviewer-local` profiles run Qwen3-Coder on Ollama; GLM, DeepSeek, Kimi
+`dev.qwen3-coder` and `review.qwen3-coder` profiles run Qwen3-Coder on Ollama; GLM, DeepSeek, Kimi
 and gpt-oss work the same way, and Claude Code itself can be pointed at another
 Anthropic-compatible backend from a profile. Profiles are Markdown files with frontmatter:
 pick a provider, a model and a permission mode, write the prompt, and the supervisor routes

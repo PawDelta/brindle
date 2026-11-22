@@ -7,7 +7,7 @@ Scope: claims that can be checked against this checkout's source, configuration,
 | Location | Claim | What is true | Code evidence |
 |---|---|---|---|
 | `docs/guide.md:745`, `docs/guide.md:771` | The sample config sets `max_agents` to 4 and the config table calls 4 the default. | The default is 5 workers per session. The sample should either show 5 or identify 4 as an override. | `src/brindle/config.py:124` (`RepoConfig.max_agents = 5`); `src/brindle/autopilot.py:2629-2637` applies that cap. |
-| `docs/guide.md:764` | The default `reviewer` value is the profile named `reviewer`. | The actual `RepoConfig.reviewer` default is `reviewer-sonnet-high`; that is the default profile unless a setting or hosted learner selects otherwise. | `src/brindle/config.py:112`; `src/brindle/agents.py:4836-4853`. |
+| `docs/guide.md:764` | The default `reviewer` value is the profile named `reviewer`. | The actual `RepoConfig.reviewer` default is `review.claude-sonnet.high`; that is the default profile unless a setting or hosted learner selects otherwise. | `src/brindle/config.py:112`; `src/brindle/agents.py:4836-4853`. |
 | `docs/guide.md:758` | An unset `scoped_checks` acts as `off`; the guide says it will become `infer` next release and brindle currently warns users to opt in. | `None` currently acts as `infer`. The worker check scope selects affected tests when graph data is available, with its documented fallback behavior; this is already the runtime default. | `src/brindle/config.py:107`; `src/brindle/check_scope.py:1-33, 181-189`. |
 | `docs/guide.md:103` | The status bar example is version `0.6.3`. | The audited source/package is 0.6.5, so this illustrative current-version value is stale. | `pyproject.toml:3`; `src/brindle/tmux.py:598` renders `__version__`. |
 

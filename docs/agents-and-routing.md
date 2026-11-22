@@ -10,12 +10,16 @@ The supervisor sizes each task as a **kind of work**:
 
 | Kind | Meant for | Default agent |
 |---|---|---|
-| `light` | small, well-specified, mechanical work (docs, renames, simple tests) | `developer-light` (Claude Haiku, low effort) |
-| `medium` | a normal feature or bugfix in one area | `developer` (your Claude Code default model) |
-| `heavy` | architecture, broad refactors, subtle bugs | `developer-heavy` (Claude Opus, high effort) |
-| `advanced` | complex, long-running system design and implementation | `developer-fable` (Claude Fable, high effort) |
-| reviewer | checking a worker's branch before it merges | `reviewer` (the `reviewer` config key) |
+| `light` | small, well-specified, mechanical work (docs, renames, simple tests) | `dev.claude-haiku` (Claude Haiku, low effort) |
+| `medium` | a normal feature or bugfix in one area | `developer` (Claude Code default model) |
+| `heavy` | architecture, broad refactors, subtle bugs | `dev.claude-opus` (Claude Opus, high effort) |
+| `advanced` | complex, long-running system design and implementation | `dev.claude-fable` (Claude Fable, high effort) |
+| reviewer | checking a worker's branch before it merges | `review.claude-sonnet.high` (the `reviewer` config key) |
 | supervisor | planning, handing out tasks, merging | your Claude Code model, or the CLI you pick with `brindle -s` |
+
+Light, Medium, Heavy and Advanced are brindle's task-size words. Worker names
+come from the model, with effort shown in parentheses when set; for example,
+**Claude Opus (high)** · runs in Claude Code.
 
 Naming an agent always wins: a task given an `agent_profile`, or a milestone
 with a `profile`, skips routing entirely.
@@ -28,10 +32,10 @@ lists agents in the order brindle tries them. These are the defaults:
 ```json
 {
   "routing": {
-    "light":    ["developer-light", "developer", "developer-codex", "developer-local"],
-    "medium":   ["developer", "developer-codex", "developer-heavy"],
-    "heavy":    ["developer-heavy", "developer-gemini", "developer", "developer-codex"],
-    "advanced": ["developer-fable", "developer-heavy", "developer-gemini"]
+    "light":    ["dev.claude-haiku", "developer", "dev.gpt", "dev.qwen3-coder"],
+    "medium":   ["developer", "dev.gpt", "dev.claude-opus"],
+    "heavy":    ["dev.claude-opus", "dev.gemini", "developer", "dev.gpt"],
+    "advanced": ["dev.claude-fable", "dev.claude-opus", "dev.gemini"]
   }
 }
 ```
@@ -46,11 +50,11 @@ margin. `limit_cooldown_minutes` sets how long a provider that hit its limit
 counts as unavailable. The first agent left runs. If every
 candidate is out, the repo's `default_agent` runs. The reply to the supervisor
 says what was picked and why, for example
-`weight medium -> developer (Codex at 93%, skipped developer-codex)`.
+`weight medium -> Claude · runs in Claude Code (at 93%, skipped GPT · runs in Codex)`.
 
 A `native` profile that runs a local model can also name a backup with
-`fallback:` in its profile (for example `developer-local` falls back to
-`developer-light` when its local model isn't available). `fallback:` only
+`fallback:` in its profile (for example `dev.qwen3-coder` falls back to
+`dev.claude-haiku` when its local model isn't available). `fallback:` only
 applies to local models; for any other provider, put the backups in the
 ordered `routing` list instead.
 
@@ -60,7 +64,7 @@ team), `.brindle/config.local.json` (just you, this repo) or
 tiers you leave out keep theirs:
 
 ```json
-{"routing": {"light": ["developer-codex", "developer"]}}
+{"routing": {"light": ["dev.gpt", "developer"]}}
 ```
 
 `brindle doctor` shows the list in effect for each tier and the file it came
@@ -70,10 +74,10 @@ brindle reserves Fable for design-heavy work (`fable_for_design_only`, on by
 default; set `"fable_for_design_only": false` in one of those config files to
 let any task in a tier that lists Fable use it). The supervisor marks tasks where Fable best fits shared designs,
 interfaces or tricky architecture with `assign(design_heavy=true, ...)`.
-This flag is independent of task size: it makes `developer-fable` eligible
+This flag is independent of task size: it makes `dev.claude-fable` eligible
 within the task's routing tier without changing its weight. For example,
 `assign(weight="advanced", design_heavy=true, task="Design the shared interfaces")`
-can use Fable; an unmarked advanced task skips it and tries `developer-heavy`
+can use Fable; an unmarked advanced task skips it and tries `dev.claude-opus`
 next in the default list. Hosted learning cannot choose Fable for unmarked
 tasks, including tasks without a weight. Explicit agent and milestone profile
 choices still win. Queued assignments retain the profile selected at assignment.
@@ -84,6 +88,10 @@ A **profile** is a markdown file that defines an agent: a model (and effort),
 the instructions it gets, and the rules it follows. brindle looks for profiles
 in `.brindle/agents/` (this repo), then `~/.brindle/agents/` (you), then your
 org's library, then its built-ins.
+
+Older configs may still name built-in profiles with their former IDs, such as
+`developer-heavy` or `developer-codex`; brindle maps these to the current IDs
+when it reads them. Update saved configs to the new IDs when convenient.
 
 ```markdown
 ---
@@ -132,7 +140,7 @@ list (or sets `reviewer`); "any kind" adds it as a candidate. You can do the
 same by hand:
 
 ```json
-{"routing": {"medium": ["frontend", "developer", "developer-codex"]}}
+{"routing": {"medium": ["frontend", "developer", "dev.gpt"]}}
 ```
 
 ```json
@@ -201,7 +209,7 @@ Your choices are never overridden. To keep a choice fixed:
 - **Name the agent.** A task's `agent_profile` or a milestone's `profile`
   always wins over learning.
 - **List one agent for the kind.** Learning only chooses between two or more
-  candidates, so `{"routing": {"heavy": ["developer-heavy"]}}` pins that kind.
+  candidates, so `{"routing": {"heavy": ["dev.claude-opus"]}}` pins that kind.
 - **Pin the reviewer.** Learning can also change which agent reviews a
   branch, and neither of the above locks that. The `reviewer` key sets the
   baseline reviewer, which learning may still replace; to fix it, set
