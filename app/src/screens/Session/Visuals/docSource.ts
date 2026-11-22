@@ -18,6 +18,12 @@ export interface DocSource<P extends Plan = Plan> {
   resolve(rev: number, thread: number, resolved: boolean): Promise<P>;
   suggest(rev: number, change: PlanChange, text?: string): Promise<P>;
   vote(rev: number, decision: string, option: string): Promise<P>;
+  /* Own answers on a decision (brindle/plan_answers.py): add one (and pick it), reword or take back one's own. */
+  answers?: {
+    add(rev: number, decision: string, text: string): Promise<P>;
+    edit(rev: number, answer: string, text: string): Promise<P>;
+    remove(rev: number, answer: string): Promise<P>;
+  };
   /* Reviewing someone else's design: this person's own sign-off. */
   signOff?(rev: number, version?: number): Promise<P>;
   /* Whether a failed read means this person can no longer open the doc, so it leaves the screen. */
@@ -27,10 +33,17 @@ export interface DocSource<P extends Plan = Plan> {
 export function planSource(client: PlansClient & PlanDocClient & Partial<PlanSharingClient>, id: string): DocSource {
   return {
     id,
-    people: client.planPeople && client.setPlanReviewer && client.removePlanReviewer ? {
+    people: client.planPeople && client.planAccess && client.invitePlanPerson && client.setPlanPersonAccess && client.setPlanPersonSignOff
+      && client.removePlanPerson && client.removePlanScope ? {
       search: (query) => client.planPeople!(id, query),
-      put: (sub, required) => client.setPlanReviewer!(id, sub, required),
-      remove: (sub) => client.removePlanReviewer!(id, sub),
+      access: () => client.planAccess!(id),
+      invite: (sub, access, signOff) => client.invitePlanPerson!(id, sub, access, signOff),
+      change: (sub, access) => client.setPlanPersonAccess!(id, sub, access),
+      signOff: (sub, must) => client.setPlanPersonSignOff!(id, sub, must),
+      revoke: (sub) => client.removePlanPerson!(id, sub),
+      revokeScope: (scope) => client.removePlanScope!(id, scope),
+      shareScope: client.sharePlan && ((scope) => client.sharePlan!(id, scope)),
+      stopAll: client.unsharePlan && (() => client.unsharePlan!(id)),
     } : undefined,
     history: client.planHistory && client.planRevisionChanges ? {
       planHistory: (planId) => client.planHistory!(planId),
@@ -42,6 +55,11 @@ export function planSource(client: PlansClient & PlanDocClient & Partial<PlanSha
     resolve: (_rev, thread, resolved) => client.resolvePlanThread(id, thread, resolved),
     suggest: (rev, change, text) => client.suggestPlan(id, rev, change, text),
     vote: (rev, decision, option) => client.confirmPlan(id, rev, decision, option),
+    answers: client.addPlanAnswer && client.changePlanAnswer ? {
+      add: (rev, decision, text) => client.addPlanAnswer!(id, rev, decision, text),
+      edit: (rev, answer, text) => client.changePlanAnswer!(id, rev, answer, { text }),
+      remove: (rev, answer) => client.changePlanAnswer!(id, rev, answer, { remove: true }),
+    } : undefined,
   };
 }
 
@@ -68,10 +86,15 @@ export function sharedSource(client: SharedDesignClient, id: string, repo?: stri
   const send = (tail: string, body: Record<string, unknown>) => client.writeSharedDesign(id, tail, repo ? { ...body, repo } : body);
   return {
     id,
-    people: client.designPeople && client.setDesignReviewer && client.removeDesignReviewer ? {
+    people: client.designPeople && client.designAccess && client.inviteDesignPerson && client.setDesignPersonAccess && client.setDesignPersonSignOff
+      && client.removeDesignPerson && client.removeDesignScope ? {
       search: (query) => client.designPeople!(id, query, repo),
-      put: (sub, required) => client.setDesignReviewer!(id, sub, required, repo),
-      remove: (sub) => client.removeDesignReviewer!(id, sub, repo),
+      access: () => client.designAccess!(id, repo),
+      invite: (sub, access, signOff) => client.inviteDesignPerson!(id, sub, access, signOff, repo),
+      change: (sub, access) => client.setDesignPersonAccess!(id, sub, access, repo),
+      signOff: (sub, must) => client.setDesignPersonSignOff!(id, sub, must, repo),
+      revoke: (sub) => client.removeDesignPerson!(id, sub, repo),
+      revokeScope: (scope) => client.removeDesignScope!(id, scope, repo),
     } : undefined,
     history: client.sharedDesignHistory && client.sharedDesignRevisionChanges ? {
       planHistory: (docId) => client.sharedDesignHistory!(docId, repo),
@@ -83,6 +106,11 @@ export function sharedSource(client: SharedDesignClient, id: string, repo?: stri
     resolve: (rev, thread, resolved) => send(`threads/${thread}`, { rev, action: resolved ? "resolve" : "reopen" }),
     suggest: (rev, change, text = "") => send("suggestions", { rev, ...change, text }),
     vote: (rev, decision, option) => send("votes", { rev, decision, option }),
+    answers: {
+      add: (rev, decision, text) => send("answers", { rev, decision, text }),
+      edit: (rev, answer, text) => send(`answers/${encodeURIComponent(answer)}`, { rev, text }),
+      remove: (rev, answer) => send(`answers/${encodeURIComponent(answer)}`, { rev, remove: true }),
+    },
     signOff: (rev, version) => send("sign-offs", { rev, ...(version === undefined ? {} : { version }) }),
     lost: accessGone,
   };

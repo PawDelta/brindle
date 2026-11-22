@@ -17,6 +17,7 @@ import { ReaderBar } from "./DocBar";
 import { DesignDoc, MODES, useDoc, type Mode, type Teammate } from "./PlanReader";
 import type { Work } from "./WorkPanel";
 import { displayName } from "./PlanCards";
+import { AccessRequest } from "./AccessRequest";
 
 /* How often a design open here is read again: what teammates wrote, and whether it can still be opened. */
 const READ_EVERY_MS = 30_000;
@@ -80,16 +81,17 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
     <>
       <BackButton onBack={onBack} label={backLabel} />
       <span className="mx-1 h-5 w-px bg-line" aria-hidden />
-      <h2 title={title ?? shown?.title} className="min-w-0 truncate text-[13px] font-semibold">{title ?? shown?.title ?? "Design doc"}</h2>
+      <h2 title={title ?? shown?.title} className="min-w-0 truncate text-[13px] font-semibold">{title ?? shown?.title ?? "Plan"}</h2>
     </>
   );
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="shared-design-reader">
-      {shown && teammate ? (
+      {doc && shown && teammate ? (
         <DesignDoc key={shown.id} source={source} teammate={teammate} plan={shown} mode={current} writes={writes} work={work}
+          top={<AccessRequest key={docId} client={client} doc={doc} repo={repo} />}
           shareLink={shown.can_edit ? designLinkTarget(client, docId, repo) : undefined}
           liveClient={client.visualLive ? client as LiveClient : undefined}
-          chrome={{ lead, modes: client.visualLive ? MODES : COLUMN_MODES, allowed, onMode: setMode }} />
+          chrome={{ lead, modes: (client.visualLive ? MODES : COLUMN_MODES).map((m) => m.id === "viewing" && !shown.can_comment ? { ...m, hint: "Read this plan" } : m), allowed, onMode: setMode }} />
       ) : (
         <>
           <ReaderBar lead={lead} />

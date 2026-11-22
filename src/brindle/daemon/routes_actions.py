@@ -2387,6 +2387,12 @@ def docs_org_api(method: str, tail: str, body: dict | None = None, *, repo: str 
     return docs_api(method, f"/orgs/{quote(ent.org_id, safe='')}/analysis-docs/{tail}", body, repo=repo)
 
 
+def put_org_settings(db: DB, params: dict, body: Body) -> Any:
+    from brindle.daemon.org_settings import save
+
+    return save(body)
+
+
 def put_doc_destination(db: DB, params: dict, body: Body) -> Any:
     """Connect the team's export destination (``kind``, ``target``, ``credential``; admin only)."""
     payload = {"kind": _get(body, "kind", required=True),
@@ -2647,7 +2653,7 @@ def library_work_items(db: DB, params: dict, body: Body) -> Any:
 
     ids = [i for i in (params.get("ids") or "").split(",") if i]
     if len(ids) > 50:
-        raise ServiceError("invalid", "ask for at most 50 designs at a time")
+        raise ServiceError("invalid", "ask for at most 50 plans at a time")
     return _work_call(params, body, lambda org, api, who: wi.summaries(org, ids, api=api, who=who, fetch=10))
 
 
@@ -2698,8 +2704,8 @@ def delete_doc(db: DB, params: dict, body: Body) -> Any:
     stranded = sd.open_shares_of(db, ids)
     if stranded and not _get(body, "confirm", bool, default=False):
         names = ", ".join(f"“{s['title']}”" for s in stranded)
-        raise ServiceError("shared_plan", f"This doc is shared for review on an open plan ({names}). Deleting it "
-                           "stops sharing that plan: it becomes a personal doc again.", 409, plans=stranded)
+        raise ServiceError("shared_plan", f"This plan is being reviewed ({names}). Deleting it from the Library "
+                           "stops sharing that plan: it becomes a personal plan again.", 409, plans=stranded)
     if kept is None:
         got = docs_api("DELETE", _doc_path(params), repo=params.get("repo"))
     else:
@@ -3433,6 +3439,7 @@ ROUTES = [
     Route("/v1/analysis-docs/destination", _endpoint(put_doc_destination), methods=["PUT"]),
     Route("/v1/analysis-docs/destination", _endpoint(delete_doc_destination), methods=["DELETE"]),
     Route("/v1/analysis-docs/switches", _endpoint(put_doc_switch), methods=["PUT"]),
+    Route("/v1/org-settings", _endpoint(put_org_settings), methods=["PUT"]),
     _post("/library/folders", create_library_folder),
     Route("/v1/library/designs/{id}/work-items", _endpoint(design_work_items), methods=["GET"]),
     Route("/v1/library/designs/{id}/work-items", _endpoint(create_design_work_items), methods=["POST"]),

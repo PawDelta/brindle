@@ -489,6 +489,10 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
     # so a few of them don't each start one per core. Passed explicitly, since
     # a pane can inherit an older tmux environment; a profile's value still wins.
     env.setdefault("PYTEST_XDIST_AUTO_NUM_WORKERS", os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS", "2"))
+    # Claude Code's "auto" theme starts from COLORFGBG until the terminal answers (providers.CLAUDE_THEMES): a pane
+    # starts with no client attached, so it would draw dark until the app first shows it. A profile's value wins.
+    if agent is not None and agent.provider == "claude":
+        env.setdefault("COLORFGBG", providers.claude_colorfgbg())
     # An agent's own `git push` to GitHub signs in through brindle's GitHub connection,
     # else (where git's helper is the keychain's) through gh: not git's keychain helper,
     # whose dialog nobody in a pane can answer (see git.pane_git_config).
@@ -6682,12 +6686,12 @@ def _note_absorbed_prompts(db: DB, agent: Agent, path: str) -> None:
         log.exception("brindle: couldn't read the messages absorbed into %s's turn", agent.id)
 
 
-def _note_health(record, provider: str | None) -> None:
+def _note_health(record, provider: str | None, *args, **kwargs) -> None:
     """Record a provider-health event from a hook; never fails the hook."""
     if not provider:
         return
     try:
-        record(provider)
+        record(provider, *args, **kwargs)
     except OSError:
         log.exception("brindle: couldn't record provider health")
 
@@ -6995,13 +6999,18 @@ def _handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | Non
                 flush(db, agent_id)
     elif event == "stop-failure":
         # The turn ended on an API error; no Stop hook follows.
-        err_fields = " ".join(
+        from brindle import quota
+
+        raw_err = " ".join(
             str(payload.get(k) or "") for k in (
                 "error", "error_type", "error_details", "last_assistant_message",
                 "message", "reason", "details", "status", "status_code", "code"
             )
-        ).lower()
-        is_rate_limit = bool(re.search(r"\b(429|rate_limit_error|rate_limit|rate-limit|overloaded|resource_exhausted)\b", err_fields))
+        )
+        err_fields = raw_err.lower()
+        is_quota_limit = quota.is_limit_error(err_fields)
+        is_rate_limit = is_quota_limit or bool(re.search(
+            r"\b(429|rate_limit_error|rate_limit|rate-limit|overloaded|resource_exhausted)\b", err_fields))
         auth_enums = {
             "oauth_org_not_allowed", "billing_error", "authentication_error",
             "permission_error", "invalid_api_key", "account_suspended", "revoked_api_key"
@@ -7029,7 +7038,21 @@ def _handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | Non
 
         # An overloaded API (529) is the provider's capacity, not this account's usage.
         overloaded = bool(re.search(r"\b(529|overloaded|overloaded_error)\b", err_fields))
-        if is_rate_limit and not overloaded:
+        if is_quota_limit and not overloaded and not is_auth and not is_model:
+            from brindle import limit_report, provider_switch
+            from brindle.config import RepoConfig, load_repo_config
+
+            ws = db.get_workspace(agent.workspace_id)
+            cfg = load_repo_config(ws.repo_root) if ws else RepoConfig()
+            route_env = limit_report._agent_route_env(agent, ws)
+            _note_health(quota.record_limit, agent.provider, cfg,
+                         until=quota.parse_limit_reset(raw_err),
+                         repo_root=ws.repo_root if ws else None, env=route_env)
+            try:
+                provider_switch.sweep(db, time.time())
+            except Exception:  # noqa: BLE001 - a hook never fails over a switch sweep
+                log.exception("brindle: couldn't sweep provider switches after limit error")
+        elif is_rate_limit and not overloaded:
             _note_health(provider_health.record_rate_limited, agent.provider)
         elif not is_auth and not is_model:
             _note_health(provider_health.record_error, agent.provider)

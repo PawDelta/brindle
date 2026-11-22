@@ -117,7 +117,7 @@ def link(db: DB, plan_id: str) -> dict | None:
 def _require_team(store):
     ent = ad.require_entitlement(store)
     if TEAM_FEATURE not in ent.features:
-        raise RuntimeError("sharing a design doc needs a Team plan (the `analysis_docs_team` entitlement)")
+        raise RuntimeError("sharing a plan needs a Team plan (the `analysis_docs_team` entitlement)")
     return ent
 
 
@@ -483,6 +483,20 @@ def _create(db: DB, p: dict, owner: str, cur: dict, content: dict, resumed: bool
     raise RuntimeError(made.get("error") or ad.why_refused(status, made, body))
 
 
+def ensure_doc(db: DB, p: dict, team: str | None, folder: Any, *, client, store, now: float | None = None) -> str:
+    """The plan's Library document, saved there first if it has none: the
+    upload a first share makes. ``team`` and ``folder`` choose the format
+    the plan must meet (doc_templates.SHARE)."""
+    doc_templates.require(db, p["id"], doc_templates.SHARE, plan_docs.current(db, p)["sections"], team,
+                          folder if isinstance(folder, dict) else None)
+    ent = _require_team(store)
+    cur = plan_docs.revision(db, p["id"])
+    content = _content(cur)          # a plan the API would refuse takes no claim
+    row, resumed = _claim_new(db, p["id"], ent.sub, ent.org_id, time.time() if now is None else now)
+    _own(row, ent)
+    return row["doc_id"] or _create(db, p, ent.sub, cur, content, resumed, client, store)
+
+
 def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permissions: dict | None = None,
           folder: dict | None = None, client=None, store=None, now: float | None = None) -> dict:
     """Save the plan to the Library and share it with ``scope`` (a team or
@@ -496,16 +510,9 @@ def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permission
         _review_open(p)
     scope = _scope(scope)
     team = scope["id"] if scope["kind"] == "group" else None
-    doc_templates.require(db, p["id"], doc_templates.SHARE, plan_docs.current(db, p)["sections"], team,
-                          folder if isinstance(folder, dict) else None)
     client, store = ad._session(client, store)
-    ent = _require_team(store)
     people = None if reviewers is None else _reviewers(reviewers)
-    cur = plan_docs.revision(db, p["id"])
-    content = _content(cur)          # a plan the API would refuse takes no claim
-    row, resumed = _claim_new(db, p["id"], ent.sub, ent.org_id, time.time() if now is None else now)
-    _own(row, ent)
-    doc_id = row["doc_id"] or _create(db, p, ent.sub, cur, content, resumed, client, store)
+    doc_id = ensure_doc(db, p, team, folder, client=client, store=store, now=now)
     review_policies.ask(db, p, "POST", ad._doc_path(doc_id, "/share"), {"scope": scope}, client=client, store=store)
     doc_templates.set_team(db, p["id"], team)       # its gates follow that team's format from now on
     if people or permissions:
@@ -527,9 +534,11 @@ def set_reviewer(db: DB, plan_id: str, sub: str, required: bool | None, *, clien
     _review_open(p)
     client, store = ad._session(client, store)
     share_ = _shared(db, p["id"], store)
+    resource = "reviewers" if required is None else "permissions"
     view = review_policies.ask(db, p, "DELETE" if required is None else "PUT",
-                               _path(share_["doc_id"], f"/reviewers/{quote(sub, safe='')}"),
-                               None if required is None else {"required": required}, client=client, store=store)
+                               _path(share_["doc_id"], f"/{resource}/{quote(sub, safe='')}"),
+                               None if required is None else {"role": "reviewer", "required": required},
+                               client=client, store=store)
     if _remember(db, p["id"], view):
         plan_docs._changed(db, p, p["rev"])
     return link(db, p["id"])
@@ -542,7 +551,7 @@ def set_reviewers(db: DB, plan_id: str, reviewers: Any, *, client=None, store=No
     client, store = ad._session(client, store)
     share_ = _shared(db, p["id"], store)
     if share_["access_refused"] == NOT_FOUND:
-        raise ServiceError("share_not_found", "the Library has no document for this plan's share, so its reviewers "
+        raise ServiceError("share_not_found", "the Library has no saved plan for this share, so its reviewers "
                            "can't be changed. Stop sharing and build, then share it again.", 409)
     people = _reviewers(reviewers)
     _grant(db, p, share_["doc_id"], people, None, client, store)
@@ -749,6 +758,9 @@ def _pull(db: DB, p: dict, share_: dict, view: dict, names: dict[str, str]) -> i
         for t in view.get("threads") or []:
             changes += _pull_thread(c, p["id"], rev, cur, known, t, now)
         changes += _pull_votes(c, p["id"], share_["owner"], rev, view.get("decisions") or [], now)
+        from brindle import plan_answers
+
+        changes += plan_answers.pull(c, p["id"], share_["owner"], view, now)
     changes += _remember(db, p["id"], view)
     changes += _remember_names(db, p["id"], names)
     if changes:
@@ -1097,6 +1109,9 @@ def _send(db: DB, p: dict, view: dict, client, store, now: float, acked: dict | 
         pushed = not drafting and _send_text(db, p["id"], head)
         _send_threads(db, p["id"], share_["owner"], head, plan_docs.draft(db, p) if drafting else None, acked)
         _send_actions(db, p["id"], head, drafting, acked)
+        from brindle import plan_answers
+
+        plan_answers.push(db, p["id"], share_["owner"], head)        # before the picks, which may name them
         _send_votes(db, p["id"], head)
         if head.rev != view.get("rev"):        # a new head: votes on the old one no longer count
             local_rev = link(db, p["id"])["local_rev"]
@@ -1514,7 +1529,7 @@ def _unshare(doc_id: str, client, store) -> None:
         raise
     owner = doc.get("scope")
     if not isinstance(owner, dict):
-        raise RuntimeError("the Library didn't say who owns this document")
+        raise RuntimeError("the Library didn't say who owns this plan")
     for scope in doc.get("scopes") or []:
         if scope == owner:
             continue

@@ -97,14 +97,16 @@ function titleOf(row: Row): string {
     case "question":
       return item.detail?.trim() || describeItem(item);
     case "review_requested":
-      return n > 1 ? `${n} plans to review from ${personName(item.from_person)}` : item.detail || "Design doc";
+      return n > 1 ? `${n} plans to review from ${personName(item.from_person)}` : item.detail || "Plan";
     case "org_notice":
       return n > 1 ? `${n} notices from your ${item.detail || "admin"}` : item.reason;
     case "signoff_progress":
+    case "shared_with_you":
+    case "access_requested":
     case "shared_doc_comment":
     case "changes_requested":
     case "signed_off":
-      return item.detail || "Design doc";
+      return item.detail || "Plan";
     case "pr_ready":
       return item.detail?.trim() || describeItem(item);
     case "pr_opened":
@@ -165,7 +167,11 @@ function metaOf(row: Row, ctx: QueueContext): ReactNode[] {
     case "waiting":
       return [<><b>{who ?? "An agent"}</b> waits at its prompt</>, session, branch && <span className="mono">{branch}</span>, <span className="iq-wait">paused until you answer</span>];
     case "review_requested":
-      return row.items.length > 1 ? row.items.map((i) => <>{i.detail || "Design doc"} {decisionCount(i)}</>) : [<><b>{personName(item.from_person)}</b> asked for your review</>, "plan", decisionCount(item)];
+      return row.items.length > 1 ? row.items.map((i) => <>{i.detail || "Plan"} {decisionCount(i)}</>) : [<><b>{personName(item.from_person)}</b> asked for your review</>, "plan", decisionCount(item)];
+    case "shared_with_you":
+      return [<><b>{personName(item.from_person)}</b> shared this plan with you</>];
+    case "access_requested":
+      return [<><b>{personName(item.from_person)}</b> asked to {item.access_role}</>];
     case "signoff_progress": {
       const s = item.signoff;
       const waiting = (s?.waiting ?? []).map(personName);
@@ -564,6 +570,37 @@ function QueueRow(props: RowProps) {
   );
 }
 
+function GrantAccess({ item, client, actions, refresh }: { item: InboxItemDTO; client: DaemonClient; actions: InboxActions; refresh(): Promise<void> }) {
+  const pending = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState<"grant" | "decline" | null>(null);
+  const resolve = async (action: "grant" | "decline") => {
+    if (pending.current || !item.from_person || !item.access_role || item.doc == null) return;
+    pending.current = true;
+    setBusy(true);
+    try {
+      await client.writeSharedDesign(String(item.doc), `access-requests/${encodeURIComponent(item.from_person.sub)}/${action}`, { role: item.access_role });
+      setDone(action);
+      actions.settle(item);
+      await refresh();
+    } catch (e) {
+      actions.report(item, e instanceof Error ? e.message : String(e));
+    } finally {
+      pending.current = false;
+      setBusy(false);
+    }
+  };
+  const disabled = busy || done !== null || !item.access_role || !item.from_person || item.doc == null;
+  return <span className="inline-flex gap-2">
+    <button type="button" className="btn btn-primary text-xs" disabled={disabled} onClick={stop(() => void resolve("grant"))}>
+      {done === "grant" ? "Access granted" : `Grant ${item.access_role} access`}
+    </button>
+    <button type="button" className="btn btn-quiet text-xs" disabled={disabled} onClick={stop(() => void resolve("decline"))}>
+      {done === "decline" ? "Declined" : "Decline"}
+    </button>
+  </span>;
+}
+
 function LaterMenu({ row, onPick }: { row: Row; onPick(until: number, sig?: string): void }) {
   return (
     <div className="iq-menu" role="menu" aria-label="Later" data-testid="later-menu">
@@ -574,7 +611,7 @@ function LaterMenu({ row, onPick }: { row: Row; onPick(until: number, sig?: stri
 }
 
 /* The row's one action while it is closed: done here (Open PR, Mark read, Review, Open plan) or opening the row (Answer, Reply). */
-function goOf({ row, ctx, actions, settle, markRead, onToggle, refresh }: RowProps, inBody = false): ReactNode {
+function goOf({ row, ctx, actions, settle, markRead, onToggle, refresh, client }: RowProps, inBody = false): ReactNode {
   const item = row.items[0];
   const many = row.items.length > 1;
   // In the open row it is the screen's one green action.
@@ -594,10 +631,13 @@ function goOf({ row, ctx, actions, settle, markRead, onToggle, refresh }: RowPro
         nav({ screen: "shared-design", doc: String(item.doc), title: item.detail ?? undefined, repo: ctx.repo(item) ?? undefined });
       });
     case "signoff_progress":
+    case "shared_with_you":
       return btn("Open plan", item.doc == null || !nav ? undefined : () => {
         markRead();
         nav({ screen: "shared-design", doc: String(item.doc), title: item.detail ?? undefined, repo: ctx.repo(item) ?? undefined });
       });
+    case "access_requested":
+      return <GrantAccess item={item} client={client} actions={actions} refresh={refresh} />;
     case "changes_requested":
     case "signed_off":
       return btn("Open plan", item.doc == null || !nav ? undefined : () => nav({ screen: "knowledge", view: "docs", doc: item.doc! }));
@@ -665,7 +705,7 @@ function RowBody(props: RowProps & { title: string }) {
     return (
       <div className="iq-body" data-testid="row-body">
         {row.items.length > 1
-          ? <div className="iq-people">{row.items.map((i) => <div key={itemKey(i)}><i>○</i>{i.detail || "Design doc"} {decisionCount(i)} <button type="button" className="btn btn-quiet text-xs" disabled={i.doc == null || !nav} onClick={open(i)}>Review</button></div>)}</div>
+          ? <div className="iq-people">{row.items.map((i) => <div key={itemKey(i)}><i>○</i>{i.detail || "Plan"} {decisionCount(i)} <button type="button" className="btn btn-quiet text-xs" disabled={i.doc == null || !nav} onClick={open(i)}>Review</button></div>)}</div>
           : <div className="iq-facts"><span>plan</span>{decisionCount(item)}{item.from_person && <span>from {personName(item.from_person)}</span>}</div>}
         <div className="iq-acts">
           {row.items.length === 1 && <button type="button" className="btn btn-primary text-xs" data-primary disabled={item.doc == null || !nav} onClick={open(item)}>Review <Kbd k="⏎" /></button>}
@@ -800,7 +840,7 @@ function Threads({ row, ctx, client, settle, markRead, triage }: RowProps & { tr
   // The way to the doc and triage share the last thread's row of actions, beside its Reply.
   const rest = (
     <>
-      {nav && <button type="button" className="btn btn-quiet text-xs" onClick={() => nav({ screen: "shared-design", doc, title: item.detail ?? undefined, repo })}>Open in the doc ↗</button>}
+      {nav && <button type="button" className="btn btn-quiet text-xs" onClick={() => nav({ screen: "shared-design", doc, title: item.detail ?? undefined, repo })}>Open in the plan ↗</button>}
       {triage}
     </>
   );

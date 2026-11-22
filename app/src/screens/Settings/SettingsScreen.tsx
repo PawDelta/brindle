@@ -94,6 +94,7 @@ import { Storage } from "./Storage";
 import { TeamDestination } from "./TeamDestination";
 import { Integrations } from "./Integrations";
 import { OrgApprovals } from "./OrgApprovals";
+import { Organisation } from "./Organisation";
 import { ReviewPolicies } from "./ReviewPolicies";
 import { Permissions } from "./Permissions";
 import { ReleaseBuildUpdate } from "./ReleaseBuildUpdate";
@@ -177,9 +178,10 @@ const LEDE: Record<SettingsTab, string> = {
   general: "Your settings apply to every project; a project can override them.",
   providers: "How brindle reaches each model and your repositories.",
   permissions: "How Claude's permission requests are handled, your rules, and your organization's limits.",
-  format: "The templates designs start from, how they are named, and what an empty required section stops.",
+  format: "The templates plans start from, how they are named, and what an empty required section stops.",
   storage: "What brindle keeps on this machine.",
   project: "This repo's settings: what the team sets, what is just for you, and what follows your own.",
+  organisation: "What your organisation sets for everyone. Only owners and admins can change it.",
   about: "The engine's version and health, and this app.",
 };
 
@@ -1177,6 +1179,8 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   if (!store) throw new Error("SettingsScreen needs a <StoreContext.Provider>");
   const connection = useAppState((state) => state.connection);
   const updateStatus = useAppState((state) => state.appUpdate);
+  const account = useAppState((state) => state.account);
+  const orgAdmin = account?.signed_in && (account.role === "owner" || account.role === "admin");
   const pick = useRepo();
   const { repos, setRepo } = pick;
   /* The repo a route names is the one on screen from the first paint, before the repos are known. */
@@ -1514,7 +1518,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
             <Row label="Organization approvals" help="For an organization's admins: assign roles and set which approvals members may save." wide>
               <OrgApprovals client={client} />
             </Row>
-            <Row label="Review policies" help="Enterprise: who must approve a design before it is built." wide>
+            <Row label="Review policies" help="Enterprise: who must approve a plan before it is built." wide>
               <ReviewPolicies client={client} />
             </Row>
           </Section>
@@ -1648,6 +1652,9 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         <DocFormat client={client} />
       </Pane>
 
+      <Pane id="organisation" {...panes}>
+        {orgAdmin ? <Organisation key={`${account.org_id}:${account.email}`} client={client} /> : <p className="text-sm text-ink-3">Only organisation owners and admins can open these settings.</p>}
+      </Pane>
       <Pane id="storage" {...panes}>
         <Storage client={client} />
       </Pane>

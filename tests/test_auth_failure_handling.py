@@ -125,6 +125,11 @@ def test_fresh_exported_key_included_in_agent_env(db, repo, monkeypatch):
     monkeypatch.setenv("PYTEST_XDIST_AUTO_NUM_WORKERS", "8")
     assert agents.agent_env(ws, "a", a, m=None)["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "8"
 
+    # a Claude pane starts in the app's theme: its "auto" theme reads COLORFGBG until a client answers
+    for theme in ("light", "dark"):
+        monkeypatch.setattr(agents.providers, "app_theme", lambda theme=theme: theme)
+        assert agents.agent_env(ws, "a", a, m=None)["COLORFGBG"] == agents.providers.CLAUDE_COLORFGBG[theme]
+
 
 @pytest.mark.variant("ownership: recovery cannot kill a pane on a foreign tmux server")
 def test_resume_failed_agent_does_not_kill_foreign_server_or_unowned_pane(db, repo, monkeypatch, no_pane):

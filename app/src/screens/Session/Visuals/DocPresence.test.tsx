@@ -22,7 +22,7 @@ it("requires the author to freeze a teammate's document", async () => {
   daemon.seedLive("doc", { lede: "Text" }, { canFreeze: false });
   render(<DocPresence client={daemon.client()} visual="doc" isAuthor={false} name="Bo" />);
   await settle();
-  const panel = screen.getByRole("region", { name: "Live document" });
+  const panel = screen.getByRole("region", { name: "Live plan" });
   expect(panel.querySelector('[role="status"][data-state="author-required"]')).toBeTruthy();
   expect(within(panel).queryByRole("button")).toBeNull();
 });
@@ -34,7 +34,7 @@ it("shows the author a Freeze the daemon refused and leaves the document editabl
   await settle();
   fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
   await settle();
-  const panel = screen.getByRole("region", { name: "Live document" });
+  const panel = screen.getByRole("region", { name: "Live plan" });
   expect(within(panel).getByRole("alert").dataset.state).toBe("freeze-refused");
   expect(panel.dataset.state).toBe("editing");
   expect(daemon.liveState("doc").lock).toBeNull();
@@ -60,10 +60,10 @@ it("preserves HTTP review and build controls when the document has no live text"
   const reviewer = render(<SharedDesignReader client={reviewerClient} docId="http-doc" onBack={() => {}} />);
   await settle();
   fireEvent.click(within(author.container).getByRole("button", { name: "Share" }));
-  expect(within(author.container).getByTestId("plan-reviewer-Bo").dataset.status).toBe("signed_off");
+  expect(within(author.container).getByTestId("share-person-Bo").dataset.state).toBe("signed_off");
   expect((within(author.container).getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
   expect(within(reviewer.container).queryByTestId("plan-sign-off")).toBeNull();
-  expect(screen.queryByRole("region", { name: "Live document" })).toBeNull();
+  expect(screen.queryByRole("region", { name: "Live plan" })).toBeNull();
   reviewer.unmount();
   signedOff = false;
   const unsigned = render(<SharedDesignReader client={reviewerClient} docId="http-doc" onBack={() => {}} />);
@@ -88,8 +88,8 @@ it("keeps two readers present without section editors and removes a departing re
   const bo = reader("Bo");
   const cy = reader("Cy");
   await settle();
-  const boPeers = within(bo.container).getByRole("list", { name: "Others in this document" });
-  const cyPeers = within(cy.container).getByRole("list", { name: "Others in this document" });
+  const boPeers = within(bo.container).getByRole("list", { name: "Others in this plan" });
+  const cyPeers = within(cy.container).getByRole("list", { name: "Others in this plan" });
   expect(boPeers.querySelector('[data-peer="Cy"]')).toBeTruthy();
   expect(cyPeers.querySelector('[data-peer="Bo"]')).toBeTruthy();
   expect(document.querySelector(".cm-editor")).toBeNull();
@@ -97,7 +97,7 @@ it("keeps two readers present without section editors and removes a departing re
   await settle();
   const dee = reader("Dee");
   await settle();
-  const deePeers = within(dee.container).getByRole("list", { name: "Others in this document" });
+  const deePeers = within(dee.container).getByRole("list", { name: "Others in this plan" });
   expect(deePeers.querySelector('[data-peer="Bo"]')).toBeTruthy();
   expect(deePeers.querySelector('[data-peer="Cy"]')).toBeTruthy();
   await act(async () => void vi.advanceTimersByTime(1_000));
@@ -127,7 +127,7 @@ it("withdraws the rendered review and build gate when a signed live version is r
   const authorUI = within(author.container);
   await settle();
   fireEvent.click(authorUI.getByRole("button", { name: "Share" }));
-  const ownSignOff = () => within(authorUI.getByTestId("share-reviewer-Bo")).getByRole<HTMLButtonElement>("button", { name: "Sign off" });
+  const ownSignOff = () => within(authorUI.getByTestId("share-person-Bo")).getByRole<HTMLButtonElement>("button", { name: "Sign off" });
   expect(ownSignOff().disabled).toBe(true);
   fireEvent.click(authorUI.getByRole("button", { name: "Freeze for sign-off" }));
   await settle();
@@ -137,7 +137,7 @@ it("withdraws the rendered review and build gate when a signed live version is r
   fireEvent.click(ownSignOff());
   await settle();
   expect(daemon.liveRefreshes).toBe(authorRefreshes + 1);
-  expect(authorUI.getByTestId("share-reviewer-Bo").dataset.state).toBe("signed_off");
+  expect(authorUI.getByTestId("share-person-Bo").dataset.state).toBe("signed_off");
   expect((authorUI.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
   // Losing a confirmed live channel cannot restore the HTTP gate, even for a 4404 close.
   const beforeDisconnect = daemon.liveSockets.length;
@@ -154,7 +154,7 @@ it("withdraws the rendered review and build gate when a signed live version is r
   expect(reviewerUI.queryByTestId("plan-sign-off")).toBeNull();
   fireEvent.click(authorUI.getByRole("button", { name: "Reopen" }));
   await settle();
-  expect(authorUI.getByTestId("share-reviewer-Bo").dataset.state).toBe("invited");
+  expect(authorUI.getByTestId("share-person-Bo").dataset.state).toBe("waiting");
   expect(ownSignOff().disabled).toBe(true);
   expect((authorUI.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(true);
   expect((reviewerUI.getByTestId("plan-sign-off") as HTMLButtonElement).disabled).toBe(true);
@@ -170,7 +170,7 @@ it("withdraws the rendered review and build gate when a signed live version is r
   await settle();
   expect(reviewerUI.queryByTestId("plan-sign-off")).toBeNull();
   expect(daemon.liveRefreshes).toBe(asked + 1);   // the frozen version asked for again, its sign-offs the review's now
-  expect(authorUI.getByTestId("share-reviewer-Bo").dataset.state).toBe("signed_off");
+  expect(authorUI.getByTestId("share-person-Bo").dataset.state).toBe("signed_off");
   expect((authorUI.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
   fireEvent.click(authorUI.getByTestId("plan-build"));
   await settle();
@@ -187,7 +187,7 @@ it("shows awareness colours, freezes credited text for everyone and withdraws si
     <DocEditor client={client} visual="doc" section="lede" name="Bo" label="Bo's text" />
   </>);
   await settle();
-  const peers = screen.getByRole("list", { name: "Others in this document" });
+  const peers = screen.getByRole("list", { name: "Others in this plan" });
   expect(within(peers).getAllByRole("listitem")).toHaveLength(1);
   expect(peers.querySelector('[data-peer="Bo"] [data-colour^="loro-peer-"]')).toBeTruthy();
   const ann = editor("Ann's text");
@@ -196,7 +196,7 @@ it("shows awareness colours, freezes credited text for everyone and withdraws si
   await settle();
   fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
   await settle();
-  expect(screen.getByRole("region", { name: "Live document" }).dataset.state).toBe("sign_off");
+  expect(screen.getByRole("region", { name: "Live plan" }).dataset.state).toBe("sign_off");
   expect(within(screen.getByRole("list", { name: "Credited writers" })).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Ann"]);
   const frozen = daemon.liveState("doc").version!;
   const snapshot = new LoroDoc();
@@ -243,7 +243,7 @@ it("locks others' text while the author is offline and still sends comments and 
   </>);
   await settle();
   await act(async () => daemon.setLiveState("doc", { lock: "author_offline" }));
-  const panel = screen.getByRole("region", { name: "Live document" });
+  const panel = screen.getByRole("region", { name: "Live plan" });
   expect(panel.dataset.state).toBe("author_offline");
   expect(within(panel).getAllByRole("status").length).toBeGreaterThan(0);
   const bo = editor("Bo's text");

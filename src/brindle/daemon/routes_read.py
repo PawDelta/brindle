@@ -1299,6 +1299,13 @@ def analysis_doc_policy(db: DB, request: Request) -> Any:
 
 
 @_json
+def org_settings(db: DB, request: Request) -> Any:
+    from brindle.daemon.org_settings import read
+
+    return read(_repo(request))
+
+
+@_json
 def analysis_doc_export_config(db: DB, request: Request) -> Any:
     """``{google_client_id, microsoft_client_id}`` for the app's in-app sign-in (either may be null)."""
     return docs_api("GET", "/analysis-docs/export-config", repo=_repo(request))
@@ -1414,6 +1421,7 @@ ROUTES = [
     Route("/v1/analysis-docs/results", analysis_doc_results),
     Route("/v1/analysis-docs/policy", analysis_doc_policy),
     Route("/v1/analysis-docs/switches", analysis_doc_switches),
+    Route("/v1/org-settings", org_settings),
     Route("/v1/analysis-docs/export-config", analysis_doc_export_config),
     Route("/v1/analysis-docs/destination", analysis_doc_destination),
     Route("/v1/analysis-docs/{id}", analysis_doc),

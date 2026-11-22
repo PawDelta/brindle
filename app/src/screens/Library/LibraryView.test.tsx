@@ -19,8 +19,8 @@ afterEach(() => {
 const TEAM: DocScope = { kind: "group", id: "t1", name: "Founding Team" };
 const docs: AnalysisDoc[] = [
   { id: "cloud", title: "Cloud workers", summary: "Workers on the customer's machine.", scope: TEAM, updated_at: 900 },
-  { id: "coedit", title: "Live co-editing", scope: TEAM, updated_at: 800 },
-  { id: "outbox", title: "Outbox for reports", scope: TEAM, updated_at: 700 },
+  { id: "coedit", title: "Live co-editing", scope: TEAM, updated_at: 800, can_edit: true, can_comment: true },
+  { id: "outbox", title: "Outbox for reports", scope: TEAM, updated_at: 700, can_edit: true, can_comment: true },
   { id: "release", title: "Release flow", scope: { kind: "user", id: "u1" }, updated_at: 600 },
 ];
 const repos = [{ name: "pawdelta", repo_root: "/src/pawdelta" }];
@@ -35,7 +35,7 @@ function library() {
     cloud: { design: { rev: 3, ready: false, reviewers: [{ sub: "dana@x.com" }, { sub: "sam@x.com" }], sign_offs: [{ sub: "dana@x.com", rev: 3 }], decisions: [{ id: "where", confirmed: null }, { id: "relay", confirmed: "daemon" }] } },
     coedit: { design: { ready: true }, tasks: [{ id: "w1", title: "w1", state: "merged" }, { id: "w2", title: "w2", state: "in review" }] },
     // A plan of this machine's: its decisions come from the local plan, top-level.
-    outbox: { design: { ready: false, reviewers: [{ sub: "sam@x.com" }] }, decisions: [{ id: "a", title: "A", options: [] }], work_item: { key: "AB#4610", state: "Closed", tone: "done" } },
+    outbox: { can_edit: false, can_comment: false, design: { ready: false, reviewers: [{ sub: "sam@x.com" }] }, decisions: [{ id: "a", title: "A", options: [] }], work_item: { key: "AB#4610", state: "Closed", tone: "done" } },
     release: {},
   };
   const detail = (id: string) => {
@@ -78,6 +78,8 @@ it("lists designs with Needs you pinned and the rest by folder, and Board shows 
   await waitFor(() => expect(row("cloud").getAttribute("data-to-decide")).toBe("1"));
   expect(row("outbox").getAttribute("data-to-decide")).toBe("1");
   expect(row("coedit").getAttribute("data-stage")).toBe("building");
+  expect(row("coedit").textContent).toContain("you can edit");
+  expect(row("outbox").textContent).toContain("you can view");
   expect(row("outbox").querySelector("[data-work-item]")!.getAttribute("data-work-item")).toBe("AB#4610");
   expect(row("release").querySelector("[data-work-item]")).toBeNull();     // no link yet: nothing shown
 
@@ -136,6 +138,6 @@ it("a folder made and a design moved there from the reader show in that folder a
   // Open again, then All designs: the reader closes on the whole Library.
   fireEvent.click(within(row("release")).getByRole("button"));
   expect(await screen.findByTestId("reader")).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: /^All designs/ }));
+  fireEvent.click(screen.getByRole("button", { name: /^All plans/ }));
   await waitFor(() => expect(rows()).toHaveLength(4));
 });

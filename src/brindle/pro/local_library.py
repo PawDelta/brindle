@@ -51,6 +51,9 @@ log = logging.getLogger(__name__)
 LOCAL, SERVER = "local", "server"
 LOCATIONS = (LOCAL, SERVER)
 SWITCH = "store"                    # on: SERVER, off: LOCAL
+# The person's switches that only work with the library on brindle's servers: moving
+# there turns them on, moving back to this Mac turns them off (unless enforced).
+NEEDS_SERVER = ("share", "assist", "prompt_analysis", "import_upload")
 ACCOUNT_FILE = "account.json"
 DIR = "library"
 SIGNED_OUT = "signed-out"
@@ -254,7 +257,7 @@ def add(files: list[dict], source: dict | None, *, repo_root: str | None = None,
     unless ``doc_id``. Raises on a failed write."""
     doc_id = doc_id or f"local-{secrets.token_hex(8)}"
     if not ID_RE.fullmatch(doc_id):
-        raise ValueError(f"not a doc id: {doc_id!r}")
+        raise ValueError(f"not a plan id: {doc_id!r}")
     path = _dir(store) / f"{doc_id}.json"
     record = {k: v for k, v in (meta or {}).items() if k in LISTED}
     record.update(doc_id=doc_id, files=list(files), source=dict(source or {}), repo_root=repo_root,
@@ -435,12 +438,24 @@ def _to_local(sub: str, client, store) -> tuple[int, int]:
     return moved, left
 
 
+def _enforced(name: str, ent, store=None) -> bool:
+    """Whether the person's org or team enforces switch ``name`` (cached policy)."""
+    policy = analysis_policy.load_cached(ent.org_id)
+    group = _account(store).get("group")
+    team = ((policy.get("groups") or {}).get(group) or {}).get("switches") or {} if group else {}
+    return any(v in ("enforced_on", "enforced_off") for v in ((policy.get("switches") or {}).get(name),
+                                                              team.get(name)))
+
+
 def set_location(target: str, *, client=None, store=None) -> dict:
     """Move this account's library to ``target`` (local or server) and
     remember it: ``{location, moved, left}``, ``left`` counting plans not
     moved yet (each still where it was, and moved by the next call, which
     may name the same location). Raises :class:`analysis_docs.Locked` when
-    the person's org or team enforces the other."""
+    the person's org or team enforces the other. The switches that need the
+    servers (:data:`NEEDS_SERVER`) follow it in the same settings update:
+    on with the servers, off on this Mac; one the org or team enforces keeps
+    its enforced value."""
     from brindle.pro import analysis_docs
 
     if target not in LOCATIONS:
@@ -455,8 +470,10 @@ def set_location(target: str, *, client=None, store=None) -> dict:
     if on != (target == SERVER):
         raise analysis_docs.Locked(f"your organisation keeps plans {'on brindle servers' if on else 'on this Mac'} "
                                    "for everyone")
-    try:                                        # the server's switch says the same, for its own checks
-        switches = {**analysis_docs.fetch_switches(client, store), SWITCH: "on" if target == SERVER else "off"}
+    value = "on" if target == SERVER else "off"
+    follow = {name: value for name in NEEDS_SERVER if not _enforced(name, ent, store)}
+    try:                                        # the server's switches say the same, in one update
+        switches = {**analysis_docs.fetch_switches(client, store), **follow, SWITCH: value}
         analysis_docs.api("PUT", "/me/analysis-docs/settings", {"switches": switches}, client=client, store=store)
     except Exception:  # noqa: BLE001
         if target == SERVER:

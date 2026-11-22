@@ -673,7 +673,7 @@ def consume(c, root: str, kind: str = "visual") -> None:
             raise ServiceError("plan_requested", "the person asked for a plan, not a visual: call propose_plan "
                                "(their request is still unspent)", 409)
         if kind == "plan":
-            raise ServiceError("visual_request_required", "a planning doc needs the person to ask for one, "
+            raise ServiceError("visual_request_required", "a plan needs the person to ask for one, "
                                "or to accept an offer", 403)
         raise ServiceError("visual_request_required",
                            "nothing shows the person asked for this. If they asked to see it, the supervisor "

@@ -10,6 +10,7 @@ from brindle import plans
 from brindle.pro import analysis_docs as ad
 from brindle.pro import auth, credentials, license, local_library
 from pro_fixtures import BASE, backend, claims, pro_env, sign, signing_key  # noqa: F401 - fixtures
+from test_daemon_actions import _send
 from test_daemon_api import AUTH, _get
 
 MINE = "GET /analysis-docs?scope_kind=user&scope_id=user_1"
@@ -29,7 +30,11 @@ def remote(backend, monkeypatch):
     """The fake Library behind every Pro call, signed in with the library feature."""
     backend.switches, backend.uploads = {"store": "off"}, []
     backend.routes["GET /me/analysis-docs/settings"] = lambda f, h: (200, {"switches": backend.switches})
-    backend.routes["PUT /me/analysis-docs/settings"] = lambda f, h: (200, {"switches": f["switches"]})
+    def put_settings(f, h):
+        backend.switches = f["switches"]
+        return 200, {"switches": f["switches"]}
+
+    backend.routes["PUT /me/analysis-docs/settings"] = put_settings
     backend.routes["POST /analysis-docs"] = lambda f, h: backend.uploads.append(f) or (200, {"id": "uploaded"})
     monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, *a: backend.request(*a))
     sign_in(backend)
@@ -164,3 +169,29 @@ def test_enforced_location_beats_the_persons_choice(level, tmp_path, remote):
     up.submit([ad.Doc(files=[{"name": "plan.md", "md": "# Plan"}], source={"kind": "goal"}, plan=True)])
     assert up.flush()
     assert len(remote.uploads) == 1 and local_library.records() == []  # stored on the servers
+
+
+@pytest.mark.parametrize("admin", [None, pytest.param("share", marks=pytest.mark.variant(
+    "a sub-switch the admin locks off stays off when the library moves to the servers"))])
+@pytest.mark.variant("each starting switch state must end on after the move")
+def test_location_carries_the_switches_that_need_the_servers(admin, remote):
+    remote.routes[MINE] = lambda f, h: (200, {"docs": []})
+    if admin:
+        sign_in(remote, features=("analysis_docs", "analysis_docs_team", "analysis_docs_enterprise"))
+        remote.routes["GET /orgs/org_1/analysis-docs/policy"] = lambda f, h: (
+            200, {"switches": {admin: "enforced_off"}, "groups": {}})
+        remote.routes["GET /analysis-docs/scopes"] = lambda f, h: (200, {"scopes": SHARED[:1]})
+
+    def states(body):
+        return {s["name"]: s for s in body["switches"]}
+
+    for on in (True, False):
+        code, body = _send("PUT", "/v1/analysis-docs/switches", {"name": "store", "on": on})
+        assert code == 200, body
+        got = states(body)
+        assert got["store"]["on"] is on
+        for name in ("share", "assist", "prompt_analysis", "import_upload"):
+            assert got[name]["on"] is (on and name != admin), name
+        if admin:
+            assert got[admin]["locked"] and got[admin]["org"] == "enforced_off"
+            assert admin not in remote.switches          # the locked switch is left alone, never set

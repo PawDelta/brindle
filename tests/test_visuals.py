@@ -46,6 +46,33 @@ def client():
         yield c
 
 
+@pytest.mark.parametrize("declared", [True, pytest.param(False, marks=pytest.mark.variant(
+    "HTML-only groups must be discovered and validated without a choices argument"))])
+def test_inline_choices_deliver_every_group_once(db, session, client, declared):
+    _, boss, worker = session
+    groups = [{"id": gid, "question": question, "options": OPTIONS}
+              for gid, question in [("sharing", "Access?"), ("layout", "Layout?")]]
+    html = "".join(f'<fieldset data-choice="{g["id"]}" data-question="{g["question"]}">'
+                   '<button data-option="A">Tag first</button><button data-option="B">Gate on CI</button>'
+                   '</fieldset>' for g in groups)
+    v = visuals.publish(db, worker, "Design", html, **({"choices": groups} if declared else {}))
+    visuals.mark_read(db, v["id"], 1)
+    assert [row["id"] for row in visuals.inbox_pending(db, None)] == [v["id"]]
+    for invalid in [{"sharing": "A"}, {"sharing": "A", "layout": "unknown"}]:
+        assert client.post(f"/v1/visuals/{v['id']}/answer", json={"rev": 1, "picks": invalid}).status_code == 400
+    assert visuals.get(db, v["id"])["answer"] is None
+    picks = {"sharing": "A", "layout": "B"}
+    response = client.post(f"/v1/visuals/{v['id']}/answer",
+                           json={"rev": 1, "picks": picks, "note": "Keep it simple"})
+    assert response.status_code == 200
+    assert response.json()["answer"]["picks"] == picks
+    assert visuals.get(db, v["id"])["answer"]["picks"] == picks
+    bodies = [r["body"] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id=?", (boss.id,))]
+    assert len(bodies) == 1
+    assert all(text in bodies[0] for text in ["sharing", "Access?", "Tag first", "layout", "Layout?", "Gate on CI", "Keep it simple"])
+    assert client.post(f"/v1/visuals/{v['id']}/answer", json={"rev": 1, "picks": picks}).status_code == 409
+
+
 @pytest.mark.parametrize("caller,html,options,enabled,refused", [
     pytest.param("w1", "<p>ok</p>", OPTIONS, True, None, marks=pytest.mark.variant(
         "a worker's requested visual must be stored in its supervisor's session")),

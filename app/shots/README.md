@@ -85,7 +85,10 @@ own update, over a fake shell (not in the default list, so pass `--scene`):
 pill) and `update-session` (the strip over a session). The chat pane on its
 own (`shots/chatPane.tsx`, also only by `--scene`): `chat-pane` (Claude Code
 idle, its prompt box rows cropped under brindle's message box) and
-`chat-pane-permission` (a permission question: every row shown). Themes
+`chat-pane-permission` (a permission question: every row shown) and
+`chat-pane-diff` (an Edit's diff as Claude Code's colour-diff draws it in
+the theme's own colours, in truecolour and as 256-colour slots, then its
+accents on the pane's field: what the pane's contrast floors act on). Themes
 (`--theme`): `dark`, `light`.
 
 ## The design doc
@@ -96,6 +99,22 @@ and comment threads, over a small in-memory engine) and takes it with its
 review column open, the next decision's table, a highlight with its comment bar, the comment landed in
 the column, the column collapsed to its strip, Suggesting with a tracked
 change on the page, and signed off under its live board, in both themes.
+
+## The Library and sharing review
+
+`node shots/library-ux-shots.mjs [--out <dir>] [--only current|mockups] [--channel chrome]`
+takes today's Settings › Library (the `settings-library*` scenes, `libraryUx.ts`: the defaults,
+the location just switched, an org's enforced switches, an admin), the share panel's states and
+a teammate's reader (`panels.tsx`), the Library and the Inbox into `<dir>/current`, and the
+improved flows drawn in `library-ux.tsx` into `<dir>/mockups`, each in both themes. `<dir>`
+defaults to `~/Documents/brindle-design-docs/library-ux`.
+
+## The organisation settings mockups
+
+`node shots/admin-settings-shots.mjs [--out <dir>] [--channel chrome]` takes the two layouts drawn
+in `admin-settings.tsx` for an organisation's Library settings (one sheet; read first, change one at
+a time), each as the admin's screen and the member's, in both themes. `<dir>` defaults to
+`~/Documents/brindle-design-docs/admin-settings`.
 
 ## Timing the wheel over a live Claude Code
 

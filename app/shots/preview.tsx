@@ -21,6 +21,7 @@ import { FakeDaemon, freshProviders } from "../src/test/fakeDaemon";
 import { ORGS, REPO, data } from "./fixtures";
 import { installLibrary, libraryInbox } from "./library";
 import { inboxMain, inboxMany, inboxNews, installThreads, seedDoneToday } from "./inbox";
+import { installLibraryUx, libraryUxScene, playLibraryUx, prepareLibraryUx } from "./libraryUx";
 import { wideCheckout, wideDiff } from "./wideDiff";
 import { installProbe, probeSocket, swipe, swipeDeltas } from "./probe";
 import { ChatPaneScene } from "./chatPane";
@@ -96,12 +97,19 @@ const SCENES: Record<string, Route> = {
   "knowledge-record": { screen: "knowledge" },
   "knowledge-search": { screen: "knowledge" },
   settings: { screen: "settings" },
+  // Settings › Library for the Library and sharing UX review (shots/libraryUx.ts).
+  "settings-library": { screen: "settings" },
+  "settings-library-servers": { screen: "settings" },
+  "settings-library-locked": { screen: "settings" },
+  "settings-library-admin": { screen: "settings" },
   "settings-usage": { screen: "settings", tab: "usage" },
   "settings-edit": { screen: "settings" },
   account: { screen: "account" },
   "account-free": { screen: "account" },
   "account-signed-out": { screen: "account" },
   session: { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
+  // The docked Terminal opened under the session, a shell in it printing in the 16 ANSI colours (SHELL_OUTPUT).
+  terminal: { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
   "sidebar-foot-calm": { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
   "sidebar-foot-busy": { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
   "sidebar-resize": { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
@@ -407,7 +415,10 @@ if (inboxScene) {
   if (scene === "inbox" || scene === "inbox-clear" || scene === "inbox-thread") seedDoneToday();
   else localStorage.removeItem("brindle.inbox.triage");
 }
+// Settings › Library (shots/libraryUx.ts): the person's Library switches, which the fake daemon doesn't serve.
+if (libraryUxScene(scene)) prepareLibraryUx(daemon, scene);
 const client = daemon.client();
+if (libraryUxScene(scene)) installLibraryUx(client, scene);
 if (libraryScene) installLibrary(client);
 if (inboxScene) installThreads(client);
 // Loading: the first inbox never arrives.
@@ -444,6 +455,7 @@ const OPENS: Record<string, string> = {
   "session-review-diff": "Review changes →",
   "session-review-diff-split": "Review changes →",
   "update-downloading": 'css:[data-testid="app-update-now"]',
+  terminal: 'css:[data-testid="terminal-toggle"]',
 };
 
 const press = (label: string) => {
@@ -454,7 +466,32 @@ const press = (label: string) => {
 };
 
 /* Some scenes show the flow a step further: the custom agent builder opened from Medium's list. */
+/* What the terminal scene's shell prints: git, ls and a test run in the 16 ANSI colours, faint text and a 256-colour grey. */
+const E = "\x1b[";
+const SHELL_OUTPUT = [
+  `${E}1;32m~/Projects/pawdelta${E}0m on ${E}1;35mdesktop/ux-revamp${E}0m % git status --short`,
+  ` ${E}31mM${E}0m desktop/src/components/Sidebar.tsx`,
+  `${E}32mA${E}0m  desktop/src/components/Sidebar.test.tsx`,
+  `${E}31m??${E}0m desktop/notes.md`,
+  `% git diff --stat`,
+  ` desktop/src/components/Sidebar.tsx | 3 ${E}32m++${E}0m${E}31m-${E}0m`,
+  `% ls`,
+  `${E}1;34mdesktop${E}0m  ${E}1;34mdocs${E}0m  ${E}1;32mmake.sh${E}0m  package.json  ${E}36mlink -> docs${E}0m  ${E}33mREADME.md${E}0m`,
+  `% npm test`,
+  ` ${E}32m✓${E}0m src/store/overview.test.tsx ${E}90m(13 tests) 41ms${E}0m`,
+  ` ${E}31m✗${E}0m src/components/Sidebar.test.tsx ${E}2m(1 failed)${E}22m`,
+  ` ${E}93mwarn${E}0m ${E}38;5;244mdeprecated option --run-in-band${E}0m  ${E}95mnote${E}0m ${E}96minfo${E}0m ${E}94mhint${E}0m`,
+  `% `,
+].join("\r\n");
+
 const THEN: Record<string, () => void> = {
+  terminal: () => {
+    // The shell's screen, for a view that opens from now on, and printed into one already open.
+    const shell = daemon.actions.filter((a) => a.kind === "shell").at(-1);
+    if (!shell) return;
+    daemon.data.terminals[shell.id] = { live: true, screen: SHELL_OUTPUT, cursor: [2, 12] };
+    daemon.print(shell.id, `${E}2J${E}H${SHELL_OUTPUT}`);
+  },
   "chat-empty": () => chatEditor()?.focus(),
   "chat-queued": () => chatEditor()?.focus(),
   "chat-long": () => chatTyped(LONG_MESSAGE),
@@ -516,6 +553,7 @@ void sync.idle().then(() =>
     // What the press opened is on screen by now; what THEN asks the daemon for (a search) too, after its debounce.
     setTimeout(() => {
       if (Object.hasOwn(THEN, scene)) THEN[scene]();
+      if (libraryUxScene(scene)) playLibraryUx(scene);
       setTimeout(() => {
         document.documentElement.dataset.ready = "1";
       }, 600);

@@ -104,7 +104,7 @@ export function WorkPanel({ work, split, can }: { work: Work; split: PlanWorkerD
       {!state ? (work.error ? null : <p className="m-0 text-ink-3">Reading work items…</p>) : (
         <>
           <div className="grid gap-1.5" data-testid="work-design">
-            <span className={`${label} text-[11px]`}>This design</span>
+            <span className={`${label} text-[11px]`}>This plan</span>
             {epic ? (
               <>
                 <span className="flex items-center justify-between gap-2"><b className="font-medium text-ink">Epic</b><Chip item={epic} /></span>
@@ -116,7 +116,7 @@ export function WorkPanel({ work, split, can }: { work: Work; split: PlanWorkerD
                 No item yet.
                 <button type="button" className={`${button} sm`} disabled={work.busy} onClick={() => void work.create({ kind: "design" })}>Create epic</button>
               </span>
-            ) : <p className="m-0 text-ink-3">{connected ? "No item is linked to this design." : "No tracker is connected for your organization. An admin connects one in Settings › Integrations."}</p>}
+            ) : <p className="m-0 text-ink-3">{connected ? "No item is linked to this plan." : "No tracker is connected for your organization. An admin connects one in Settings › Integrations."}</p>}
           </div>
           {split.length > 0 && (
             <div className="grid gap-2" data-testid="work-tasks">
@@ -152,7 +152,7 @@ export function WorkPanel({ work, split, can }: { work: Work; split: PlanWorkerD
               <input className={field} value={text} placeholder="AB#1234, BRN-12 or paste its link" aria-label="Link an existing item" onChange={(e) => setText(e.target.value)} />
               <span className="flex items-center gap-2">
                 <select className={field} aria-label="Link it to" value={onto} onChange={(e) => setOnto(e.target.value)}>
-                  <option value="design">This design</option>
+                  <option value="design">This plan</option>
                   {split.map((w) => <option key={w.id} value={w.id}>{w.title}</option>)}
                 </select>
                 <button type="submit" className={button} disabled={work.busy || !text.trim()}>Link</button>

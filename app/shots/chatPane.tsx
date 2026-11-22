@@ -63,6 +63,74 @@ const OUTPUT = [
   `${orange("✻ Working… (12s · esc to interrupt)")}`,
 ];
 
+/* ?scene=chat-pane-diff: an Edit's diff as Claude Code 2.1.330's colour-diff draws it in the app's theme (its light or
+   dark theme's line and word grounds, GitHub or Monokai syntax colours, each token a foreground then a background
+   SGR), in truecolour and in the 256-colour slots its own quantizer picks without truecolour; then its accents on the
+   pane's field (its orange, subtle and inactive greys, as 256-colour slots). */
+type Rgb = [number, number, number];
+/* The 256-colour slot Claude Code sends for a colour without truecolour: chalk's rgbToAnsi256 (live panes' captured
+   dark diff grounds, 65 72 95 174, are its slots for Claude's dark theme). */
+function slot256([r, g, b]: Rgb): number {
+  if (r === g && g === b) return r < 8 ? 16 : r > 248 ? 231 : Math.round(((r - 8) / 247) * 24) + 232;
+  return 16 + 36 * Math.round((r / 255) * 5) + 6 * Math.round((g / 255) * 5) + Math.round((b / 255) * 5);
+}
+const DIFF_COLOURS = {
+  light: {
+    ink: [51, 51, 51], key: [167, 29, 93], storage: [167, 29, 93], num: [0, 134, 179], str: [24, 54, 145], fn: [121, 93, 163], comment: [150, 152, 150],
+    add: [105, 219, 124], addWord: [47, 157, 68], addDec: [36, 138, 61], del: [255, 168, 180], delWord: [209, 69, 75], delDec: [207, 34, 46],
+  },
+  dark: {
+    ink: [248, 248, 242], key: [249, 38, 114], storage: [102, 217, 239], num: [190, 132, 255], str: [230, 219, 116], fn: [166, 226, 46], comment: [117, 113, 94],
+    add: [34, 92, 43], addWord: [56, 166, 96], addDec: [80, 200, 80], del: [122, 41, 54], delWord: [179, 89, 107], delDec: [220, 90, 90],
+  },
+} satisfies Record<ChatTheme, Record<string, Rgb>>;
+type DiffPart = [keyof typeof DIFF_COLOURS.light, string, boolean?];
+
+function diffLines(theme: ChatTheme, truecolour: boolean): string[] {
+  const c = DIFF_COLOURS[theme];
+  const sgr = (rgb: Rgb, fg: boolean) => (truecolour ? `${ESC}${fg ? 38 : 48};2;${rgb.join(";")}m` : `${ESC}${fg ? 38 : 48};5;${slot256(rgb)}m`);
+  const line = (no: string, sign: " " | "-" | "+", parts: DiffPart[]) => {
+    const ground = sign === "-" ? c.del : sign === "+" ? c.add : null;
+    const word = sign === "-" ? c.delWord : c.addWord;
+    const on = (rgb: Rgb | null) => (rgb ? sgr(rgb, false) : `${ESC}49m`);
+    const decoration = sign === "-" ? c.delDec : sign === "+" ? c.addDec : c.ink;
+    const body = parts.map(([kind, text, changed]) => `${sgr(c[kind], true)}${on(changed ? word : ground)}${text}`).join("");
+    return `   ${dim(no)} ${sgr(decoration, true)}${on(ground)}${sign} ${body}${ESC}0m`;
+  };
+  return [
+    line("41", " ", [["storage", "export function"], ["ink", " "], ["fn", "clamp"], ["ink", "(width: "], ["storage", "number"], ["ink", ") {"]]),
+    line("42", "-", [["ink", "  "], ["storage", "const"], ["ink", " min = "], ["num", "200", true], ["ink", ";"]]),
+    line("43", "-", [["ink", "  "], ["key", "return"], ["ink", " Math.max(min, width); "], ["comment", "// "], ["comment", "too narrow", true]]),
+    line("42", "+", [["ink", "  "], ["storage", "const"], ["ink", " min = "], ["num", "240", true], ["ink", ", max = "], ["num", "420", true], ["ink", ";"]]),
+    line("43", "+", [["ink", "  "], ["key", "return"], ["ink", " Math.min(max, Math.max(min, width)); "], ["comment", "// "], ["str", "\"fits\"", true]]),
+    line("44", " ", [["ink", "}"]]),
+  ];
+}
+
+/* &claude=light|dark: the theme Claude Code draws in, where it isn't the app's: a pane still in the theme it was
+   launched with after the app switched (what a pane did before it followed switches). */
+function claudeTheme(app: ChatTheme): ChatTheme {
+  const asked = new URLSearchParams(location.search).get("claude");
+  return asked === "light" || asked === "dark" ? asked : app;
+}
+
+function diffOutput(theme: ChatTheme): string[] {
+  const accents = theme === "light"
+    ? [`${ESC}38;5;174m✻ Working… (orange, 174)${ESC}0m  ${ESC}38;5;248msubtle grey (248)${ESC}0m  ${ESC}38;5;241minactive grey (241)${ESC}0m  ${ESC}38;5;137mwarning (137)${ESC}0m  ${ESC}38;5;65msuccess (65)${ESC}0m`]
+    : [`${ESC}38;5;174m✻ Working… (orange, 174)${ESC}0m  ${ESC}38;5;246mfaint grey (246)${ESC}0m  ${ESC}38;5;244mgrey (244)${ESC}0m`];
+  return [
+    `${green("●")} ${bold("Update")}(desktop/src/components/Sidebar.tsx) ${dim(`· Claude's ${theme} theme, truecolour`)}`,
+    `  ${dim("⎿  Updated desktop/src/components/Sidebar.tsx with 2 additions and 2 removals")}`,
+    ...diffLines(theme, true),
+    ``,
+    `${green("●")} ${bold("Update")}(desktop/src/components/Sidebar.tsx) ${dim("· the same, as 256-colour slots")}`,
+    `  ${dim("⎿  Updated desktop/src/components/Sidebar.tsx with 2 additions and 2 removals")}`,
+    ...diffLines(theme, false),
+    ``,
+    ...accents,
+  ];
+}
+
 /* Claude Code's bottom block as it draws it at the terminal's foot: its prompt box and footer, or a permission question. */
 function bottom(kind: PromptRegion["kind"], cols: number): string[] {
   const w = Math.max(20, cols - 1);
@@ -85,11 +153,11 @@ function bottom(kind: PromptRegion["kind"], cols: number): string[] {
 }
 
 /* The pane: drawn on open and redrawn at each size, its bottom block on the client's last rows. */
-function opener(kind: PromptRegion["kind"]): PtyViewOpener {
+function opener(kind: PromptRegion["kind"], output = OUTPUT): PtyViewOpener {
   return (_at, size, handlers) => {
     const draw = (cols: number, rows: number) => {
       const block = bottom(kind, cols);
-      const text = `${ESC}2J${ESC}H${OUTPUT.join("\r\n")}${ESC}${rows - block.length + 1};1H${block.join("\r\n")}`;
+      const text = `${ESC}2J${ESC}H${output.join("\r\n")}${ESC}${rows - block.length + 1};1H${block.join("\r\n")}`;
       queueMicrotask(() => handlers.onData(new TextEncoder().encode(text)));
     };
     draw(size.cols, size.rows);
@@ -132,7 +200,7 @@ export function ChatPaneScene({ scene, theme }: { scene: string; theme: ChatThem
       <ChatPane provider="claude" theme={theme} prompt={prompt}
         terminal={openCaptured
           ? { at: { server: null, target: "chat:1" }, open: openCaptured, onRows }
-          : { at: { server: null, target: "chat:1" }, open: opener(prompt.kind) }}
+          : { at: { server: null, target: "chat:1" }, open: opener(prompt.kind, scene === "chat-pane-diff" ? diffOutput(claudeTheme(theme)) : OUTPUT) }}
         composer={composer} onDropFiles={() => {}} onComposeText={() => {}} />
     </main>
   );

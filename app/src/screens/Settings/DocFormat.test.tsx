@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonClient, type DocFormat as Format, type DocFormatView } from "../../api/client";
 import { BASE_URL, FakeDaemon, TOKEN } from "../../test/fakeDaemon";
@@ -31,10 +31,10 @@ describe("DocFormat", () => {
 
     // Opened again, everything comes back from the daemon as it was saved.
     open();
-    expect((await screen.findByRole("option", { name: /Design doc/ })).getAttribute("aria-selected")).toBe("true");
+    expect(within(await screen.findByRole("listbox")).getByRole("option").getAttribute("aria-selected")).toBe("true");
     expect(titles()).toEqual(["Summary", "Goals and non-goals", "Rollout", "Architecture"]);
     expect([checked("Summary is required"), checked("Goals and non-goals is required"), checked("Rollout is required"), checked("Architecture is required")]).toEqual([true, true, true, true]);
-    expect(checked("New docs start from it")).toBe(true);
+    expect(checked("New plans start from it")).toBe(true);
     expect((screen.getByLabelText("Reference") as HTMLInputElement).value).toBe("DES-{number}");
     expect((screen.getByLabelText("Title hint") as HTMLInputElement).value).toBe("What it does");
     expect([checked(/Sign-off is blocked/), checked(/Sharing is blocked/)]).toEqual([false, true]);

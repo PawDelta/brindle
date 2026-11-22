@@ -454,6 +454,7 @@ export interface VisualOption {
 }
 
 export interface VisualAnswer {
+  picks?: Record<string, string> | null;
   option: string | null;
   note: string;
   at: number;
@@ -462,6 +463,8 @@ export interface VisualAnswer {
 }
 
 export interface VisualDTO {
+  choices?: { id: string; question: string; options: { id: string; label: string; detail?: string | null }[] }[] | null;
+  inline_html?: string | null;
   id: string;
   session: string;
   /* The agent that receives the answer, and whether its provider takes files. */
@@ -805,6 +808,9 @@ interface WireDoc extends Omit<WireListedDoc, "doc_id"> {
 
 export interface AnalysisDoc {
   id: string;
+  /* The caller's effective grants, computed by the Library. */
+  can_edit?: boolean;
+  can_comment?: boolean;
   title?: string;
   kind?: string;
   scope?: DocScope;
@@ -868,7 +874,19 @@ export interface TrackerLink {
 export type ShareLinkScope = ShareLinkSettingsDTO;
 export type DesignShareLink = DesignShareLinkDTO;
 export type SharePerson = SharePersonDTO;
-export type PeopleQuery = { q?: string; team?: string; role?: string; on_plan?: string };
+export type PeopleQuery = { q?: string; team?: string; role?: string; on_plan?: string; include_unshared?: string };
+
+/* What one person may do with a shared plan. Whether the build waits for their sign-off is separate. */
+export type ShareAccessLevel = "view" | "comment" | "edit";
+/* Who has a plan (brindle/pro/share_access.py): the teams and org it is shared into, each person
+   given it or asked to sign off (never its owner), and, before its first share, whether that share
+   uploads a plan kept on this Mac (null: can't be said). */
+export interface ShareAccess {
+  shared: boolean;
+  kept_here: boolean | null;
+  scopes: { kind: string; id: string }[];
+  people: { sub: string; name: string | null; access: ShareAccessLevel; sign_off: "required" | "optional" | null }[];
+}
 
 export interface DesignWorkItems {
   items: TrackerLink[];
@@ -932,6 +950,7 @@ export interface AnalysisDocDetail extends AnalysisDoc {
   /* A shared design's review state (shared-designs-api.md: GET /analysis-docs/{id} `design`):
      the revision on screen, who is asked to review (`required` or optional) and who has signed it. */
   design?: { rev?: number; reviewers?: { sub: string; required?: boolean }[]; sign_offs?: { sub: string; rev?: number }[]; pending_reviewers?: unknown[]; pending_policies?: unknown[]; ready?: boolean; folder?: DesignFolderRef | null; threads?: { status?: string }[];
+    can_edit?: boolean; can_comment?: boolean;
     /* The design's decisions as the server keeps them; `confirmed` is the option this reader chose. */
     decisions?: { id: string; title?: string; confirmed?: string | null }[] } | null;
   /* The plan's tasks when the design is a plan on this machine, in their board state (GET /analysis-docs/{id} `tasks`). */
@@ -998,9 +1017,24 @@ export type ExportDestination = "download" | "google_docs" | "sharepoint";
 /* GET /analysis-docs/policy (the rest of the org's policy passes through untouched). */
 export interface DocPolicy {
   export_destinations?: ExportDestination[];
+  share_links?: "anyone" | "org" | "off";
 }
 
 export type DocSwitchName = "store" | "share" | "assist" | "prompt_analysis" | "import_upload";
+
+export type OrgSettingName = DocSwitchName | "share_links";
+export type OrgSwitchState = "off" | "default_on" | "enforced_on" | "enforced_off";
+export interface OrgSettings {
+  org_id: string;
+  actor_sub: string;
+  can_edit_org: boolean;
+  can_edit_groups: boolean;
+  policy: {
+    switches: Partial<Record<DocSwitchName, OrgSwitchState>>;
+    groups: Record<string, { switches: Partial<Record<DocSwitchName, OrgSwitchState>> }>;
+    share_links?: "anyone" | "org" | "off";
+  };
+}
 
 /* GET /analysis-docs/switches: one of the person's own switches. `choice` is
    theirs (null while unset), `on` what applies, `locked` whether their org
@@ -2157,8 +2191,8 @@ export class DaemonClient {
   }
 
   /* The person's answer to the revision on screen; a newer revision makes this a 409. */
-  answerVisual(id: string, rev: number, option: string | undefined, note: string, attachments?: string[]) {
-    return this.postInbox<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note, ...(attachments?.length ? { attachments } : {}) });
+  answerVisual(id: string, rev: number, option: string | undefined, note: string, attachments?: string[], picks?: Record<string, string>) {
+    return this.postInbox<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note, ...(attachments?.length ? { attachments } : {}), ...(picks ? { picks } : {}) });
   }
 
   /* The person won't answer the revision on screen; the agent is told, the Inbox card clears. */
@@ -2351,8 +2385,18 @@ export class DaemonClient {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/confirm`, { rev, decision, option });
   }
 
+  /* The person's own answer on a decision (brindle/plan_answers.py), picked as it is added. */
+  addPlanAnswer(id: string, rev: number, decision: string, text: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/answers`, { rev, decision, text });
+  }
+
+  /* Reword the person's own answer ({ text }) or take it back ({ remove: true }), until someone else picks it. */
+  changePlanAnswer(id: string, rev: number, answer: string, change: { text: string } | { remove: true }) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/answers/${encodeURIComponent(answer)}`, { rev, ...change });
+  }
+
   /* Team review through the Library (brindle/pro/shared_docs.py): each answers with the plan, its build gate included. */
-  sharePlan(id: string, scope: { kind: string; id: string }, reviewers: PlanReviewerChoice[]) {
+  sharePlan(id: string, scope: { kind: string; id: string }, reviewers?: PlanReviewerChoice[]) {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/share`, { scope, reviewers });
   }
 
@@ -2370,6 +2414,62 @@ export class DaemonClient {
 
   removePlanReviewer(id: string, sub: string) {
     return this.delete<Plan>(`/plans/${encodeURIComponent(id)}/reviewers/${encodeURIComponent(sub)}`, {});
+  }
+
+  /* The share panel (brindle/pro/share_access.py): who has the plan, and one person or scope at a time.
+     Adding the first person uploads the plan and shares it. */
+  planAccess(id: string) {
+    return this.get<ShareAccess>(`/plans/${encodeURIComponent(id)}/access`);
+  }
+
+  invitePlanPerson(id: string, sub: string, access: ShareAccessLevel, signOff: boolean) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/people`, { sub, access, sign_off: signOff });
+  }
+
+  /* One person's access; the Library keeps their sign-off as it is, in the same write. */
+  setPlanPersonAccess(id: string, sub: string, access: ShareAccessLevel) {
+    return this.put<Plan>(`/plans/${encodeURIComponent(id)}/people/${encodeURIComponent(sub)}`, { access });
+  }
+
+  setPlanPersonSignOff(id: string, sub: string, must: boolean) {
+    return this.put<Plan>(`/plans/${encodeURIComponent(id)}/people/${encodeURIComponent(sub)}/sign-off`, { must });
+  }
+
+  removePlanPerson(id: string, sub: string) {
+    return this.delete<Plan>(`/plans/${encodeURIComponent(id)}/people/${encodeURIComponent(sub)}`, {});
+  }
+
+  removePlanScope(id: string, scope: { kind: string; id: string }) {
+    return this.delete<Plan>(`/plans/${encodeURIComponent(id)}/scopes/${encodeURIComponent(scope.kind)}/${encodeURIComponent(scope.id)}`, {});
+  }
+
+  /* Stop sharing with every person and scope; the owner keeps it. */
+  unsharePlan(id: string) {
+    return this.delete<Plan>(`/plans/${encodeURIComponent(id)}/access`, {});
+  }
+
+  designAccess(id: string, repo?: string) {
+    return this.get<ShareAccess>(`/library/designs/${encodeURIComponent(id)}/access`, { repo });
+  }
+
+  inviteDesignPerson(id: string, sub: string, access: ShareAccessLevel, signOff: boolean, repo?: string) {
+    return this.post<SharedDesign>(`/library/designs/${encodeURIComponent(id)}/people`, { sub, access, sign_off: signOff, ...(repo ? { repo } : {}) });
+  }
+
+  setDesignPersonAccess(id: string, sub: string, access: ShareAccessLevel, repo?: string) {
+    return this.put<SharedDesign>(`/library/designs/${encodeURIComponent(id)}/people/${encodeURIComponent(sub)}`, { access, ...(repo ? { repo } : {}) });
+  }
+
+  setDesignPersonSignOff(id: string, sub: string, must: boolean, repo?: string) {
+    return this.put<SharedDesign>(`/library/designs/${encodeURIComponent(id)}/people/${encodeURIComponent(sub)}/sign-off`, { must, ...(repo ? { repo } : {}) });
+  }
+
+  removeDesignPerson(id: string, sub: string, repo?: string) {
+    return this.delete<SharedDesign>(`/library/designs/${encodeURIComponent(id)}/people/${encodeURIComponent(sub)}${repo ? `?repo=${encodeURIComponent(repo)}` : ""}`, {});
+  }
+
+  removeDesignScope(id: string, scope: { kind: string; id: string }, repo?: string) {
+    return this.delete<SharedDesign>(`/library/designs/${encodeURIComponent(id)}/scopes/${encodeURIComponent(scope.kind)}/${encodeURIComponent(scope.id)}${repo ? `?repo=${encodeURIComponent(repo)}` : ""}`, {});
   }
 
   designPeople(id: string, query: PeopleQuery = {}, repo?: string) {
@@ -2641,6 +2741,16 @@ export class DaemonClient {
   /* The person's own doc switches, and which their org has locked. */
   async docSwitches(repo?: string) {
     return (await this.get<{ switches: DocSwitch[] }>("/analysis-docs/switches", { repo })).switches;
+  }
+
+  orgSettings() {
+    return this.get<OrgSettings>("/org-settings");
+  }
+
+  setOrgSetting(state: OrgSettings, name: OrgSettingName, value: string, group?: string) {
+    const switches = group ? state.policy.groups[group].switches : state.policy.switches;
+    const previous = name === "share_links" ? state.policy.share_links ?? "org" : switches[name] ?? "off";
+    return this.put<OrgSettings>("/org-settings", { org_id: state.org_id, actor_sub: state.actor_sub, name, value, previous, group });
   }
 
   /* Sets one of the person's own switches; the daemon refuses (403) one the org has locked.

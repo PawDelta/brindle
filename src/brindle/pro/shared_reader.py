@@ -33,7 +33,7 @@ THREAD_ACTIONS = ("resolve", "reopen")
 ANCHOR_FIELDS = ("kind", "section", "start", "end", "quote", "decision", "option", "state")
 ANCHOR_KINDS = ("text", "diagram", "decision", "section")
 REVISION_SOURCES = ("proposal", "edit", "suggestion")
-UNTITLED = "Design doc"
+UNTITLED = "Plan"
 
 
 def _who(sub: Any, me: str) -> str:
@@ -88,7 +88,7 @@ def _gate(view: dict, me: str) -> dict:
     rows, policies, required, met, unmet, changes = plans.tally(people, rules, plans._signed(view), asked,
                                                                 read is not None, me)
     if read is None:
-        state, reason = "waiting", "brindle can't read this design's review state."
+        state, reason = "waiting", "brindle can't read this plan's review state."
     elif changes:
         state, reason = plans.CHANGES, f"Changes requested by {', '.join(changes)}."
     elif unmet:
@@ -115,6 +115,15 @@ def _can_sign(view: dict, me: str, author: Any) -> bool:
     return me == author or bool(view.get("policy_reviewers")) or any(isinstance(r, dict) and r.get("sub") == me for r in people)
 
 
+def _answers(view: dict, decision: str, cast: dict[str, list[str]], me: str) -> list[dict]:
+    """A decision's own answers (brindle.plan_answers), each locked once someone else picked it."""
+    from brindle import plan_answers
+
+    return [{"id": a["id"], "text": mask(a["text"])[:plan_answers.MAX_TEXT], "author": _who(a["author"], me),
+             "at": _at(a.get("at")), "locked": any(s != a["author"] for s in cast.get(a["id"], []))}
+            for d, a in plan_answers._theirs(view.get("decisions")) if d == decision]
+
+
 def _dto(doc_id: str, view: dict, me: str, *, review: bool = True, names: dict | None = None) -> dict:
     if not isinstance(view.get("rev"), int):
         raise RuntimeError("the Library's answer has no revision")
@@ -124,7 +133,8 @@ def _dto(doc_id: str, view: dict, me: str, *, review: bool = True, names: dict |
     for d in content["decisions"]:
         cast = {option: [str(s) for s in subs] for option, subs in votes.get(d["id"], {}).items() if isinstance(subs, list)}
         decisions.append({**d, "votes": {option: [_who(s, me) for s in subs] for option, subs in cast.items()},
-                          "confirmed": next((option for option, subs in cast.items() if me in subs), None)})
+                          "confirmed": next((option for option, subs in cast.items() if me in subs), None),
+                          "answers": _answers(view, d["id"], cast, me)})
     history = [r for r in view.get("revisions") or [] if isinstance(r, dict) and isinstance(r.get("rev"), int)
                and r.get("source") in REVISION_SOURCES]
     author = history[0].get("author") if history else view.get("author")
@@ -144,6 +154,7 @@ def _dto(doc_id: str, view: dict, me: str, *, review: bool = True, names: dict |
         can_edit=_can(view, me, "can_edit"),     # may write in its live draft (the reader's Editing)
         can_comment=_can(view, me, "can_comment"), can_suggest=_can(view, me, "can_suggest"),
         can_sign_off=review and _can_sign(view, me, author),
+        access_request=view.get("access_request"),
         signed_off=any(isinstance(s, dict) and s.get("sub") == me and s.get("rev") == view["rev"]
                        for s in view.get("sign_offs") or [])).to_json()
 
@@ -189,19 +200,32 @@ def read(doc_id: str, *, client=None, store=None) -> dict:
     return _ask(doc_id, "GET", "", None, client, store)
 
 
+def request_access(doc_id: str, role: Any, sub: str | None = None, *, action: str = "grant", client=None, store=None) -> dict:
+    """Ask as the signed-in reader, or grant a request as its author; the Library checks both."""
+    if role not in ("comment", "edit"):
+        raise ServiceError("invalid", "request comment or edit access", 400)
+    if action not in ("grant", "decline"):
+        raise ServiceError("invalid", "grant or decline the access request", 400)
+    tail = "/access-requests" + (f"/{quote(sub, safe='')}/{action}" if sub is not None else "")
+    return _ask(doc_id, "POST", tail, {"role": role}, client, store)
+
+
 def people(doc_id: str, filters: dict, *, client=None, store=None) -> dict:
-    """Search only people the Library says can already read this design."""
+    """Search people the Library says can already read this design, or with
+    ``include_unshared`` also the org's members who could be given it."""
     client, store = ad._session(client, store)
     ad.require_entitlement(store)
-    query = urlencode({k: v for k, v in filters.items() if k in ("q", "team", "role", "on_plan")})
+    query = urlencode({k: v for k, v in filters.items() if k in ("q", "team", "role", "on_plan", "include_unshared")})
     got = ad.api("GET", sd._path(doc_id, "/people") + (f"?{query}" if query else ""), client=client, store=store)
     return SharePeopleDTO.model_validate(got).model_dump()
 
 
 def reviewer(doc_id: str, sub: str, required: bool | None, *, client=None, store=None) -> dict:
     """Change one person without replacing anyone else's invitation."""
-    return _ask(doc_id, "DELETE" if required is None else "PUT", f"/reviewers/{quote(sub, safe='')}",
-                None if required is None else {"required": required}, client, store)
+    resource = "reviewers" if required is None else "permissions"
+    return _ask(doc_id, "DELETE" if required is None else "PUT",
+                f"/{resource}/{quote(sub, safe='')}",
+                None if required is None else {"role": "reviewer", "required": required}, client, store)
 
 
 def timeline(doc_id: str, *, client=None, store=None) -> dict:
@@ -237,7 +261,7 @@ def comparison(doc_id: str, rev: int, *, client=None, store=None) -> dict:
 def comment(doc_id: str, rev: Any, anchor: Any, text: Any, *, question: bool = False, client=None, store=None) -> dict:
     """A comment on the revision on screen, or (``question``) one for this person's own supervisor."""
     if not isinstance(anchor, dict):
-        raise ServiceError("invalid", "a comment is anchored on part of the doc", 400)
+        raise ServiceError("invalid", "a comment is anchored on part of the plan", 400)
     body = {"rev": _rev(rev), "anchor": anchor, "text": _text(text), **({"question": True} if question else {})}
     return _ask(doc_id, "POST", "/comments", body, client, store)
 
@@ -267,6 +291,39 @@ def act(doc_id: str, thread: int, rev: Any, action: Any, *, client=None, store=N
 
 def vote(doc_id: str, rev: Any, decision: Any, option: Any, *, client=None, store=None) -> dict:
     return _ask(doc_id, "POST", "/votes", {"rev": _rev(rev), "decision": decision, "option": option}, client, store)
+
+
+def add_answer(doc_id: str, rev: Any, decision: Any, text: Any, *, client=None, store=None) -> dict:
+    """This account's own answer on a decision, and its pick of it (brindle.plan_answers)."""
+    from brindle import plan_answers
+
+    rev, text = _rev(rev), plan_answers._text(text)
+    answer_id = plan_answers.new_id()
+    client, store = ad._session(client, store)
+    ad.api("POST", sd._path(doc_id, "/answers"), {"rev": rev, "decision": decision, "id": answer_id, "text": text},
+           client=client, store=store)
+    return vote(doc_id, rev, decision, answer_id, client=client, store=store)
+
+
+def _answer_id(answer_id: Any) -> str:
+    from brindle import plan_answers
+
+    if not isinstance(answer_id, str) or not plan_answers.ID.fullmatch(answer_id):
+        raise ServiceError("invalid", "name one of the answers on this plan", 400)
+    return answer_id
+
+
+def edit_answer(doc_id: str, rev: Any, answer_id: Any, text: Any, *, client=None, store=None) -> dict:
+    """Reword this account's own answer; the Library refuses once someone else picked it (409 picked)."""
+    from brindle import plan_answers
+
+    return _ask(doc_id, "PUT", f"/answers/{_answer_id(answer_id)}", {"rev": _rev(rev), "text": plan_answers._text(text)},
+                client, store)
+
+
+def remove_answer(doc_id: str, rev: Any, answer_id: Any, *, client=None, store=None) -> dict:
+    return _ask(doc_id, "DELETE", f"/answers/{_answer_id(answer_id)}?{urlencode({'rev': _rev(rev)})}", None,
+                client, store)
 
 
 def sign_off(doc_id: str, rev: Any, *, client=None, store=None) -> dict:
@@ -345,7 +402,7 @@ def read_link(token: Any, *, client=None, store=None) -> dict:
     doc_id = resp.get("doc_id")
     if doc_id is not None:
         if not isinstance(doc_id, str) or not DOC_ID.fullmatch(doc_id):
-            raise ServiceError("upstream", "the Library named a design brindle can't read", 502)
+            raise ServiceError("upstream", "the Library named a plan brindle can't read", 502)
         member = _as_member(doc_id, resp.get("title"), client, store)
         if member is not None:
             return member

@@ -112,6 +112,6 @@ def with_repos(db, groups: list[dict]) -> list[dict]:
 def move_doc(doc_id: str, kind: str, scope_id: str, folder_id: str, *, api: Api = _default_api) -> dict:
     """Place a design in a folder (the design keeps exactly one)."""
     if not doc_id or not folder_id:
-        raise ValueError("a design and a folder are required")
+        raise ValueError("a plan and a folder are required")
     return api("PUT", f"/analysis-docs/{quote(doc_id, safe='')}/design/folder",
                {"folder": {"scope": _scope(kind, scope_id), "id": folder_id}})

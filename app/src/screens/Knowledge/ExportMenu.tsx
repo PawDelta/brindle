@@ -130,7 +130,7 @@ export function ExportMenu({ client, id, source, title, repo, pickFolder, onSaid
   const download = (format: "md" | "docx" | "zip") =>
     act(format, async () => {
       if (isDoc && pickFolder) {
-        const dir = await pickFolder("Export the doc to a folder");
+        const dir = await pickFolder("Export the plan to a folder");
         if (!dir) return "Export cancelled.";
         const got = await client.exportDoc(src.id, format, dir);
         return `Exported to ${got.path ?? got.filename}.`;
@@ -191,7 +191,7 @@ export function ExportMenu({ client, id, source, title, repo, pickFolder, onSaid
     });
 
   const formats = [
-    { f: "md" as const, name: "Markdown", hint: "The doc as a .md file", icon: <FileIcon /> },
+    { f: "md" as const, name: "Markdown", hint: "The plan as a .md file", icon: <FileIcon /> },
     { f: "docx" as const, name: "Word", hint: "A .docx, ready to share", icon: <FileIcon /> },
     { f: "zip" as const, name: "Zip with appendices", hint: "Word, with every appendix", icon: <ArchiveIcon /> },
   ];

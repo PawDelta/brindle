@@ -24,6 +24,10 @@ function Row({ doc, record, queue, scopes, match, onOpen }: { doc: AnalysisDoc; 
   const stage = stageOf(doc.id, queue, record);
   const need = needsYou(doc.id, queue);
   const work = record?.work_item ?? doc.work_item;
+  const grants = record?.design?.can_edit !== undefined || record?.design?.can_comment !== undefined ? record.design
+    : record?.can_edit !== undefined || record?.can_comment !== undefined ? record : doc;
+  const access = grants?.can_edit ? "you can edit" : grants?.can_comment ? "you can comment"
+    : grants?.can_edit === false && grants.can_comment === false ? "you can view" : null;
   return (
     <li data-doc={doc.id} data-stage={stage} data-needs-you={need ?? undefined} data-to-decide={openItems(doc, record).decide}>
       <button type="button" className={`${COLUMNS} w-full border-b border-line py-[9px] text-left hover:bg-surface-2`} onClick={onOpen}>
@@ -37,7 +41,7 @@ function Row({ doc, record, queue, scopes, match, onOpen }: { doc: AnalysisDoc; 
         </span>
         <SignOffs record={record} />
         <span className="truncate text-xs text-ink-3">{openLine(doc, record)}</span>
-        <span className="truncate text-xs text-ink-2">{scopeLabel(doc.scope, scopes)}</span>
+        <span className="text-xs text-ink-2">{scopeLabel(doc.scope, scopes)}{access && <span className="block text-ink-3">{access}</span>}</span>
         <span className="text-right text-xs text-ink-3">{changedAgo(doc.updated_at ?? doc.created_at)}</span>
       </button>
     </li>
@@ -74,7 +78,7 @@ export function LibraryList({ groups, queue, records, scopes, matches, onOpen }:
   return (
     <div className="flex flex-col" data-testid="library-list">
       <div className={`${COLUMNS} sticky top-0 z-[2] border-b border-line-strong bg-canvas pb-1.5 text-[11px] font-medium uppercase tracking-[0.07em] text-ink-3`} aria-hidden>
-        <span>Design</span>
+        <span>Plan</span>
         <span>Stage</span>
         <span>Sign-offs</span>
         <span>Open</span>
@@ -82,7 +86,7 @@ export function LibraryList({ groups, queue, records, scopes, matches, onOpen }:
         <span className="text-right text-branch" title="Most recently changed first">Changed ↓</span>
       </div>
       {groups.map((group) => (
-        <section key={group.key} aria-label={group.label || "Designs"} data-group={group.key}>
+        <section key={group.key} aria-label={group.label || "Plans"} data-group={group.key}>
           <GroupHead group={group} queue={queue} />
           <ul className="flex flex-col">
             {group.docs.map((d) => <Row key={d.id} doc={d} record={records.get(d.id)} queue={queue} scopes={scopes} match={matches?.get(d.id)} onOpen={() => onOpen(d.id)} />)}

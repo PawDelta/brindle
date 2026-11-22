@@ -24,7 +24,8 @@
 
 :root {
   --canvas: #080d0b; --canvas-2: #0a100d; --surface: #080d0b; --surface-2: #121a16;
-  --line: rgba(120, 150, 135, 0.16); --line-strong: rgba(130, 160, 145, 0.28);
+  /* Lines also bound controls: both strengths reach 3:1 on the theme's grounds. */
+  --line: #62766a; --line-strong: #718579;
   --ink: #e8f0eb; --ink-2: #afbfb6; --ink-3: #889a90;
   --fawn: #34d399; --fawn-soft: color-mix(in srgb, var(--fawn) 10%, transparent);
   --sap: #e8875a; --sap-soft: rgba(232, 135, 90, 0.12);
@@ -41,7 +42,7 @@
   /* The knowledge map's groups: ten hues apart from each other, light on dark here and deeper in light. */
   --group-1: #6ea8fe; --group-2: #f2a65a; --group-3: #f07a7a; --group-4: #5ccfc4; --group-5: #7fd36a;
   --group-6: #e8cc5a; --group-7: #c39bf0; --group-8: #f59ac0; --group-9: #c9a27c; --group-10: #9fb8c8;
-  --shell-bg: #070b09; --shell-bg-2: color-mix(in srgb, var(--shell-bg), white 5%); --shell-ink: #e8f0eb; --shell-dim: #859a8e; --shell-acc: #34d399; --shell-cursor: #a4aba7; --shell-bad: #f08c88; --shell-line: rgba(52, 96, 74, 0.5);
+  --shell-bg: #070b09; --shell-bg-2: color-mix(in srgb, var(--shell-bg), white 5%); --shell-ink: #e8f0eb; --shell-dim: #859a8e; --shell-acc: #34d399; --shell-cursor: #a4aba7; --shell-bad: #f08c88; --shell-line: var(--line-strong);
   --shell-black: #121a16; --shell-red: #f08c88; --shell-green: #34d399; --shell-yellow: #d7af87; --shell-blue: #6ea8fe; --shell-magenta: #a99be0; --shell-cyan: #5ccfc4; --shell-white: #afbfb6;
   --shell-bright-black: #889a90; --shell-bright-red: #f08c88; --shell-bright-green: #34d399; --shell-bright-yellow: #e8875a; --shell-bright-blue: #6ea8fe; --shell-bright-magenta: #a99be0; --shell-bright-cyan: #5ccfc4; --shell-bright-white: #e8f0eb;
   --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -57,11 +58,11 @@
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
     --canvas: #f4f6f6; --canvas-2: #eef1f1; --surface: #f4f6f6; --surface-2: #e9eded;
-    --line: rgba(20, 40, 36, 0.11); --line-strong: rgba(20, 40, 36, 0.22);
+    --line: #788783; --line-strong: #6c7e79;
     --ink: #0e1716; --ink-2: #3a4d4a; --ink-3: #4c615e;
-    --fawn: #06744f;
+    --fawn: #066f4c;
     --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
-    --pass: #06744f; --pass-soft: rgba(6, 116, 79, 0.1);
+    --pass: #066f4c; --pass-soft: rgba(6, 111, 76, 0.1);
     --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
     --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
     --on-fawn: #ffffff; --on-branch: #ffffff; --on-sap: #ffffff;
@@ -69,7 +70,7 @@
     --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #06744f;
     --group-1: #2d69b5; --group-2: #a05517; --group-3: #b83a3a; --group-4: #1a756d; --group-5: #337825;
     --group-6: #7b690e; --group-7: #7a4fb8; --group-8: #af4274; --group-9: #7f5a36; --group-10: #4f6b7c;
-    --shell-bg: #ffffff; --shell-bg-2: #f4f6f6; --shell-ink: #0e1716; --shell-dim: #4c615e; --shell-acc: #06744f; --shell-cursor: #06744f; --shell-bad: #a63e3a; --shell-line: rgba(20, 40, 36, 0.22);
+    --shell-bg: #ffffff; --shell-bg-2: #f4f6f6; --shell-ink: #0e1716; --shell-dim: #4c615e; --shell-acc: #06744f; --shell-cursor: #06744f; --shell-bad: #a63e3a; --shell-line: var(--line-strong);
     --shell-black: #0e1716; --shell-red: #a63e3a; --shell-green: #067a55; --shell-yellow: #86572a; --shell-blue: #2d69b5; --shell-magenta: #6350b3; --shell-cyan: #1a756d; --shell-white: #556b68;
     --shell-bright-black: #4c615e; --shell-bright-red: #a63e3a; --shell-bright-green: #067a55; --shell-bright-yellow: #9b4724; --shell-bright-blue: #2d69b5; --shell-bright-magenta: #6350b3; --shell-bright-cyan: #1a756d; --shell-bright-white: #3a4d4a;
     color-scheme: light;
@@ -79,11 +80,11 @@
 
 :root[data-theme="light"] {
   --canvas: #f4f6f6; --canvas-2: #eef1f1; --surface: #f4f6f6; --surface-2: #e9eded;
-  --line: rgba(20, 40, 36, 0.11); --line-strong: rgba(20, 40, 36, 0.22);
+  --line: #788783; --line-strong: #6c7e79;
   --ink: #0e1716; --ink-2: #3a4d4a; --ink-3: #4c615e;
-  --fawn: #06744f;
+  --fawn: #066f4c;
   --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
-  --pass: #06744f; --pass-soft: rgba(6, 116, 79, 0.1);
+  --pass: #066f4c; --pass-soft: rgba(6, 111, 76, 0.1);
   --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
   --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
   --on-fawn: #ffffff; --on-branch: #ffffff; --on-sap: #ffffff;
@@ -91,7 +92,7 @@
   --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #06744f;
   --group-1: #2d69b5; --group-2: #a05517; --group-3: #b83a3a; --group-4: #1a756d; --group-5: #337825;
   --group-6: #7b690e; --group-7: #7a4fb8; --group-8: #af4274; --group-9: #7f5a36; --group-10: #4f6b7c;
-  --shell-bg: #ffffff; --shell-bg-2: #f4f6f6; --shell-ink: #0e1716; --shell-dim: #4c615e; --shell-acc: #06744f; --shell-cursor: #06744f; --shell-bad: #a63e3a; --shell-line: rgba(20, 40, 36, 0.22);
+  --shell-bg: #ffffff; --shell-bg-2: #f4f6f6; --shell-ink: #0e1716; --shell-dim: #4c615e; --shell-acc: #06744f; --shell-cursor: #06744f; --shell-bad: #a63e3a; --shell-line: var(--line-strong);
   --shell-black: #0e1716; --shell-red: #a63e3a; --shell-green: #067a55; --shell-yellow: #86572a; --shell-blue: #2d69b5; --shell-magenta: #6350b3; --shell-cyan: #1a756d; --shell-white: #556b68;
   --shell-bright-black: #4c615e; --shell-bright-red: #a63e3a; --shell-bright-green: #067a55; --shell-bright-yellow: #9b4724; --shell-bright-blue: #2d69b5; --shell-bright-magenta: #6350b3; --shell-bright-cyan: #1a756d; --shell-bright-white: #3a4d4a;
   color-scheme: light;
@@ -207,7 +208,7 @@ body {
 
 /* Buttons, the Tinted scheme (design/design-v3.html .sch-tinted): one base
    in Geist Sans 13px, and four roles. The one main action (primary) is pass
-   text on a 12% pass wash with a 40% pass hairline; secondary is a hairline;
+   text on a 12% pass wash with a pass hairline; secondary is a hairline;
    quiet is text only; destructive is primary's shape in fail. Hover deepens
    the wash and the line, pressed deeper still; focus is the branch ring;
    disabled is 45% and inert. In the components layer, so a utility on the
@@ -235,8 +236,8 @@ body {
   .btn:focus-visible { outline: 2px solid var(--branch); outline-offset: 2px; }
   .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
-  .btn-primary { background: color-mix(in srgb, var(--pass) 12%, transparent); border-color: color-mix(in srgb, var(--pass) 40%, transparent); color: var(--pass); }
-  .btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--pass) 14%, transparent); border-color: color-mix(in srgb, var(--pass) 62%, transparent); color: color-mix(in srgb, var(--pass) 85%, var(--ink)); }
+  .btn-primary { background: color-mix(in srgb, var(--pass) 12%, transparent); border-color: var(--pass); color: var(--pass); }
+  .btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--pass) 14%, transparent); border-color: var(--pass); color: color-mix(in srgb, var(--pass) 85%, var(--ink)); }
   .btn-primary:active:not(:disabled) { background: color-mix(in srgb, var(--pass) 18%, transparent); border-color: var(--pass); color: color-mix(in srgb, var(--pass) 75%, var(--ink)); }
 
   .btn-secondary { border-color: var(--line-strong); color: var(--ink); }

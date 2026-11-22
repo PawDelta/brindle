@@ -44,7 +44,11 @@ it("typed_words_reach_the_engine", async () => {
   // The gate is no wider: what's pasted is still not the person's typing (reported as not typed, no words).
   act(() => { term.paste("render it now"); term.input("\r", true); });
   await waitFor(() => expect(vouched).toEqual([["test it now", true], [null, false]]));
+  shown.unmount();
+  vi.unstubAllGlobals();
 });
+
+// Fresh palettes, both live switch directions and switching back on the same pane are covered by ThemeMatrix.
 
 it("says why a session's CLI couldn't start, not that its credentials need attention", () => {
   const agent = { id: "sup1", provider: "claude", status: "failed", failed_why: "launch: claude isn't installed" } as AgentDTO;

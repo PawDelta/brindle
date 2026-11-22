@@ -808,7 +808,9 @@ describe("SessionScreen", () => {
     const paused: SessionDTO = { ...session, id: "sup0", status: "paused", goal: "Refactor the cache" };
     const goal: GoalDTO = { root_id: "sup0", enabled: false, goal: "Refactor the cache", state: "paused", progress: 0, milestones: [{ id: 1, position: 1, title: "Read it", status: "passed" }, { id: 2, position: 2, title: "Write it", status: "pending" }] };
     const { daemon } = mount({}, { sessions: [session, paused], goal, preflight: { claude: [{ id: "trust", kind: "trust", label: "Trust the folder /home/u/proj", detail: "Claude Code asks once per folder.", done: false }] } }, undefined, "sup0");
-    const card = await screen.findByTestId("state-card");
+    // The card says "isn't running" until the sessions list reports the pause; wait for that state, not a delay.
+    await waitFor(() => expect(screen.getByTestId("session-status").textContent).toContain("paused"));
+    const card = screen.getByTestId("state-card");
     expect(card.dataset.kind).toBe("ended");
     expect(card.textContent).toContain("is paused");
     expect(fake.Xterm.all).toHaveLength(0);

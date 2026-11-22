@@ -82,7 +82,10 @@ import { visualLink } from "../screens/Session/Visuals/client";
 import { VISUAL_LINK, VisualLinkContext } from "../screens/Session/Visuals/link";
 import { message } from "../screens/Session/Visuals/chrome";
 import { scrollByWheel } from "./terminalScroll";
-import { useAppTheme } from "./useAppTheme";
+import { recontrastBuffer, TextContrast } from "./textContrast";
+import { currentAppTheme, useAppTheme } from "./useAppTheme";
+
+type AppTheme = ReturnType<typeof currentAppTheme>;
 
 /* What the view is doing: opening, showing the pane, closed (the client
    exited: its view session or the window went), or why it couldn't open. */
@@ -163,6 +166,10 @@ export interface PtyTerminalProps {
   theme?: ITheme;
   /* xterm.js's minimum contrast between a cell's text and its ground, applied as it changes (with the theme): 1 (none) unless given. */
   minimumContrastRatio?: number;
+  /* A floor set in the byte stream instead (textContrast.ts): every cell's text to this ratio against its ground by its
+     lightness alone, faint text drawn in a colour rather than at half strength. 1 (none) unless given; read as each
+     SGR arrives. */
+  textContrastRatio?: number;
   /* Rows under the view's foot the client draws and the view clips (the module's comment): none unless given. */
   cropRows?: number;
   /* While rows are cropped, the client's row their mask starts at where that is above the view's foot (a provider's
@@ -263,7 +270,7 @@ export function linkOpener(openUrl: () => OpenUrl, mac: boolean, openVisual?: ()
   };
 }
 
-export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onView, onSize, theme, minimumContrastRatio = 1, cropRows = 0, cropFrom, typeElsewhere, onRows }: PtyTerminalProps) {
+export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onView, onSize, theme, minimumContrastRatio = 1, textContrastRatio = 1, cropRows = 0, cropFrom, typeElsewhere, onRows }: PtyTerminalProps) {
   const footFrom = useRef(cropFrom);
   footFrom.current = cropFrom;
   const elsewhere = useRef(typeElsewhere);
@@ -278,10 +285,12 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
   themed.current = theme;
   const contrasted = useRef(minimumContrastRatio);
   contrasted.current = minimumContrastRatio;
+  const lifted = useRef(textContrastRatio);
+  lifted.current = textContrastRatio;
   const footRows = useRef(cropRows);
   footRows.current = cropRows;
   // The open view's xterm.js and its layout, for a theme or row crop changing while it's open.
-  const live = useRef<{ term: XTerm; layout(): void } | null>(null);
+  const live = useRef<{ term: XTerm; layout(): void; themeChanged?(theme: AppTheme): void } | null>(null);
   const [renderer, setRenderer] = useState<Renderer | null>(null);
   const [view, setView] = useState<TerminalView>({ kind: "connecting" });
   const [copiedShown, setCopiedShown] = useState(false);
@@ -423,9 +432,12 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
       read(rows);
     };
     const parsed = term.onWriteParsed(readRows);
+    // Every cell's text lifted to textContrastRatio against its ground, in xterm's current colours.
+    const lift = new TextContrast(() => ({ theme: term.options.theme ?? {}, ratio: lifted.current }));
     const pty = open({ server, target }, { cols: term.cols, rows: term.rows }, {
-      onData: (bytes) => {
+      onData: (sent) => {
         if (gone) return;
+        const bytes = lift.feed(sent);
         if (attached) term.write(bytes);
         else term.write(bytes, lookAttached);
       },
@@ -449,6 +461,23 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
     });
     setView({ kind: "live" });
     sized.current?.(term.cols, term.rows - cropped);
+    /* The app's theme as this terminal last told tmux. tmux reads the terminal's colours (OSC 10/11) when it attaches;
+       after that a switch is reported as a terminal does (mode 2031's CSI ? 997 ; 1 n dark, 2 n light), once xterm.js
+       draws in the new colours: tmux asks the colours again and passes the report to every pane that wants it, so a
+       Claude Code on theme "auto" asks its background again and redraws in the matching theme (providers.py). */
+    let told = currentAppTheme();
+    live.current.themeChanged = (theme) => {
+      if (gone || theme === told) return;
+      told = theme;
+      // Drain writes made in the old palette before lifting retained cells; refresh the active pen too, so plain
+      // text continued after the switch uses the new ground. The callback runs after xterm has parsed both.
+      term.write(lift.refresh(), () => {
+        if (gone || theme !== told) return;
+        recontrastBuffer(term, lifted.current);
+        // Not attached yet: tmux reads the colours as they are then.
+        if (attached) pty.write(`\x1b[?997;${theme === "dark" ? 1 : 2}n`);
+      });
+    };
     // What goes to the pane, in the order the person made it: a ⌘V holds its place while the clipboard is read,
     // and what's typed after waits behind it.
     let waiting = 0;
@@ -854,7 +883,10 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
   // (useAppTheme) counts too: the shell's ANSI tokens change with it even where the caller passes no theme.
   const appTheme = useAppTheme();
   useEffect(() => {
-    if (live.current) live.current.term.options.theme = terminalTheme(theme);
+    if (!live.current) return;
+    live.current.term.options.theme = terminalTheme(theme);
+    // After the colours: tmux reads them back on the report.
+    live.current.themeChanged?.(appTheme);
   }, [theme, appTheme]);
   useEffect(() => {
     if (live.current) live.current.term.options.minimumContrastRatio = minimumContrastRatio;
