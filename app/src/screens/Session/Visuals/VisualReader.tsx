@@ -256,7 +256,9 @@ function AnswerBar({ client, visual, picked, picks, onPick, onAnswered }: { clie
   // Empty ids cannot be published; this host-only choice carries no option to the engine.
   const ownWords = picked === "";
   const grouped = !!visual.choices?.length;
-  const canSend = (grouped ? visual.choices!.every(g => !!picks[g.id]) : picked !== null && (!ownWords || !!note.trim())) && uploading === 0;
+  // Groups still without a pick: Send waits on them, so say which.
+  const unpicked = grouped ? visual.choices!.filter(g => !picks[g.id]) : [];
+  const canSend = (grouped ? unpicked.length === 0 : picked !== null && (!ownWords || !!note.trim())) && uploading === 0;
   const answered = visual.answer ? options.find((o) => o.id === visual.answer!.option) : null;
   const dismiss = async () => {
     if (sending) return;
@@ -421,6 +423,15 @@ function AnswerBar({ client, visual, picked, picks, onPick, onAnswered }: { clie
               <input ref={picker} type="file" multiple hidden data-testid="visual-attach-input" onChange={(e) => { const files = Array.from(e.target.files ?? []); e.target.value = ""; if (files.length) void upload(() => Promise.all(files.map(fileAttachment))); }} />
               <button type="button" data-attach className={button} onClick={() => picker.current?.click()}>Attach</button>
             </>
+          )}
+          {unpicked.length > 0 && (
+            <span className="text-xs text-ink-3" role="status" data-testid="visual-unpicked" data-state="needs-picks"
+              data-missing={unpicked.map(g => g.id).join(" ")}
+              title={unpicked.map(g => g.question).join("\n")}>
+              {unpicked.length === visual.choices!.length
+                ? `Pick an answer in each of ${unpicked.length} ${unpicked.length === 1 ? "question" : "questions"}`
+                : `Still to pick: ${unpicked.map(g => g.question).join(", ")}`}
+            </span>
           )}
           <LoadingButton className={main} busy={sending} disabled={!canSend || sending} data-testid="visual-send" onClick={() => void send()}>
             Send ↵
