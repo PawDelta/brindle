@@ -5431,7 +5431,8 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
 
         # Recheck a queued cheap pick against the current branch. Keep explicit
         # strong profiles, including the pipeline's recovery fallback.
-        if profile in (review_scope.LIGHT_PROFILE, review_scope.CODEX_LIGHT_PROFILE):
+        if profile and any(_same_profile(profile, name, ws.repo_root)
+                           for name in (review_scope.LIGHT_PROFILE, review_scope.CODEX_LIGHT_PROFILE)):
             profile = None
     profile = _review_profile(db, ws, profile, cfg)
     if second and not slot:

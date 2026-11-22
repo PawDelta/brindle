@@ -403,7 +403,7 @@ def test_the_demo_runs_in_a_practice_repo_on_the_cli_signed_in(db, world, brindl
     flagged = {r["repo_root"]: r["demo"] for r in _send("GET", "/v1/repos")[1]}
     assert flagged[reply["repo"]] is True and flagged[look] is False
     cfg = config.load_repo_config(reply["repo"])
-    assert (cfg.routing["light"], cfg.review_profile) == (["developer-codex"], "reviewer-codex")
+    assert (cfg.routing["light"], cfg.review_profile) == (["dev.gpt"], "review.gpt")
 
 
 @pytest.mark.parametrize("then", ["settled", "cancelled"])
@@ -440,7 +440,7 @@ def test_a_demo_held_by_its_preflight_keeps_its_repo_until_settled_or_cancelled(
     # A kind's fallbacks alone keep the person's own pick, not the one this repo's local file overrides it with.
     pytest.param("user", {"kinds": {"medium": {"fallbacks": ["developer-sonnet"]}}}, None, 200,
      {"routing": {"heavy": ["developer"], "advanced": ["developer-heavy"], "reasoning": ["developer-fable"],
-                  "medium": ["developer-codex", "developer-sonnet"]},
+                  "medium": ["dev.gpt", "developer-sonnet"]},
       "routing_locked": {"medium": True}, "routing_light": "claude-haiku"},
      marks=pytest.mark.variant("fallback edit preserves user scope")),
     ("repo", {"tiers": {"light": ["developer"]}, "exclude_providers": ["claude"]}, None, 200,
@@ -495,7 +495,7 @@ def test_a_locked_kind_is_never_overridden_by_learning_and_an_unlocked_one_repor
         "heavy": {"model": "developer-heavy", "fallbacks": ["developer-codex"], "locked": False}}})
     assert code == 200, reply
     cfg = config.load_repo_config(str(repo))
-    assert (cfg.routing["medium"], cfg.routing_locked) == (["developer", "developer-codex"],
+    assert (cfg.routing["medium"], cfg.routing_locked) == (["developer", "dev.gpt"],
                                                          {"medium": True, "heavy": False})
     # Editing one row in another scope leaves the lock a lower scope set on a different row alone.
     code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "local",
@@ -505,10 +505,10 @@ def test_a_locked_kind_is_never_overridden_by_learning_and_an_unlocked_one_repor
     assert cfg.routing_locked == {"medium": True, "heavy": False, "light": True}
 
     assert autopilot._route_by_weight(db, cfg, str(repo), "medium", None, None)[:2] == ("developer", False)
-    assert autopilot._route_by_weight(db, cfg, str(repo), "heavy", None, None)[:2] == ("developer-codex", True)
+    assert autopilot._route_by_weight(db, cfg, str(repo), "heavy", None, None)[:2] == ("dev.gpt", True)
     kinds = routes_read._routing_kinds(db, cfg, str(repo))
     assert (kinds["medium"].locked, kinds["medium"].learned) == (True, None)
-    assert (kinds["heavy"].model, kinds["heavy"].learned) == ("developer-heavy", "developer-codex")
+    assert (kinds["heavy"].model, kinds["heavy"].learned) == ("dev.claude-opus", "dev.gpt")
 
     # A candidate routing excludes can't be what learning runs; an explicit review_profile isn't a learned one.
     config.set_repo(str(repo), "exclude_providers", ["codex"])
@@ -2792,9 +2792,9 @@ def test_user_scope_routing_judges_the_persons_profile_not_the_repos_same_named_
 
     for where, model in ((config.user_profiles_dir(), "user-model"), (repo / ".brindle" / "agents", "repo-model")):
         where.mkdir(parents=True, exist_ok=True)
-        for name, provider in (("mine", "claude"), ("developer-codex", "codex")):
+        for name, provider in (("mine", "claude"), ("dev.gpt", "codex")):
             (where / f"{name}.md").write_text(f"---\nname: {name}\nprovider: {provider}\nmodel: {model}\n---\nWork.\n")
-    config.set_user("routing_light", "codex")       # the picker's pick, on the person's developer-codex
+    config.set_user("routing_light", "codex")       # the picker's pick, on the person's dev.gpt
     acc = Access(org_id="acme", allowed_providers=("claude", "codex"), allowed_models=("user-model",))
     monkeypatch.setattr(team_policy, "access", lambda repo: acc)
     monkeypatch.setattr(managed_models, "current", lambda repo: None)
@@ -2803,7 +2803,7 @@ def test_user_scope_routing_judges_the_persons_profile_not_the_repos_same_named_
     monkeypatch.setattr(worker_models, "_signed_in", None)
     code, body = _send("GET", f"/v1/routing?repo={repo}&scope=user&learned=0")
     assert code == 200 and {p["name"]: p["allowed"] for p in body["profiles"]}["mine"] is True
-    assert body["tiers"]["light"]["values"] == ["developer-codex"]
+    assert body["tiers"]["light"]["values"] == ["dev.gpt"]
     code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "user", "tiers": {"light": ["mine"]}})
     assert code == 200, reply
     assert [m["model"] for m in _send("GET", f"/v1/routing?repo={repo}&scope=user&learned=0")[1]["tiers"]["light"]["models"]] \
@@ -3024,11 +3024,11 @@ def test_supervisor_and_reviewer_choices_and_ordered_fallbacks_are_used(db, repo
 
     # A review walks the pick and then the fallbacks: an unavailable provider and a policy denial are skipped.
     unusable([])
-    assert agents._review_profile(db, world, None, cfg) == "reviewer-opencode"
+    assert agents._review_profile(db, world, None, cfg) == "review.opencode"
     unusable(["opencode"])
     assert agents._review_profile(db, world, None, cfg) == "reviewer-gemini"
     unusable(["opencode", "antigravity"])     # none left: the pick's own problem
-    with pytest.raises(agents.AgentError, match="'reviewer-opencode' can't run: down"):
+    with pytest.raises(agents.AgentError, match="can't run: down"):
         agents._review_profile(db, world, None, cfg)
     with pytest.raises(agents.AgentError, match="can't run"):       # asked for by name: no substitute
         agents._review_profile(db, world, "reviewer-opencode", cfg)

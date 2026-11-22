@@ -1809,7 +1809,8 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
                 extra["supervisor_profile"] = model
             if fallbacks is not None:
                 extra["supervisor_fallbacks"] = list(dict.fromkeys(fallbacks))
-    by_name = {p.name: p for p in profiles.list_profiles(None if scope == "user" else repo)}
+    profile_root = None if scope == "user" else repo
+    by_name = {p.name: p for p in profiles.list_profiles(profile_root)}
     known = set(by_name)
     named = [reviewer] if reviewer is not None else []
     for value in extra.values():     # supervisor and reviewer choices and fallbacks are profiles too
@@ -1820,7 +1821,8 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
         if not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names):
             raise ServiceError("invalid", f"{tier} must be a non-empty list of profile names")
         named.extend(names)
-    if unknown := sorted(set(named) - known):
+    resolved = {name: profiles.current_name(name, profile_root) for name in named}
+    if unknown := sorted(name for name, current in resolved.items() if current not in known):
         raise ServiceError("invalid", f"no such profile(s): {', '.join(unknown)}")
     if excluded is not None and (bad := sorted(set(map(str, excluded)) - set(providers.PROVIDERS))):
         raise ServiceError("invalid", f"no such provider(s): {', '.join(bad)}")
@@ -1828,7 +1830,7 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     if policy.applies and policy.access.error:
         raise ServiceError("forbidden", f"routing can't be changed now: {policy.access.error}", 403)
     for name in dict.fromkeys(named):
-        if why := policy.refusal(by_name[name]):
+        if why := policy.refusal(by_name[resolved[name]]):
             raise ServiceError("forbidden", why, 403)
     write, updated = setters[scope], []
     if tiers:
