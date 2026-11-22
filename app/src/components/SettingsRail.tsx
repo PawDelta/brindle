@@ -11,7 +11,7 @@ const ICONS: Record<SettingsTab, string> = {
   format: "M6 3h9l4 4v14H6zM9 10h7M9 14h7M9 18h4",
   storage: "M5 6c0-3 14-3 14 0s-14 3-14 0v12c0 3 14 3 14 0V6M5 12c0 3 14 3 14 0",
   project: "M4 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z",
-  organisation: "M4 21V4h10v17M14 10h6v11M2 21h20M8 8h2M8 12h2M8 16h2",
+  organization: "M4 21V4h10v17M14 10h6v11M2 21h20M8 8h2M8 12h2M8 16h2",
   about: "M12 4a8 8 0 1 0 0 16 8 8 0 0 0 0-16M12 11v5M12 8h.01",
 };
 
@@ -45,7 +45,7 @@ const AGENTS_ICON = "M12 4a3 3 0 1 0 0 6 3 3 0 0 0 0-6M5 20v-1a5 5 0 0 1 5-5h4a5
    own, listed under "brindle" after General. */
 export function SettingsRail({ tab, page = null, onTab, onPage, onBack }: { tab: SettingsTab | null; page?: RailPage | null; onTab(tab: SettingsTab): void; onPage?(page: RailPage): void; onBack(): void }) {
   const account = useAppState((s) => s.account);
-  const tabs = SETTINGS_TABS.filter(item => item.id !== "organisation" || (account?.signed_in && (account.role === "owner" || account.role === "admin")));
+  const tabs = SETTINGS_TABS.filter(item => item.id !== "organization" || (account?.signed_in && (account.role === "owner" || account.role === "admin")));
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-auto">
       <button type="button" onClick={onBack} className="rounded px-2 py-1 text-left text-[12.5px] text-ink-2 hover:bg-surface-2 hover:text-ink">
@@ -59,7 +59,7 @@ export function SettingsRail({ tab, page = null, onTab, onPage, onBack }: { tab:
         {tabs.map((item, index) => (
           <Fragment key={item.id}>
             {GROUPS[item.id] && <div className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-ink-3">{GROUPS[item.id]}</div>}
-            {item.id === "organisation" && <div className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-ink-3">{account?.orgs?.find(org => org.current)?.name ?? "Your organisation"}</div>}
+            {item.id === "organization" && <div className="px-2 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-ink-3">{account?.orgs?.find(org => org.current)?.name ?? "Your organization"}</div>}
             {item.id === "about" && <div role="separator" className="mx-1 mb-1 mt-2 border-t border-line" />}
             <button
               type="button"

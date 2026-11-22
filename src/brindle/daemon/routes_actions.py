@@ -2383,7 +2383,7 @@ def docs_org_api(method: str, tail: str, body: dict | None = None, *, repo: str 
     if org_id is not None and org_id != ent.org_id:
         raise ServiceError("org_changed", "your active organization changed since this was loaded; reload it", 409)
     if admin and ent.role not in ("owner", "admin"):
-        raise ServiceError("forbidden", "only an organisation owner or admin can do this", 403)
+        raise ServiceError("forbidden", "only an organization owner or admin can do this", 403)
     return docs_api(method, f"/orgs/{quote(ent.org_id, safe='')}/analysis-docs/{tail}", body, repo=repo)
 
 

@@ -1,4 +1,4 @@
-/* Settings › Team destination: where the organisation's docs are exported to
+/* Settings › Team destination: where the organization's docs are exported to
    (SharePoint or Google Drive), shown to owners and admins only (GET /account's
    `role`; the daemon refuses anyone else on PUT and DELETE too). It shows what
    is connected (GET /analysis-docs/destination), connects one and revokes it
@@ -129,7 +129,7 @@ export function TeamDestination({ client }: { client: TeamDestinationClient }) {
         <h2 id="team-destination-title" className={h2}>
           Team destination
         </h2>
-        <span className="text-xs text-ink-3">Where your organisation's plans are exported to. Owners and admins only.</span>
+        <span className="text-xs text-ink-3">Where your organization's plans are exported to. Owners and admins only.</span>
       </header>
       <div className={`${card} flex flex-col gap-s1 px-s2 py-s2 text-sm`}>
         {shown ? (

@@ -291,7 +291,7 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
       </div>
       {menu === "share" && (
         <div className={`${card} flex flex-wrap items-center gap-1 px-s2 py-s1 text-sm`} role="group" aria-label="Share with">
-          {shareTo.length === 0 && <span className="text-ink-2">There's no team or organisation you can share into.</span>}
+          {shareTo.length === 0 && <span className="text-ink-2">There's no team or organization you can share into.</span>}
           {shareTo.map((s) => {
             const on = shared.has(scopeSpec(s));
             return (

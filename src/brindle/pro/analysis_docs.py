@@ -480,7 +480,7 @@ def set_switch(on: bool, *, name: str = "store", client=None, store=None) -> dic
     client, store = _session(client, store)
     state = next(s for s in switch_states(client, store) if s["name"] == name)
     if state["locked"]:
-        raise Locked(f"your organisation has {name} {'on' if state['org'] == 'enforced_on' else 'off'} "
+        raise Locked(f"your organization has {name} {'on' if state['org'] == 'enforced_on' else 'off'} "
                      "for everyone")
     if name == "store":
         from brindle.pro import local_library

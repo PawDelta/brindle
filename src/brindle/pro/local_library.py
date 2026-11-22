@@ -468,7 +468,7 @@ def set_location(target: str, *, client=None, store=None) -> dict:
         log.info("library team not refreshed", exc_info=True)
     on = effective(_switch(target), store)
     if on != (target == SERVER):
-        raise analysis_docs.Locked(f"your organisation keeps plans {'on brindle servers' if on else 'on this Mac'} "
+        raise analysis_docs.Locked(f"your organization keeps plans {'on brindle servers' if on else 'on this Mac'} "
                                    "for everyone")
     value = "on" if target == SERVER else "off"
     follow = {name: value for name in NEEDS_SERVER if not _enforced(name, ent, store)}

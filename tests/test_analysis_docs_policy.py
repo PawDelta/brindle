@@ -95,7 +95,7 @@ def test_org_docs_shows_caches_and_updates_policy(team, monkeypatch):
     for args, why in ((["docs", "on"], "store off"),                    # the org enforces store off
                       (["docs", "off", "--switch", "share"], "share on")):   # and the person's group share on
         refused = CliRunner().invoke(app, args)
-        assert refused.exit_code == 1 and f"organisation has {why}" in refused.output and len(put) == 1
+        assert refused.exit_code == 1 and f"organization has {why}" in refused.output and len(put) == 1
     login(team, claims(org_id="org_personal", plan="free", features=[]))
     policy["switches"].pop("store")
     team.routes["GET /me/analysis-docs/settings"] = lambda f, h: (200, {"switches": {}})

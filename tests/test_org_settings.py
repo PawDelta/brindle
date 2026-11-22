@@ -1,4 +1,4 @@
-"""The desktop organisation editor through the real authenticated routes."""
+"""The desktop organization editor through the real authenticated routes."""
 from copy import deepcopy
 
 import pytest
