@@ -153,7 +153,7 @@ class RepoConfig:
     prompt_cache_prefix: bool = True
     review_rounds: int = 2            # suggested fix-round cap; notify the supervisor once, then keep fixing
     review_stall_stop: bool = True     # past the cap, hand repeated findings to the supervisor
-    # Retry a failed heavy task once on developer-heavy (Fable) before asking the supervisor.
+    # Retry a failed heavy task once on developer-heavy (Opus) before asking the supervisor.
     # None: on, except where the worker runs on a cloud account (Bedrock, Vertex, Foundry),
     # which may not have Fable; true or false forces it (see brindle.pipeline.fable_enabled).
     fable_escalation: bool | None = None

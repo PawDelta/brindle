@@ -34,6 +34,7 @@ from brindle import (
     keys_cmds,
     keystore,
     knowledge,
+    model_names,
     profiles,
     provider_health,
     quota,
@@ -778,10 +779,11 @@ def _routing(db: DB, request: Request, learn: bool) -> Any:
     rows = []
     for p in every:
         errors, warnings = profiles.lint_profile(p.name, lib)
+        model = autopilot.effective_profile_model(p, lib) or None
         rows.append(RoutingProfileDTO(
             lint_errors=errors, lint_warnings=warnings,
             name=p.name, provider=p.provider, provider_name=provider_name(p.provider),
-            model=autopilot.effective_profile_model(p, lib) or None,
+            model=model, **model_names.describe(p, model),
             installed=here[p.name],
             signed_in=here[p.name] and signed[(p.provider, tuple(sorted(p.env.items())))],
             excluded=p.provider in cfg.exclude_providers, cost_tier=autopilot.cost_tier(p.name, cfg, lib),

@@ -11214,6 +11214,30 @@
               "title": "Cost Tier",
               "type": "string"
             },
+            "display": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Display"
+            },
+            "effort": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Effort"
+            },
             "excluded": {
               "title": "Excluded",
               "type": "boolean"
@@ -11237,6 +11261,18 @@
               },
               "title": "Lint Warnings",
               "type": "array"
+            },
+            "maker": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Maker"
             },
             "model": {
               "anyOf": [
@@ -11285,6 +11321,18 @@
             "signed_in": {
               "title": "Signed In",
               "type": "boolean"
+            },
+            "tool": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Tool"
             }
           },
           "required": [
@@ -11695,6 +11743,30 @@
           "title": "Cost Tier",
           "type": "string"
         },
+        "display": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Display"
+        },
+        "effort": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effort"
+        },
         "excluded": {
           "title": "Excluded",
           "type": "boolean"
@@ -11718,6 +11790,18 @@
           },
           "title": "Lint Warnings",
           "type": "array"
+        },
+        "maker": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maker"
         },
         "model": {
           "anyOf": [
@@ -11766,6 +11850,18 @@
         "signed_in": {
           "title": "Signed In",
           "type": "boolean"
+        },
+        "tool": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Tool"
         }
       },
       "required": [
