@@ -213,10 +213,60 @@ def _strip_shell_comment(line: str) -> str:
 
 
 def _split_shell_segments(text: str) -> list[str]:
-    """Split a shell snippet on command separators (``&&``, ``||``, ``;``, ``->``)."""
-    protected = text.replace(r"\|", "\x00")
-    parts = re.split(r"\s*(?:&&|\|\||;|->)\s*", protected)
-    return [p.replace("\x00", "|").strip() for p in parts if p.strip()]
+    """Split a shell snippet on unquoted command separators (``&&``, ``||``, ``;``, ``->``)."""
+    # Protect markdown-escaped pipes (`\|`) before scanning.
+    src = text.replace(r"\|", "\x00")
+    parts: list[str] = []
+    buf: list[str] = []
+    in_single = False
+    in_double = False
+    escaped = False
+    i = 0
+    n = len(src)
+    while i < n:
+        ch = src[i]
+        if escaped:
+            buf.append(ch)
+            escaped = False
+            i += 1
+            continue
+        if ch == "\\" and not in_single:
+            buf.append(ch)
+            escaped = True
+            i += 1
+            continue
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            buf.append(ch)
+            i += 1
+            continue
+        if not in_single and not in_double:
+            two = src[i:i + 2]
+            if two in ("&&", "||", "->"):
+                seg = "".join(buf).replace("\x00", "|").strip()
+                if seg:
+                    parts.append(seg)
+                buf = []
+                i += 2
+                continue
+            if ch == ";":
+                seg = "".join(buf).replace("\x00", "|").strip()
+                if seg:
+                    parts.append(seg)
+                buf = []
+                i += 1
+                continue
+        buf.append(ch)
+        i += 1
+    seg = "".join(buf).replace("\x00", "|").strip()
+    if seg:
+        parts.append(seg)
+    return parts
 
 
 def _consume_global_options(
@@ -391,15 +441,22 @@ def _scan_prose_text(
     *,
     prior_cmd_offsets: set[int] | None = None,
     prior_cmd_at_start: bool = False,
+    in_code: list[bool] | None = None,
 ) -> bool:
     """Find ``brindle <subcommand>`` invocations across visible prose ``text``.
 
-    Uses ``char_lines[offset]`` for exact 1-based source line numbers. Returns
-    whether ``text`` ends in a sentence containing a ``brindle`` CLI invocation.
+    Uses ``char_lines[offset]`` for exact 1-based source line numbers. Characters
+    marked True in ``in_code`` belong to inline code spans retained only so they
+    can complete an adjacent prose invocation, and never start a standalone prose
+    or quoted invocation of their own. Returns whether ``text`` ends in a
+    sentence containing a ``brindle`` CLI invocation.
     """
     cmd_positions: list[int] = sorted(prior_cmd_offsets) if prior_cmd_offsets else []
     if prior_cmd_at_start:
         cmd_positions.insert(0, 0)
+
+    def is_in_code(idx: int) -> bool:
+        return bool(in_code and idx < len(in_code) and in_code[idx])
 
     def has_prior_cmd_in_sentence(pos: int) -> bool:
         prev = None
@@ -420,6 +477,8 @@ def _scan_prose_text(
     # Mask matched prompt lines so comments/arguments are not rescanned as prose.
     prompt_chars = list(text)
     for m in re.finditer(r"(?m)^\s*(?:\$|%)\s+brindle\s+(.+)$", text):
+        if is_in_code(m.start()):
+            continue
         lineno = char_lines[m.start()]
         for tokens in _extract_command_candidates(
             _strip_shell_comment(m.group(0)), tree, global_options
@@ -435,6 +494,8 @@ def _scan_prose_text(
 
     # 2. Quoted invocations (`"brindle bogus-cmd"` or `'brindle bogus-cmd'`).
     for qm in _PROSE_QUOTED_RE.finditer(scan_text):
+        if is_in_code(qm.start()):
+            continue
         lineno = char_lines[qm.start()]
         for tokens in _parse_after_brindle(qm.group(2).strip(), tree, global_options):
             bad = _validate_command_tokens(tokens, tree, prose=True)
@@ -447,6 +508,8 @@ def _scan_prose_text(
     # 3. Standalone `brindle ...` invocation boundaries anywhere in visible prose.
     for bm in _PROSE_BRINDLE_RE.finditer(scan_text):
         pos = bm.start()
+        if is_in_code(pos):
+            continue
         lineno = char_lines[pos]
         before_raw = scan_text[max(0, pos - 60):pos]
         before_clause = re.split(r"\n\s*\n|[.;?!]", before_raw)[-1]
@@ -514,6 +577,7 @@ def _scan_prose_line(
     record,
     *,
     prior_cmd_offsets: set[int] | None = None,
+    in_code: list[bool] | None = None,
 ) -> bool:
     """Find ``brindle <subcommand>`` invocations in a single line of plain prose."""
     return _scan_prose_text(
@@ -523,6 +587,7 @@ def _scan_prose_line(
         global_options,
         record,
         prior_cmd_offsets=prior_cmd_offsets,
+        in_code=in_code,
     )
 
 
@@ -820,49 +885,70 @@ def _check_markdown(
     unmasked = "\n".join("" if i in fenced_line_indices else ln for i, ln in enumerate(lines))
 
     code_spans: list[tuple[int, int, int, str]] = []
-    prose_parts: list[str] = []
-    cmd_marker = "\x01"
+    # Build per-line visible prose text with per-character code-span provenance so inline
+    # code fragments (e.g. ``Run brindle `bogus-cmd` ``) complete adjacent prose invocations
+    # without running the prose/quoted scanner over arbitrary shell code (e.g. `` `echo "brindle bogus"` ``).
+    prose_chunks: list[tuple[str, bool, bool]] = []  # (text, is_code_span, is_cmd_marker)
     last_end = 0
     for m in re.finditer(r"(`+)([^`]+?)\1", unmasked):
         start_pos, end_pos = m.start(), m.end()
-        prose_parts.append(unmasked[last_end:start_pos])
+        plain = unmasked[last_end:start_pos]
+        if plain:
+            cleaned = _HTML_TAG_RE.sub(lambda tm: "\n" * tm.group(0).count("\n"), plain)
+            cleaned = _MD_EMPHASIS_RE.sub(r"\1", cleaned)
+            prose_chunks.append((cleaned, False, False))
         span_line = unmasked.count("\n", 0, start_pos) + 1
         span_text = " ".join(m.group(2).split())
         code_spans.append((start_pos, end_pos, span_line, span_text))
         is_cmd_span = _is_self_contained_brindle_code(span_text)
-        # Self-contained `brindle ...` code spans are validated directly and replaced with
-        # a command marker so prose after them isn't glued onto the command. Other inline
-        # code spans (e.g. ``Run brindle `bogus-cmd` ``) keep their visible text in prose.
         nl_count = m.group(0).count("\n")
         if is_cmd_span:
-            prose_parts.append(("\n" * nl_count) + cmd_marker)
+            prose_chunks.append(("\n" * nl_count, False, True))
+        elif span_text.strip() == "brindle":
+            # Bare `brindle` code span can start a split invocation (`brindle` `bogus-cmd`).
+            prose_chunks.append((m.group(2), False, False))
         else:
-            prose_parts.append(m.group(2))
+            prose_chunks.append((m.group(2), True, False))
         last_end = end_pos
         check_command_snippet(span_text, span_line)
-    prose_parts.append(unmasked[last_end:])
+    tail_plain = unmasked[last_end:]
+    if tail_plain:
+        cleaned = _HTML_TAG_RE.sub(lambda tm: "\n" * tm.group(0).count("\n"), tail_plain)
+        cleaned = _MD_EMPHASIS_RE.sub(r"\1", cleaned)
+        prose_chunks.append((cleaned, False, False))
 
-    # Scan plain prose lines for unformatted `brindle <subcommand>` invocations.
-    # Strip raw inline HTML tags (e.g. `<img alt="brindle logo">`) and markdown emphasis
-    # while preserving exact line numbers and code-command positions.
-    prose_text = _HTML_TAG_RE.sub(lambda m: "\n" * m.group(0).count("\n"), "".join(prose_parts))
-    for lineno, prose_line in enumerate(prose_text.splitlines(), start=1):
-        clean_line = _MD_EMPHASIS_RE.sub(r"\1", prose_line)
-        cmd_offsets: set[int] = set()
-        stripped_chars: list[str] = []
-        for ch in clean_line:
-            if ch == cmd_marker:
-                cmd_offsets.add(len(stripped_chars))
+    # Split visible prose chunks into 1-based lines while preserving `in_code` and `cmd_offsets`.
+    cur_lineno = 1
+    line_chars: list[str] = []
+    line_in_code: list[bool] = []
+    line_cmd_offsets: set[int] = set()
+
+    def flush_md_line() -> None:
+        if line_chars:
+            _scan_prose_line(
+                "".join(line_chars),
+                cur_lineno,
+                cli_tree,
+                global_options,
+                record,
+                prior_cmd_offsets=line_cmd_offsets,
+                in_code=line_in_code,
+            )
+            line_chars.clear()
+            line_in_code.clear()
+            line_cmd_offsets.clear()
+
+    for chunk_text, chunk_in_code, is_marker in prose_chunks:
+        for ch in chunk_text:
+            if ch == "\n":
+                flush_md_line()
+                cur_lineno += 1
             else:
-                stripped_chars.append(ch)
-        _scan_prose_line(
-            "".join(stripped_chars),
-            lineno,
-            cli_tree,
-            global_options,
-            record,
-            prior_cmd_offsets=cmd_offsets,
-        )
+                line_chars.append(ch)
+                line_in_code.append(chunk_in_code)
+        if is_marker:
+            line_cmd_offsets.add(len(line_chars))
+    flush_md_line()
 
     # Inline config.json key references.
     after_target_re = re.compile(
@@ -1129,19 +1215,21 @@ def _check_html(
     for block in parser.inline_blocks:
         prose_chars: list[str] = []
         prose_char_lines: list[int] = []
+        prose_in_code: list[bool] = []
         cmd_offsets: set[int] = set()
 
-        def append_visible(seg_line: int, seg_text: str) -> None:
+        def append_visible(seg_line: int, seg_text: str, *, code_flag: bool) -> None:
             cur_line = seg_line
             for ch in seg_text:
                 prose_chars.append(ch)
                 prose_char_lines.append(cur_line)
+                prose_in_code.append(code_flag)
                 if ch == "\n":
                     cur_line += 1
 
         for i, (is_code, line, seg_text) in enumerate(block):
             if not is_code:
-                append_visible(line, seg_text)
+                append_visible(line, seg_text, code_flag=False)
                 continue
 
             is_cmd_span = _is_self_contained_brindle_code(seg_text)
@@ -1151,10 +1239,15 @@ def _check_html(
                 cmd_offsets.add(len(prose_chars))
                 prose_chars.append(" ")
                 prose_char_lines.append(line)
+                prose_in_code.append(False)
+            elif seg_text.strip() == "brindle":
+                # Bare `<code>brindle</code>` can start a split invocation.
+                append_visible(line, seg_text, code_flag=False)
             else:
-                # Retain visible text across inline `<code>` boundaries so commands like
-                # `<p>Run brindle <code>bogus-cmd</code> ...</p>` are detected as one invocation.
-                append_visible(line, seg_text)
+                # Retain visible text with code provenance so fragments complete adjacent prose
+                # invocations (`Run brindle <code>bogus-cmd</code>`), while arbitrary shell code
+                # (`<code>echo "brindle bogus-cmd"</code>`) is not rescanned as prose.
+                append_visible(line, seg_text, code_flag=True)
 
             check_command_snippet(seg_text, line)
             if _CONFIG_JSON_RE.search(seg_text):
@@ -1182,6 +1275,7 @@ def _check_html(
                 global_options,
                 record,
                 prior_cmd_offsets=cmd_offsets,
+                in_code=prose_in_code,
             )
 
     return findings

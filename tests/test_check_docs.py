@@ -16,6 +16,7 @@ def test_known_commands_and_keys_pass_and_unknowns_are_reported(tmp_path, capsys
         "Run `brindle init`, `brindle -s codex start`, `brindle -- doctor`, `brindle agent kill`, or `brindle keys set/unset/list`.\n"
         "Run brindle doctor to check the environment.\n"
         "$ brindle doctor # brindle bogus-cmd is not supported\n"
+        "Print a diagnostic with `echo \"brindle bogus-cmd\"`.\n"
         "Set `\"max_agents\": 4` in `.brindle/config.json`.\n"
         "\n"
         "In `package.json`:\n"
@@ -67,6 +68,7 @@ def test_known_commands_and_keys_pass_and_unknowns_are_reported(tmp_path, capsys
     bad_html = tmp_path / "bad.html"
     bad_html.write_text(
         "<p>Use <code>brindle ls</code> not <code>brindle html-nope</code>.</p>\n"
+        "<p>Print a diagnostic with <code>echo \"brindle bogus-cmd\"</code>.</p>\n"
         "<p>The brindle html-unprefixed command and brindle <strong>inline-split-nope</strong> fail.</p>\n"
         "<p>brindle agent htmlnested lists agents; run brindle <code>code-split-nope</code> too.</p>\n"
         "<p>Set <code>\"html_bad_key\": 1</code> in <code>.brindle/config.json</code>.</p>\n"
@@ -90,10 +92,10 @@ def test_known_commands_and_keys_pass_and_unknowns_are_reported(tmp_path, capsys
         f"{bad_md}:8: unknown config key: fake_setting",
         f"{bad_md}:19: unknown config key: unknown_json_key",
         f"{bad_html}:1: unknown command: brindle html-nope",
-        f"{bad_html}:2: unknown command: brindle html-unprefixed",
-        f"{bad_html}:2: unknown command: brindle inline-split-nope",
-        f"{bad_html}:3: unknown command: brindle agent htmlnested",
-        f"{bad_html}:3: unknown command: brindle code-split-nope",
-        f"{bad_html}:4: unknown config key: html_bad_key",
-        f"{bad_html}:6: unknown command: brindle pre-nope",
+        f"{bad_html}:3: unknown command: brindle html-unprefixed",
+        f"{bad_html}:3: unknown command: brindle inline-split-nope",
+        f"{bad_html}:4: unknown command: brindle agent htmlnested",
+        f"{bad_html}:4: unknown command: brindle code-split-nope",
+        f"{bad_html}:5: unknown config key: html_bad_key",
+        f"{bad_html}:7: unknown command: brindle pre-nope",
     ]
