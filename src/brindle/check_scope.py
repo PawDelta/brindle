@@ -263,15 +263,86 @@ def pr_diff(ws: Workspace) -> tuple[str, list[str]] | None:
 
 
 def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, list[str]] | None,
-            max_files: int = 0, max_tests: int = 0) -> str | None:
+            max_files: int = 0, max_tests: int = 0, *, sha: str | None = None) -> str | None:
     """What to run for check ``cmd`` in ``ws`` given its ``changed_files``:
     ``cmd`` itself, a narrower command, or None when nothing changed.
     ``max_files`` (0: no cap): more selected test files than this run only
     the branch's own test files and the changed modules' namesake tests,
     after a one-line note saying so. With a coverage map, ``max_tests`` (0:
-    no cap) caps the tests instead (``_by_coverage``)."""
+    no cap) caps the tests instead (``_by_coverage``). With ``sha`` (for a
+    clean checkout at commit ``sha``), the computed command is cached on disk
+    so ``_warm-checks``, ``_review-after-checks`` and the merge gate share it."""
     if scope is None or diff is None:
         return cmd
+    cache_path = _scope_cache_path(ws, cmd, scope, diff, max_files, max_tests, sha) if sha else None
+    if cache_path is not None:
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if isinstance(cached, dict) and "run" in cached:
+                return cached["run"]
+        except (OSError, ValueError):
+            pass
+    run = _compute_command(ws, cmd, scope, diff, max_files, max_tests)
+    if cache_path is not None:
+        _write_scope_cache(cache_path, run)
+    return run
+
+
+SCOPE_CACHE_TTL = 86400   # seconds cached scoped commands stay on disk
+
+
+def _scope_cache_path(ws: Workspace, cmd: str, scope: CheckScope, diff: tuple[str, list[str]],
+                      max_files: int, max_tests: int, sha: str) -> Path | None:
+    import hashlib
+
+    from brindle import codemap, coverage_map
+    from brindle.config import brindle_home
+
+    repo_root = getattr(ws, "repo_root", None)
+    if not repo_root:
+        return None
+    if scope.coverage:
+        mp = coverage_map.map_path(repo_root, cmd)
+        try:
+            st = mp.stat()
+        except OSError:
+            return None   # no map on disk yet: don't cache the full-run fallback
+        stamp: object = [st.st_ino, st.st_mtime_ns, st.st_size]
+    else:
+        gp = codemap.graph_path(ws)
+        try:
+            st = gp.stat() if gp is not None else None
+        except OSError:
+            st = None
+        stamp = [str(gp), st.st_ino, st.st_mtime_ns, st.st_size] if st is not None else None
+    payload = json.dumps([str(repo_root), sha, diff[0], diff[1], cmd, scope.coverage,
+                          list(scope.full_when), max_files, max_tests, stamp], separators=(",", ":"))
+    repo_key = hashlib.sha256(str(repo_root).encode()).hexdigest()[:16]
+    entry_key = hashlib.sha256(payload.encode()).hexdigest()[:24]
+    return brindle_home() / "scope-cache" / repo_key / f"{entry_key}.json"
+
+
+def _write_scope_cache(path: Path, run: str | None) -> None:
+    import time
+
+    from brindle import coverage_map
+
+    try:
+        coverage_map._write_atomic(path, json.dumps({"run": run}, separators=(",", ":")))
+        cutoff = time.time() - SCOPE_CACHE_TTL
+        for old in path.parent.glob("*.json"):
+            if old != path:
+                try:
+                    if old.stat().st_mtime < cutoff:
+                        old.unlink(missing_ok=True)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
+def _compute_command(ws: Workspace, cmd: str, scope: CheckScope, diff: tuple[str, list[str]],
+                     max_files: int = 0, max_tests: int = 0) -> str | None:
     base, changed = diff
     if not changed:
         return None

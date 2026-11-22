@@ -190,7 +190,7 @@ def test_plan_board_links_dispatch_and_reads_recorded_checks(db, session, monkey
     monkeypatch.setattr(gates, "head", lambda ws_: sha[0])
     monkeypatch.setattr(gates.git, "out", lambda *a, **kw: f"tree-{sha[0]}")
     monkeypatch.setattr(gates.git, "dirty_files", lambda path: [])
-    monkeypatch.setattr(gates, "_scoped", lambda ws_, cmd, diff: cmd)
+    monkeypatch.setattr(gates, "_scoped", lambda ws_, cmd, diff, sha=None: cmd)
     run_queued = gates._run_queued
     monkeypatch.setattr(gates, "_run_queued", lambda *a: (outcome[0], "recorded output"))
 
