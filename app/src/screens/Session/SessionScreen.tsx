@@ -162,7 +162,11 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
     : panes.unsure ? "engine not heard since connecting" : null;
   const looksStopped = session ? session.status === "paused" || (tree === null && synced) : tree === null && synced;
   const restarting = returning || (!!unread && looksStopped);
-  const sessionStatus = restarting ? "resuming" : session?.status ?? null;
+  // A feed read begun before the pane's release can still arrive saying resuming. The gate's
+  // barrier keeps that row stale until a read begun after release answers; use the restored root
+  // meanwhile, so another session's recovery update cannot cover this one's live pane again.
+  const staleResume = session?.status === "resuming" && panes.back?.includes(root) && panes.stale?.includes(root);
+  const sessionStatus = restarting ? "resuming" : staleResume ? tree?.agent.status ?? null : session?.status ?? null;
   const paused = !restarting && (session ? isPaused(session) : tree === null && synced);
   // A session seen live here that pauses under the view (a fresh start in its checkout, a pause from
   // elsewhere) stays on screen and says so, with Reopen; one opened already paused doesn't.
