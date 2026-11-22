@@ -225,13 +225,21 @@ describe("the Inbox queue", () => {
     }
   });
 
-  it("Done on a team row the Library refuses to mark read keeps the row, with the reason", async () => {
-    const { client } = mount([progress]);
-    vi.spyOn(client, "markInboxRead").mockRejectedValue(new Error("sign in to brindle Pro to mark Inbox rows read"));
+  it.each(["row", "all"])("Done on a team row the Library refuses keeps its error until marked read: %s", async (scope) => {
+    const { client } = mount([progress, comment(11, "u_chen", "c:11")]);
+    vi.spyOn(client, "markInboxRead").mockRejectedValueOnce(new Error("Library refused the read mark"));
     await waitFor(() => expect(row("signoff_progress")).toBeTruthy());
     fireEvent.click(within(row("signoff_progress")).getByTestId("row-done"));
-    await waitFor(() => expect(within(row("signoff_progress")).getByRole("alert").textContent).toContain("sign in to brindle Pro"));
+    await waitFor(() => expect(within(row("signoff_progress")).getByRole("alert")).toBeTruthy());
+    expect(within(row("shared_doc_comment")).queryByRole("alert")).toBeNull();
     expect(document.querySelector("[data-testid=inbox-line]")).toBeNull();
+    await opened("shared_doc_comment");
+    await waitFor(() => expect(row("shared_doc_comment").dataset.read).toBe("true"));
+    expect(within(row("signoff_progress")).getByRole("alert")).toBeTruthy();
+    if (scope === "row") await opened("signoff_progress");
+    else fireEvent.click(screen.getByTestId("mark-all-read"));
+    await waitFor(() => expect(row("signoff_progress").dataset.read).toBe("true"));
+    expect(within(row("signoff_progress")).queryByRole("alert")).toBeNull();
   });
 
   it("a team row's Done is sent once however often it is pressed, and a late answer never hides a row put back since", async () => {
