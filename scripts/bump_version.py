@@ -24,7 +24,6 @@ SEMVER = re.compile(r"\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?")
 EDITS = {
     "pyproject.toml": (r'(?m)^(version = ")([^"]+)(")', 1),
     "uv.lock": (r'(?m)(^name = "brindle"\nversion = ")([^"]+)(")', 1),
-    "docs/guide.md": (r"(`brindle )(\d+\.\d+\.\d+[^`\s]*)(`\))", 1),
     "app/package.json": (r'(?m)^(  "version": ")([^"]+)(")', 1),
     "app/package-lock.json": (r'(?m)^(  "version": ")([^"]+)(")|^(    "": \{\n(?:      .*\n)*?      "version": ")([^"]+)(")', 2),
 }
