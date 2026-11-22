@@ -128,23 +128,28 @@ def _codex(lines: list[str], provider: str) -> Prompt | None:
         target = " ".join(ln.strip() for ln in head if ln.strip() and not ln.strip().startswith("Reason:"))
         return Prompt("permission", provider, question, target, "edit" if "edits" in question else "use",
                       options=options, keys=True)
-    command, reason, field = [], [], None
-    for ln in head:
+    starts = [i for i, ln in enumerate(head) if ln.strip().startswith("$ ")]
+    if not starts:
+        return None
+    # The command is everything from its "$ " line to the menu, blank lines
+    # included: a later line is still part of what Enter would run.
+    block = [ln.strip() for ln in head[starts[0]:]]
+    block[0] = block[0][2:]
+    while block and not block[-1]:
+        block.pop()
+    reason, field = [], None
+    for ln in head[:starts[0]]:
         text = ln.strip()
         if not text:
             field = None
-        elif text.startswith("$ "):
-            command = [text[2:]]
-            field = command
         elif text.startswith("Reason:"):
             reason = [text.removeprefix("Reason:").strip()]
             field = reason
         elif field is not None:
             field.append(text)
-    if not command:
-        return None
-    return Prompt("permission", provider, question, "\n".join(command), "run", " ".join(reason), len(command) == 1,
-                  options, keys=True, sandbox=True)
+    # Exact only as one line, the only "$ " on screen: anything else may be more than the rules see.
+    return Prompt("permission", provider, question, "\n".join(block), "run", " ".join(reason),
+                  len(block) == 1 and len(starts) == 1, options, keys=True, sandbox=True)
 
 
 CLAUDE_ASK = re.compile(r"Do you want to (?:proceed|make this edit[^?]*|create [^?]*|allow[^?]*)\?")
@@ -269,7 +274,7 @@ def _one_line(text: str, width: int = 300) -> str:
     return text if len(text) <= width else text[: width - 1] + "…"
 
 
-def _who(db: DB, agent: Agent) -> str:
+def who(db: DB, agent: Agent) -> str:
     ws = db.get_workspace(agent.workspace_id)
     label = LABEL.get(agent.provider, agent.provider.capitalize())
     return f"The {label} worker on branch {ws.branch}" if ws else f"A {label} worker"
@@ -277,33 +282,42 @@ def _who(db: DB, agent: Agent) -> str:
 
 def sentence(db: DB, agent: Agent, prompt: Prompt) -> str:
     """What the person reads: who asks, for what, and why, in one sentence."""
-    who = _who(db, agent)
+    return f"{who(db, agent)} {predicate(prompt)}"
+
+
+def predicate(prompt: Prompt) -> str:
+    """``sentence`` after who asks: what the app shows beside the worker's name."""
     why = _one_line(prompt.reason).rstrip(".?!")
     because = f", saying “{why}”" if why else ""
     if prompt.kind == "permission":
         if not prompt.target:
-            return f"{who} is waiting on a permission prompt brindle can't read; open its terminal to see what it asks."
+            return "is waiting on a permission prompt brindle can't read; open its terminal to see what it asks."
         verb = {"run": "run", "edit": "edit"}.get(prompt.action, "use")
         where = " outside its sandbox" if prompt.sandbox else ""
-        return f"{who} wants to {verb} {_one_line(prompt.target)}{where}{because}."
+        return f"wants to {verb} {_one_line(prompt.target)}{where}{because}."
     if prompt.kind == "trust":
-        return f"{who} is asking whether to trust a folder, which brindle never answers for a running worker."
+        return "is asking whether to trust a folder, which brindle never answers for a running worker."
     question = _one_line(prompt.question).rstrip(".:")
     if not question:
-        return f"{who} is waiting on a prompt brindle can't read; open its terminal to see it."
+        return "is waiting on a prompt brindle can't read; open its terminal to see it."
     choices = ", ".join(_one_line(t, 60) for _, t, _ in prompt.options[:6])
-    return f"{who} asks “{question}”" + (f" (options: {choices})." if choices else ".")
+    return f"asks “{question}”" + (f" (options: {choices})." if choices else ".")
+
+
+def _note_head(db: DB, agent: Agent, prompt: Prompt) -> str:
+    """A supervisor note's first line, the one its chat shows: which worker, what it waits on."""
+    ws = db.get_workspace(agent.workspace_id)
+    where = f" on branch `{ws.branch}`" if ws else ""
+    what = {"trust": "a trust dialog", "menu": "a menu", "question": "a question",
+            "permission": "a permission prompt", "unknown": "a prompt brindle can't read"}[prompt.kind]
+    return f"[brindle] Worker {agent.id} ({agent.profile}){where} is waiting on {what}: {sentence(db, agent, prompt)}"
 
 
 def supervisor_note(db: DB, agent: Agent, prompt: Prompt, screen: str = "") -> str:
     """The structured message its supervisor gets for a prompt that isn't a
     permission it can answer with answer_permission. ``screen``: shown,
     redacted, only for a prompt brindle couldn't read."""
-    ws = db.get_workspace(agent.workspace_id)
-    where = f" on branch `{ws.branch}`" if ws else ""
-    what = {"trust": "a trust dialog", "menu": "a menu", "question": "a question",
-            "permission": "a permission prompt", "unknown": "a prompt brindle can't read"}[prompt.kind]
-    lines = [f"[brindle] Worker {agent.id} ({agent.profile}){where} is waiting on {what}: {sentence(db, agent, prompt)}"]
+    lines = [_note_head(db, agent, prompt)]
     if prompt.options:
         lines.append("Options:\n" + "\n".join(f"  {n}. {_one_line(t, 120)}" for n, t, _ in prompt.options))
     if prompt.kind == "unknown" and screen.strip():
@@ -476,19 +490,39 @@ def _route_permission(db: DB, agent: Agent, prompt: Prompt, fresh: dict) -> str 
         if shown is None or shown.key != prompt.key:
             _set(db, agent, {**fresh, "stage": "gone"})
             return None     # answered or withdrawn meanwhile: nothing is left to route
-    # Its supervisor answers with answer_permission, which only works where brindle can press the answer.
-    supervisor = permission_routing.supervisor_for(db, agent, decision) if prompt.keys else None
+    # Its supervisor's first, as a hook's ask is; the person's once it escalates or its time is up.
+    supervisor = permission_routing.supervisor_for(db, agent, decision)
     seconds = cfg.permission_supervisor_hold_seconds
     why = decision.reason.removesuffix("; asking the user")
     if prompt.sandbox:
         why += "; Codex asks at its own prompt to run it outside its sandbox"
     if prompt.reason:
         why += f" (its reason: {_one_line(prompt.reason)})"
-    if supervisor is not None and seconds > 0 and permission_routing.ask_supervisor(
-            db, agent, supervisor, prompt.request_id, _request(db, agent, prompt), why, seconds):
+    if supervisor is not None and seconds > 0 and (
+            permission_routing.ask_supervisor(db, agent, supervisor, prompt.request_id, _request(db, agent, prompt),
+                                              why, seconds) if prompt.keys
+            else _ask_unpressable(db, agent, supervisor, prompt, why, seconds)):
         _set(db, agent, {**fresh, "stage": "supervisor", "until": time.time() + seconds})
         return "supervisor"
     return _to_person(db, agent, prompt, fresh)
+
+
+def _ask_unpressable(db: DB, agent: Agent, supervisor: Agent, prompt: Prompt, why: str, seconds: float) -> bool:
+    """A permission at a prompt whose keys brindle doesn't know (Antigravity's,
+    OpenCode's): its supervisor decides whether the person sees it, structured."""
+    from brindle import agents
+
+    body = (f"{_note_head(db, agent, prompt)} ({why}).\n\n"
+            "brindle can't press an answer on this CLI's prompt. If the person should decide it, "
+            f"answer_permission(agent_id=\"{agent.id}\", request_id=\"{prompt.request_id}\", answer=\"escalate\", "
+            "reason=\"...\"); if it shouldn't run, send the worker guidance with send_message or requeue its task. "
+            f"After {round(seconds)}s the person is asked.")
+    try:
+        agents._send_message(db, supervisor, body, None)
+    except (agents.AgentError, tmux.TmuxError, OSError):
+        log.info("brindle: couldn't ask supervisor %s about %s's prompt", supervisor.id, agent.id)
+        return False
+    return True
 
 
 def _to_person(db: DB, agent: Agent, prompt: Prompt, mark: dict) -> str:
@@ -539,6 +573,15 @@ def with_supervisor(db: DB, agent: Agent) -> bool:
     mark = _mark(db, agent)
     return (bool(mark) and mark["since"] == _since(agent) and mark["stage"] == "supervisor"
             and _stage(db, agent, mark) == "supervisor")
+
+
+def withheld(db: DB, agent: Agent) -> bool:
+    """Whether what ``agent`` waits on isn't the person's yet: a decision is
+    under way (another process claimed it), its supervisor has it, or the
+    rules answered it and the worker is only now moving on."""
+    mark = _mark(db, agent)
+    return (bool(mark) and mark["since"] == _since(agent)
+            and _stage(db, agent, mark) in ("deciding", "supervisor", "answered", "gone"))
 
 
 def described(db: DB, agent: Agent) -> str | None:

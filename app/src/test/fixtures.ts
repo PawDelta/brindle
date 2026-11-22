@@ -98,6 +98,30 @@ export const permission: InboxItemDTO = {
   },
 };
 
+/* A worker's own prompt the engine read off its pane (worker_prompts) and left to the person:
+   a Codex sandbox escalation, worded as a sentence, answered from here (service/inbox.pending_permissions). */
+export const paneEscalation: InboxItemDTO = {
+  kind: "permission",
+  reason: "asks permission at its own prompt",
+  agent_id: "w1",
+  workspace_id: "proj/feat-ls",
+  root_id: "sup1",
+  detail: "The Codex worker on branch feat/ls wants to run python -m pytest -q -n 6 tests outside its sandbox, saying “Run the tests with network access”.",
+  permission: {
+    via: "pane",
+    request_id: "pane-0123456789abcdef",
+    digest: "k1",
+    tool: "Bash",
+    kind: "bash",
+    target: "python -m pytest -q -n 6 tests",
+    wording: "wants to run python -m pytest -q -n 6 tests outside its sandbox, saying “Run the tests with network access”.",
+    choices: [
+      { choice: "allow_once", label: "Allow" },
+      { choice: "deny", label: "Deny" },
+    ],
+  },
+};
+
 /* A prompt on the CLI's own screen that brindle can't answer by keys: only its terminal can. */
 export const permissionInTerminal: InboxItemDTO = {
   kind: "permission",

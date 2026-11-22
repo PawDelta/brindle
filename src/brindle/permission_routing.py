@@ -202,6 +202,10 @@ def answer(db: DB, callers: set[str], worker_id: str, request_id: str, choice: s
         raise RoutingError("forbidden", f"only {worker.id}'s own supervisor answers its permission requests", 403)
     if request_id.startswith(worker_prompts.PREFIX):
         # A permission at its CLI's own prompt, read off its pane (brindle.worker_prompts).
+        shown = worker_prompts.current(db, worker) if choice != "escalate" else None
+        if shown is not None and shown.request_id == request_id and not shown.keys:
+            raise RoutingError("conflict", f"brindle can't press an answer on {worker.id}'s prompt: escalate it to "
+                                           "the person, or send the worker guidance with send_message")
         ok = (worker_prompts.escalate(db, worker, request_id) if choice == "escalate"
               else worker_prompts.answer(db, worker, request_id, choice, " ".join(reason.split())[:REASON_CHARS],
                                          by="supervisor"))
