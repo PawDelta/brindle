@@ -4,8 +4,7 @@
      behalf (the Tauri CLI merges this file into the bundle's Info.plist). Only
      for prompts it attributes to the app: its own, and the engine's and agents'
      when the daemon is the app's child (launchd's job switched off). Otherwise
-     those are the engine's helper app's (scripts/engine/helper/Info.plist;
-     docs/investigations/macos-prompts.md). -->
+     those are the engine's helper app's (scripts/engine/helper/Info.plist). -->
 <plist version="1.0">
 <dict>
   <key>NSFileProviderDomainUsageDescription</key>

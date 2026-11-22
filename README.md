@@ -17,7 +17,7 @@
 <p align="center">
   <a href="https://pawdelta.com/brindle/">Website</a> ·
   <a href="https://pawdelta.com/brindle/docs/">Docs</a> ·
-  <a href="https://pawdelta.com/brindle/getting-started/">Download the app</a> ·
+  <a href="https://pawdelta.com/brindle/downloads/">Download the app</a> ·
   <a href="https://pawdelta.com/brindle/changelog/">Changelog</a>
 </p>
 
@@ -119,8 +119,8 @@ supervisor, workers and reviewer (`npm install -g @anthropic-ai/claude-code`, th
 details; the CLI needs no account.
 
 **The app** (macOS and Linux). Download it from
-[pawdelta.com/brindle/getting-started](https://pawdelta.com/brindle/getting-started/), open
-it, and under **New session** choose **Watch brindle work on a practice repo** to see a full
+[pawdelta.com/brindle/downloads](https://pawdelta.com/brindle/downloads/), open
+it, and under **New session** choose **Watch the practice run** to see a full
 run before pointing it at your own code.
 
 **The terminal** (macOS, Linux, or Windows through WSL2). The install script installs uv if
@@ -186,8 +186,9 @@ already pay for, and the core workflow is free. The app needs a free brindle acc
 details; the CLI needs none.
 
 **Where does my code go?** Nowhere new. Agents run locally through your own CLIs, and brindle
-keeps its state in `~/.brindle`. brindle sends no telemetry. It checks PyPI for updates
-(`BRINDLE_NO_UPDATE_CHECK` turns that off) and otherwise talks only to what you set up: model
+keeps its state in `~/.brindle`. brindle sends no telemetry. The CLI checks PyPI for updates
+(`BRINDLE_NO_UPDATE_CHECK` turns that off) and the desktop app checks pawdelta.com for app
+updates (`"app_updates": false` turns that off); otherwise it talks only to what you set up: model
 endpoints you configure, CI hosts, and your brindle account, which the app requires and the CLI only uses if you sign in.
 
 **Windows?** The CLI runs in WSL2. The app is macOS and Linux for now.
