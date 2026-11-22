@@ -576,21 +576,22 @@ def _strip_md_emphasis_with_mask(
 ) -> tuple[str, list[bool], set[int]]:
     """Strip paired Markdown ``*``/``**`` delimiters outside inline code spans
     while preserving per-character code provenance and command-marker offsets."""
-    text = "".join(chars)
-    if "*" not in text:
-        return text, in_code, cmd_offsets
+    # Replace literal `*` inside inline code spans with a same-length placeholder so
+    # regex matching never pairs a code-span asterisk with real emphasis delimiters.
+    match_view = "".join(
+        "\x00" if (ch == "*" and code) else ch
+        for ch, code in zip(chars, in_code)
+    )
+    if "*" not in match_view:
+        return "".join(chars), in_code, cmd_offsets
 
     drop: set[int] = set()
-    for m in _MD_EMPHASIS_RE.finditer(text):
+    for m in _MD_EMPHASIS_RE.finditer(match_view):
         dlen = len(m.group(1))
-        open_range = range(m.start(), m.start() + dlen)
-        close_range = range(m.end() - dlen, m.end())
-        if any(in_code[i] for i in open_range) or any(in_code[i] for i in close_range):
-            continue
-        drop.update(open_range)
-        drop.update(close_range)
+        drop.update(range(m.start(), m.start() + dlen))
+        drop.update(range(m.end() - dlen, m.end()))
     if not drop:
-        return text, in_code, cmd_offsets
+        return "".join(chars), in_code, cmd_offsets
 
     new_chars: list[str] = []
     new_in_code: list[bool] = []

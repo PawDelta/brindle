@@ -53,6 +53,7 @@ def test_known_commands_and_keys_pass_and_unknowns_are_reported(tmp_path, capsys
         "brindle agent bogusnested lists the agents.\n"
         "Run brindle doctor and brindle repeated-nope to diagnose problems.\n"
         "Run **brindle `emph-split-nope`**.\n"
+        "Use `*.md` and run **brindle glob-bold-nope**.\n"
         "Set `\"fake_setting\": true` in `.brindle/config.json`.\n"
         "\n"
         "In `package.json`:\n"
@@ -95,8 +96,9 @@ def test_known_commands_and_keys_pass_and_unknowns_are_reported(tmp_path, capsys
         f"{bad_md}:6: unknown command: brindle agent bogusnested",
         f"{bad_md}:7: unknown command: brindle repeated-nope",
         f"{bad_md}:8: unknown command: brindle emph-split-nope",
-        f"{bad_md}:9: unknown config key: fake_setting",
-        f"{bad_md}:20: unknown config key: unknown_json_key",
+        f"{bad_md}:9: unknown command: brindle glob-bold-nope",
+        f"{bad_md}:10: unknown config key: fake_setting",
+        f"{bad_md}:21: unknown config key: unknown_json_key",
         f"{bad_html}:1: unknown command: brindle html-nope",
         f"{bad_html}:3: unknown command: brindle html-unprefixed",
         f"{bad_html}:3: unknown command: brindle inline-split-nope",
