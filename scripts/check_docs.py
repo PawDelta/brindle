@@ -417,6 +417,8 @@ def _scan_prose_text(
         return has_prior_cmd_in_sentence(len(text))
 
     # 1. Shell-prompt lines in plain text (`$ brindle ...`).
+    # Mask matched prompt lines so comments/arguments are not rescanned as prose.
+    prompt_chars = list(text)
     for m in re.finditer(r"(?m)^\s*(?:\$|%)\s+brindle\s+(.+)$", text):
         lineno = char_lines[m.start()]
         for tokens in _extract_command_candidates(
@@ -426,9 +428,13 @@ def _scan_prose_text(
             if bad:
                 record(lineno, "command", bad)
         cmd_positions.append(m.end())
+        for idx in range(m.start(), m.end()):
+            if prompt_chars[idx] != "\n":
+                prompt_chars[idx] = " "
+    scan_text = "".join(prompt_chars)
 
     # 2. Quoted invocations (`"brindle bogus-cmd"` or `'brindle bogus-cmd'`).
-    for qm in _PROSE_QUOTED_RE.finditer(text):
+    for qm in _PROSE_QUOTED_RE.finditer(scan_text):
         lineno = char_lines[qm.start()]
         for tokens in _parse_after_brindle(qm.group(2).strip(), tree, global_options):
             bad = _validate_command_tokens(tokens, tree, prose=True)
@@ -439,12 +445,12 @@ def _scan_prose_text(
     cmd_positions.sort()
 
     # 3. Standalone `brindle ...` invocation boundaries anywhere in visible prose.
-    for bm in _PROSE_BRINDLE_RE.finditer(text):
+    for bm in _PROSE_BRINDLE_RE.finditer(scan_text):
         pos = bm.start()
         lineno = char_lines[pos]
-        before_raw = text[max(0, pos - 60):pos]
+        before_raw = scan_text[max(0, pos - 60):pos]
         before_clause = re.split(r"\n\s*\n|[.;?!]", before_raw)[-1]
-        tail = text[bm.end():].lstrip()
+        tail = scan_text[bm.end():].lstrip()
         if not tail:
             continue
         clause = re.split(r"""\n\s*\n|[.,;:?!)\]}"'`—–·]""", tail, maxsplit=1)[0].strip()
@@ -458,6 +464,7 @@ def _scan_prose_text(
         # - explicit option/delimiter (`brindle -s ...`, `brindle -- ...`)
         # - lead-in verb (`Run brindle ...`) or conjunction after a prior command in the same sentence
         # - followed by `command`/`subcommand` (`The brindle foo command ...`)
+        # - starts with a real imported CLI command/group (`brindle agent nonexistent ...`)
         # - standalone hyphen/underscore command token (`brindle bogus-cmd`, not `a brindle ...`)
         starts_with_opt = raw_tokens[0].startswith("-")
         has_leadin = bool(_PROSE_LEADIN_BEFORE_RE.search(before_clause))
@@ -466,14 +473,27 @@ def _scan_prose_text(
         )
         post_opt_tokens = _consume_global_options(raw_tokens, tree, global_options)
         has_cmd_suffix = _has_command_suffix(post_opt_tokens)
+        is_determiner_noun = bool(_PROSE_DETERMINER_BEFORE_RE.search(before_clause))
+        is_known_cmd = (
+            bool(post_opt_tokens)
+            and post_opt_tokens[0] in tree
+            and not is_determiner_noun
+        )
         is_hyphen_cmd = (
             bool(post_opt_tokens)
             and _is_candidate_token(post_opt_tokens[0])
             and ("-" in post_opt_tokens[0] or "_" in post_opt_tokens[0])
-            and not _PROSE_DETERMINER_BEFORE_RE.search(before_clause)
+            and not is_determiner_noun
         )
 
-        if not (starts_with_opt or has_leadin or has_conj or has_cmd_suffix or is_hyphen_cmd):
+        if not (
+            starts_with_opt
+            or has_leadin
+            or has_conj
+            or has_cmd_suffix
+            or is_known_cmd
+            or is_hyphen_cmd
+        ):
             continue
 
         for tokens in _parse_after_brindle(clause, tree, global_options):
@@ -483,7 +503,7 @@ def _scan_prose_text(
         cmd_positions.append(bm.end())
         cmd_positions.sort()
 
-    return has_prior_cmd_in_sentence(len(text))
+    return has_prior_cmd_in_sentence(len(scan_text))
 
 
 def _scan_prose_line(
@@ -507,6 +527,14 @@ def _scan_prose_line(
 
 
 # -- JSON config key extraction -----------------------------------------------
+
+
+_SELF_CONTAINED_BRINDLE_RE = re.compile(r"^(?:(?:\$|%)\s+)?brindle\s+\S")
+
+
+def _is_self_contained_brindle_code(span_text: str) -> bool:
+    """True when a code span holds a complete ``brindle <args...>`` invocation."""
+    return bool(_SELF_CONTAINED_BRINDLE_RE.match(span_text.strip()))
 
 
 def _looks_like_json_block(text: str) -> bool:
@@ -801,13 +829,15 @@ def _check_markdown(
         span_line = unmasked.count("\n", 0, start_pos) + 1
         span_text = " ".join(m.group(2).split())
         code_spans.append((start_pos, end_pos, span_line, span_text))
-        is_cmd_span = bool(_extract_command_candidates(span_text, cli_tree, global_options))
-        # Preserve exact newline count; mark code-span command positions for conjunction tracking.
+        is_cmd_span = _is_self_contained_brindle_code(span_text)
+        # Self-contained `brindle ...` code spans are validated directly and replaced with
+        # a command marker so prose after them isn't glued onto the command. Other inline
+        # code spans (e.g. ``Run brindle `bogus-cmd` ``) keep their visible text in prose.
         nl_count = m.group(0).count("\n")
         if is_cmd_span:
             prose_parts.append(("\n" * nl_count) + cmd_marker)
         else:
-            prose_parts.append("\n" * nl_count or " ")
+            prose_parts.append(m.group(2))
         last_end = end_pos
         check_command_snippet(span_text, span_line)
     prose_parts.append(unmasked[last_end:])
@@ -1097,38 +1127,35 @@ def _check_html(
         re.I,
     )
     for block in parser.inline_blocks:
-        prior_cmd = False
         prose_chars: list[str] = []
         prose_char_lines: list[int] = []
+        cmd_offsets: set[int] = set()
 
-        def flush_prose() -> None:
-            nonlocal prior_cmd
-            if not prose_chars:
-                return
-            prior_cmd = _scan_prose_text(
-                "".join(prose_chars),
-                prose_char_lines,
-                cli_tree,
-                global_options,
-                record,
-                prior_cmd_at_start=prior_cmd,
-            )
-            prose_chars.clear()
-            prose_char_lines.clear()
+        def append_visible(seg_line: int, seg_text: str) -> None:
+            cur_line = seg_line
+            for ch in seg_text:
+                prose_chars.append(ch)
+                prose_char_lines.append(cur_line)
+                if ch == "\n":
+                    cur_line += 1
 
         for i, (is_code, line, seg_text) in enumerate(block):
             if not is_code:
-                cur_line = line
-                for ch in seg_text:
-                    prose_chars.append(ch)
-                    prose_char_lines.append(cur_line)
-                    if ch == "\n":
-                        cur_line += 1
+                append_visible(line, seg_text)
                 continue
 
-            flush_prose()
-            if _extract_command_candidates(seg_text, cli_tree, global_options):
-                prior_cmd = True
+            is_cmd_span = _is_self_contained_brindle_code(seg_text)
+            if is_cmd_span:
+                # Self-contained `brindle ...` code spans are checked directly; record their
+                # position for same-sentence conjunction tracking without gluing trailing prose.
+                cmd_offsets.add(len(prose_chars))
+                prose_chars.append(" ")
+                prose_char_lines.append(line)
+            else:
+                # Retain visible text across inline `<code>` boundaries so commands like
+                # `<p>Run brindle <code>bogus-cmd</code> ...</p>` are detected as one invocation.
+                append_visible(line, seg_text)
+
             check_command_snippet(seg_text, line)
             if _CONFIG_JSON_RE.search(seg_text):
                 continue
@@ -1147,7 +1174,15 @@ def _check_html(
                 for kl, kn in _extract_inline_config_keys(seg_text, line):
                     check_key(kl, kn)
 
-        flush_prose()
+        if prose_chars:
+            _scan_prose_text(
+                "".join(prose_chars),
+                prose_char_lines,
+                cli_tree,
+                global_options,
+                record,
+                prior_cmd_offsets=cmd_offsets,
+            )
 
     return findings
 

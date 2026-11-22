@@ -13,8 +13,9 @@ def test_known_commands_and_keys_pass_and_unknowns_are_reported(tmp_path, capsys
     clean_md.write_text(
         "# Usage\n"
         "\n"
-        "Run `brindle init`, `brindle -s codex start`, `brindle agent kill`, or `brindle keys set/unset/list`.\n"
+        "Run `brindle init`, `brindle -s codex start`, `brindle -- doctor`, `brindle agent kill`, or `brindle keys set/unset/list`.\n"
         "Run brindle doctor to check the environment.\n"
+        "$ brindle doctor # brindle bogus-cmd is not supported\n"
         "Set `\"max_agents\": 4` in `.brindle/config.json`.\n"
         "\n"
         "In `package.json`:\n"
@@ -44,6 +45,7 @@ def test_known_commands_and_keys_pass_and_unknowns_are_reported(tmp_path, capsys
         "Run `brindle doctor` and `brindle bogus-cmd`.\n"
         "Also `brindle agent nonexistent`, `brindle -s codex after-opt-nope`, and `brindle -- after-dd-nope`.\n"
         "The brindle unprefixed-nope command diagnoses problems.\n"
+        "brindle agent bogusnested lists the agents.\n"
         "Run brindle doctor and brindle repeated-nope to diagnose problems.\n"
         "Set `\"fake_setting\": true` in `.brindle/config.json`.\n"
         "\n"
@@ -66,6 +68,7 @@ def test_known_commands_and_keys_pass_and_unknowns_are_reported(tmp_path, capsys
     bad_html.write_text(
         "<p>Use <code>brindle ls</code> not <code>brindle html-nope</code>.</p>\n"
         "<p>The brindle html-unprefixed command and brindle <strong>inline-split-nope</strong> fail.</p>\n"
+        "<p>brindle agent htmlnested lists agents; run brindle <code>code-split-nope</code> too.</p>\n"
         "<p>Set <code>\"html_bad_key\": 1</code> in <code>.brindle/config.json</code>.</p>\n"
         "<pre><code>brindle init\n"
         "brindle pre-nope\n"
@@ -82,12 +85,15 @@ def test_known_commands_and_keys_pass_and_unknowns_are_reported(tmp_path, capsys
         f"{bad_md}:4: unknown command: brindle after-opt-nope",
         f"{bad_md}:4: unknown command: brindle agent nonexistent",
         f"{bad_md}:5: unknown command: brindle unprefixed-nope",
-        f"{bad_md}:6: unknown command: brindle repeated-nope",
-        f"{bad_md}:7: unknown config key: fake_setting",
-        f"{bad_md}:18: unknown config key: unknown_json_key",
+        f"{bad_md}:6: unknown command: brindle agent bogusnested",
+        f"{bad_md}:7: unknown command: brindle repeated-nope",
+        f"{bad_md}:8: unknown config key: fake_setting",
+        f"{bad_md}:19: unknown config key: unknown_json_key",
         f"{bad_html}:1: unknown command: brindle html-nope",
         f"{bad_html}:2: unknown command: brindle html-unprefixed",
         f"{bad_html}:2: unknown command: brindle inline-split-nope",
-        f"{bad_html}:3: unknown config key: html_bad_key",
-        f"{bad_html}:5: unknown command: brindle pre-nope",
+        f"{bad_html}:3: unknown command: brindle agent htmlnested",
+        f"{bad_html}:3: unknown command: brindle code-split-nope",
+        f"{bad_html}:4: unknown config key: html_bad_key",
+        f"{bad_html}:6: unknown command: brindle pre-nope",
     ]
