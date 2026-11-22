@@ -1,5 +1,6 @@
 ---
 name: subagent
+role: helper
 description: Does the task in your own Claude Code subagent (Agent tool) on its own brindle branch; starts no separate process
 provider: subagent
 ---

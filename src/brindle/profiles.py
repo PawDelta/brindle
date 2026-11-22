@@ -590,6 +590,41 @@ def current_name(name: str, repo_root: str | None = None) -> str:
     return name
 
 
+# The base profiles a role is named after; brindle's own helpers share one role.
+_BASE_ROLES = {"developer": "developer", "reviewer": "reviewer", "supervisor": "supervisor",
+               "coordinator": "helper", "subagent": "helper"}
+# Before profiles stated a role, developer-* and reviewer-* were those roles by name.
+_LEGACY_ROLE = re.compile(r"^(developer|reviewer)(?:-|$)")
+
+
+def base_role(name: str, repo_root: str | None = None) -> str | None:
+    """The role ``name`` works in: developer, reviewer, supervisor, helper
+    (brindle's coordinator and subagent) or a custom role. It is the
+    ``role:`` nearest ``name`` along its ``extends`` chain (a built-in base
+    profile states its own, and a profile built on it inherits it); with
+    none, the base of the chain names it. None when there is no such profile."""
+    current, seen = name, set()
+    while True:
+        found = _read(current, repo_root)
+        if found is None:
+            if current == name:
+                return None
+            break    # a missing parent is still the base it names
+        meta = _frontmatter(found[0])[0]
+        if meta.get("role"):
+            return meta["role"]
+        parent = meta.get("extends", "")
+        if not parent or parent in seen or len(seen) > MAX_EXTENDS_DEPTH:
+            break
+        seen.add(current)
+        current = parent
+    if current in _BASE_ROLES:
+        return _BASE_ROLES[current]
+    # A standalone profile under the old naming (a person's copy of developer-heavy, say).
+    legacy = _LEGACY_ROLE.match(current)
+    return legacy.group(1) if legacy else current
+
+
 def profile_source(name: str, repo_root: str | None = None) -> str | None:
     """Where ``name`` is read from: a path, or "built-in profile <name>"."""
     found = _read(name, repo_root)

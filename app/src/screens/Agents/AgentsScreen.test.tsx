@@ -22,6 +22,9 @@ const DISPLAY: Record<string, string> = {
 };
 const MAKER: Record<string, [string, string]> = { claude: ["Anthropic", "Claude Code"], codex: ["OpenAI", "Codex"], antigravity: ["Google", "Antigravity"], opencode: ["OpenCode", "OpenCode"] };
 
+/* The role the engine gives each profile here (profiles.base_role); any other is a developer. */
+const ROLE: Record<string, string> = { reviewer: "reviewer", "reviewer-codex": "reviewer", supervisor: "supervisor" };
+
 /* A built-in profile, unless `builtin: false` says it's the person's own. */
 const rp = (name: string, provider: string, model: string | null, cost_tier: string, fields: Partial<RoutingProfile> = {}): RoutingProfile => ({
   name,
@@ -31,6 +34,7 @@ const rp = (name: string, provider: string, model: string | null, cost_tier: str
   maker: MAKER[provider][0],
   tool: MAKER[provider][1],
   builtin: true,
+  role: ROLE[name] ?? "developer",
   cost_tier,
   installed: true,
   signed_in: true,
@@ -160,6 +164,22 @@ describe("agents tab", () => {
     const light = within(row("light")).getByRole("group", { name: "Choices for Light" });
     expect(option(light, "quick-fix")!.querySelector("[data-model-name]")).toBeNull();
     expect(option(light, "developer-codex-sol")!.querySelector("[data-model-name]")).toBeTruthy();
+  });
+
+  it("agents: renamed built-in profiles are offered by the role the engine gives them, not by their names", async () => {
+    const opus = rp("dev.claude-opus", "claude", "opus-5.5", "high", { role: "developer" });
+    const sonnetHigh = rp("review.claude-sonnet.high", "claude", "sonnet-5.5", "medium", { role: "reviewer", effort: "high" });
+    setup({ routingProfiles: [...profiles, opus, sonnetHigh] });
+    await screen.findByTestId("kind-medium");
+
+    fireEvent.click(runsOn("medium"));
+    const medium = within(row("medium")).getByRole("group", { name: "Choices for Medium" });
+    expect(option(medium, "dev.claude-opus")).toBeTruthy();
+    expect(option(medium, "review.claude-sonnet.high")).toBeNull();
+    fireEvent.click(runsOn("reviewer"));
+    const reviewers = within(row("reviewer")).getByRole("group", { name: "Choices for Reviewer" });
+    expect(option(reviewers, "review.claude-sonnet.high")).toBeTruthy();
+    expect(option(reviewers, "dev.claude-opus")).toBeNull();
   });
 
   it("agents: reorders, removes and adds fallbacks inline, under the row", async () => {

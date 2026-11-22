@@ -167,6 +167,8 @@ class AgentDTO(_DTO):
     weight: str | None = None
     # Its model as a person reads it (brindle.model_names): "Claude Opus", or the provider's family before it has run.
     model_display: str | None = None
+    # Its profile's role (profiles.base_role): developer, reviewer, supervisor, helper or a custom role; absent when the profile is gone.
+    role: str | None = None
     # Title of the milestone current when the worker was assigned; absent for a supervisor or when none.
     milestone: str | None = None
     unread: int | None = None
@@ -927,6 +929,8 @@ class RoutingProfileDTO(_DTO):
     tool: str | None = None
     effort: str | None = None
     builtin: bool = False    # one of brindle's own profiles; any other is the person's custom agent
+    # The base of its extends chain (profiles.base_role): developer, reviewer, supervisor, helper or a custom role.
+    role: str | None = None
     installed: bool
     signed_in: bool
     excluded: bool

@@ -1,5 +1,6 @@
 ---
 name: coordinator
+role: helper
 description: Coordinates the queued work of every session in a repo, woken on events (brindle Pro; off unless "coordinator" is on in config)
 provider: claude
 model: haiku

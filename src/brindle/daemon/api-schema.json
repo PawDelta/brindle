@@ -399,6 +399,18 @@
           "default": null,
           "title": "Reported"
         },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
+        },
         "status": {
           "title": "Status",
           "type": "string"
@@ -11347,6 +11359,18 @@
               "default": null,
               "title": "Refusal"
             },
+            "role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Role"
+            },
             "signed_in": {
               "title": "Signed In",
               "type": "boolean"
@@ -11880,6 +11904,18 @@
           ],
           "default": null,
           "title": "Refusal"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Role"
         },
         "signed_in": {
           "title": "Signed In",
@@ -14729,6 +14765,18 @@
               ],
               "default": null,
               "title": "Reported"
+            },
+            "role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Role"
             },
             "status": {
               "title": "Status",

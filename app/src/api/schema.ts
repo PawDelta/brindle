@@ -177,6 +177,7 @@ export interface AgentDTO {
   profile: string;
   provider: string;
   reported?: boolean | null;
+  role?: string | null;
   status: string;
   status_since?: number | null;
   subagents?: NativeSubagentDTO[];
@@ -1585,6 +1586,7 @@ export interface RoutingProfileDTO {
   provider: string;
   provider_name?: string | null;
   refusal?: string | null;
+  role?: string | null;
   signed_in: boolean;
   tool?: string | null;
 }
