@@ -515,10 +515,15 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 setattr(cfg, key, source[key])
                 break
     # Profile ids in the config may be old built-in ids: read them as their current ids.
+    from brindle.profiles import current_name
+
+    def current(n: str) -> str:
+        return current_name(n, str(repo_root))
+
     for key in ("default_agent", "reviewer", "review_profile"):
         if isinstance(getattr(cfg, key, None), str):
-            setattr(cfg, key, canonical(getattr(cfg, key)))
-    cfg.learning_candidates = [canonical(n) for n in cfg.learning_candidates if isinstance(n, str)]
+            setattr(cfg, key, current(getattr(cfg, key)))
+    cfg.learning_candidates = [current(n) for n in cfg.learning_candidates if isinstance(n, str)]
     rules: list[str] = []
     for source in (user, shared, local):
         found = source.get("rules")
@@ -556,7 +561,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
             for tier, names in routing.items():
                 norm_tier = normalize_weight(tier)
                 if norm_tier in WEIGHTS and isinstance(names, list):
-                    cfg.routing[norm_tier] = [canonical(n) for n in names if isinstance(n, str)]
+                    cfg.routing[norm_tier] = [current(n) for n in names if isinstance(n, str)]
                     cfg.routing_sources[norm_tier] = str(path)
     for source in (user, shared, local):  # per kind, a later scope overriding an earlier one
         cfg.routing_locked.update(locked_kinds(source.get("routing_locked")))
@@ -573,7 +578,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
             for tier, name in second.items():
                 norm_tier = normalize_weight(tier)
                 if norm_tier in WEIGHTS and isinstance(name, str) and name:
-                    cfg.second_review[norm_tier] = name
+                    cfg.second_review[norm_tier] = current(name)
     for source in (user, shared, local):  # per model, so a repo can override one and keep the rest
         pricing = source.get("pricing")
         if isinstance(pricing, dict):

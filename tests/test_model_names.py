@@ -1,3 +1,5 @@
+import pytest
+
 from brindle import learning, model_names, profiles
 from brindle.pro import learning as pro_learning
 
@@ -25,3 +27,29 @@ def test_full_claude_ids_resolve_to_their_model():
     # An env override or managed route gives a full id, not the alias.
     assert model_names.model_name("eu.anthropic.claude-opus-x-v1:0", "claude") == model_names.MODELS["opus"]
     assert model_names.model_name("claude-sonnet-5-5[1m]", "claude") == model_names.MODELS["sonnet"]
+
+
+@pytest.mark.parametrize("name, reviewer", [
+    ("review.gpt", True),
+    ("reviewer-codex", True),
+    ("dev.gpt", False),
+])
+def test_reviewer_ids_are_recognised_in_both_spellings(name, reviewer):
+    assert model_names.is_reviewer_id(name) is reviewer
+
+
+def test_an_org_allowlist_written_with_old_ids_still_allows_the_renamed_profiles():
+    from brindle.pro.team_policy import Access
+
+    assert Access(allowed_profiles=("developer-codex",)).allows_profile("dev.gpt", "codex", None)
+    assert not Access(allowed_profiles=("dev.claude-sonnet",)).allows_profile("dev.gpt", "codex", None)
+
+
+def test_handover_from_an_old_predecessor_id_is_found():
+    from brindle import cascade
+    from test_cascade import _table
+
+    raw = _table(50)
+    raw["handover"] = {"developer-heavy>developer-codex": {"p": 0.99, "runs": 10}}
+    assert cascade.parse(raw).handover_p("dev.claude-opus", "dev.gpt") == 0.99
+

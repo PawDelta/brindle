@@ -29,6 +29,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 from brindle import bus, cloud_credential, company_identity, company_login, debuglog, git, keystore, knowledge, pane_auth, providers, secrets, tmux, upgrade, workspaces
+from brindle import model_names
 from brindle import spawn as processes   # this module's own spawn() starts an agent
 from brindle.assembler import DECISIONS, DOCUMENT_CHUNKS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
@@ -227,7 +228,7 @@ def is_review_profile(profile_name: str, repo_root: str) -> bool:
     name: str | None = profile_name
     seen: set[str] = set()
     while name and name not in seen:
-        if name.startswith("reviewer"):
+        if model_names.is_reviewer_id(name):
             return True
         seen.add(name)
         try:

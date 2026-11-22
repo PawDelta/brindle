@@ -91,9 +91,41 @@ def test_doctor_offers_to_rewrite_old_ids_in_config_and_writes_only_when_told(tm
     assert check.level == doctor.WARN and "reviewer-codex -> review.gpt" in check.detail
 
     lines: list[str] = []
-    doctor._rewrite_profile_ids(config, {"reviewer-codex": "review.gpt"}, lambda prompt: False, lines)
+    doctor._rewrite_profile_ids(config, {"reviewer-codex": "review.gpt"}, lambda prompt: False, lines, str(repo))
     assert json.loads(config.read_text())["reviewer"] == "reviewer-codex" and not lines
 
-    doctor._rewrite_profile_ids(config, {"reviewer-codex": "review.gpt"}, lambda prompt: True, lines)
+    doctor._rewrite_profile_ids(config, {"reviewer-codex": "review.gpt"}, lambda prompt: True, lines, str(repo))
     rewritten = json.loads(config.read_text())
     assert rewritten["reviewer"] == "review.gpt" and rewritten["routing"] == {"light": ["dev.gpt"]}
+
+
+@pytest.mark.parametrize("custom, routed", [
+    pytest.param(True, "developer-codex", marks=pytest.mark.variant(
+        "a custom profile under an old id keeps its own name in routing, so its rules and provider still apply")),
+    pytest.param(False, "dev.gpt", marks=pytest.mark.variant(
+        "with no custom profile under the old id, routing names the renamed built-in")),
+])
+def test_routing_keeps_a_custom_profile_under_an_old_id(tmp_path, custom, routed):
+    from brindle.config import load_repo_config
+
+    repo = tmp_path / "proj"
+    (repo / ".brindle").mkdir(parents=True)
+    if custom:
+        (repo / ".brindle" / "agents").mkdir()
+        (repo / ".brindle" / "agents" / "developer-codex.md").write_text(
+            "---\nname: developer-codex\nprovider: claude\n---\nDo it.\n")
+    (repo / ".brindle" / "config.json").write_text('{"routing": {"medium": ["developer-codex"]}}')
+
+    assert load_repo_config(repo).routing["medium"][0] == routed
+
+
+def test_second_review_names_the_same_profile_as_the_primary(tmp_path):
+    from brindle.config import load_repo_config
+
+    repo = tmp_path / "proj"
+    (repo / ".brindle").mkdir(parents=True)
+    (repo / ".brindle" / "config.json").write_text(
+        '{"reviewer": "reviewer-codex", "second_review": {"heavy": "reviewer-codex"}}')
+
+    cfg = load_repo_config(repo)
+    assert cfg.reviewer == cfg.second_review["heavy"] == "review.gpt"

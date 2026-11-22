@@ -576,6 +576,15 @@ def _read_exact(name: str, repo_root: str | None) -> tuple[str, str] | None:
     return None
 
 
+def current_name(name: str, repo_root: str | None = None) -> str:
+    """The id ``name`` runs as. An old built-in id becomes its renamed profile,
+    unless the repo, the person or the org has a profile file under the old
+    name: that custom profile keeps its own name."""
+    if name in model_names.ALIASES and _read_exact(name, repo_root) is None:
+        return model_names.ALIASES[name]
+    return name
+
+
 def profile_source(name: str, repo_root: str | None = None) -> str | None:
     """Where ``name`` is read from: a path, or "built-in profile <name>"."""
     found = _read(name, repo_root)

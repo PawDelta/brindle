@@ -1277,7 +1277,7 @@ class ProPolicy(PolicyPlugin):
                        else "set `model` in the profile")
                 return deny(model_refusal(p.org_id, p.allowed_models, got, who=who, fix=fix,
                                           store=self._store, client=self._client))
-        if p.allowed_profiles is not None and info.profile not in p.allowed_profiles:
+        if p.allowed_profiles is not None and not _listed(info.profile, p.allowed_profiles):
             got = who if info.profile else "a delegation with no profile"
             return deny(f"{got} is not allowed; org {p.org_id} allows only "
                         f"{', '.join(p.allowed_profiles) or 'no profiles'} for you")
@@ -1357,6 +1357,15 @@ def model_allowed(allowed: tuple[str, ...] | None, model: str | None, pinned: st
     return bool(pinned) and pinned in allowed
 
 
+def _listed(profile: str, allowed) -> bool:
+    """Whether ``profile`` is on an org's allowlist. An old built-in id on the
+    list still allows its renamed profile (and the reverse), so policy written
+    before the rename keeps working."""
+    from brindle.model_names import canonical
+
+    return canonical(profile) in {canonical(a) for a in allowed}
+
+
 @dataclass(frozen=True)
 class Access:
     """The CLIs, models and profiles this person may use here: the org's
@@ -1409,7 +1418,7 @@ class Access:
         as ``policy._profile_fields`` resolves them) may start: check_assign's
         provider, model and profile tests."""
         return (bool(provider) and self.allows(provider) and self.allows_run(provider, model)
-                and (self.allowed_profiles is None or profile in self.allowed_profiles))
+                and (self.allowed_profiles is None or _listed(profile, self.allowed_profiles)))
 
     def clis(self) -> list[str]:
         """The CLIs to offer: every supervisor CLI when nothing narrows the

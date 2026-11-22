@@ -100,7 +100,7 @@ class Table:
 
     def handover_p(self, src: str, dst: str) -> float | None:
         """The success rate of ``dst`` taking over from ``src``, when measured."""
-        c = self.handover.get(f"{src}>{dst}")
+        c = self.handover.get(f"{canonical(src)}>{canonical(dst)}")
         return float(c["p"]) if isinstance(c, dict) and c.get("runs", 0) >= self.min_runs else None
 
 
@@ -139,11 +139,43 @@ def parse(raw) -> Table:
             and isinstance(c.get("runs"), int) for k, c in handover.items()):
         raise TableError("handover must map from>to pairs to {p, runs}")
     # The table's rows predate the renames: an old id's cells count for its renamed profile.
-    by_current: dict = {}
+    return Table(min_runs, tiers, _by_identity(profiles), _handover_by_identity(handover))
+
+
+def _by_identity(profiles: dict) -> dict:
+    """``profiles`` keyed by current ids. An identity named twice (an old and a
+    new id) keeps the evidence of both, whichever comes first."""
+    out: dict = {}
     for name, cells in profiles.items():
-        by_current.setdefault(canonical(name), {}).update(cells)
-    handover = {">".join(canonical(p) for p in k.split(">", 1)): c for k, c in handover.items()}
-    return Table(min_runs, tiers, by_current, handover)
+        mine = out.setdefault(canonical(name), {})
+        for role, cell in cells.items():
+            mine[role] = _merge_cells(mine[role], cell) if role in mine else cell
+    return out
+
+
+def _handover_by_identity(handover: dict) -> dict:
+    out: dict = {}
+    for pair, cell in handover.items():
+        key = ">".join(canonical(p) for p in pair.split(">", 1))
+        out[key] = _merge_cells(out[key], cell) if key in out else cell
+    return out
+
+
+def _merge_cells(a: dict, b: dict) -> dict:
+    """One cell from two cells of the same identity, the same whichever is
+    first: runs add up and each measured field is weighted by its runs."""
+    wa, wb = a.get("runs") or 0, b.get("runs") or 0
+    if wa + wb == 0:
+        return {**b, **a}
+    out = {**b, **a}
+    for k in set(a) & set(b):
+        if k == "runs":
+            out[k] = wa + wb
+        elif _num(a[k]) and _num(b[k]):
+            out[k] = (a[k] * wa + b[k] * wb) / (wa + wb)
+        else:
+            out[k] = max(a[k], b[k], key=repr)
+    return out
 
 
 _warned = False
@@ -278,7 +310,9 @@ def worker_pool(cfg, repo_root: str, tier: str, ceiling: str | None = None) -> l
         heavier = [t for t in TIERS[i + 1:top + 1]]
         lighter = list(reversed(TIERS[:i]))
         names = own + [n for t in heavier + lighter for n in autopilot.tier_order(cfg, t)] + list(DEVELOPERS)
-    names = list(dict.fromkeys(canonical(n) for n in names))
+    from brindle.profiles import current_name
+
+    names = list(dict.fromkeys(current_name(n, repo_root) for n in names))
     if ceiling in rank:
         names = [n for n in names if rank.get(_weight(autopilot.profile_weight(n, cfg, repo_root)), 3)
                  <= rank[ceiling]]

@@ -108,18 +108,24 @@ def canonical(name: str) -> str:
     return ALIASES.get(name, name)
 
 
+def is_reviewer_id(name: str) -> bool:
+    """Whether a profile id is a reviewer's: ``reviewer...`` (old) or ``review.`` (current)."""
+    return canonical(name).startswith(("reviewer", "review."))
+
+
 # The config keys that name profiles: one id each, or a list of ids.
 _CONFIG_PROFILE_KEYS = ("default_agent", "reviewer", "review_profile", "supervisor_profile", "learned_rules_profile")
 _CONFIG_PROFILE_LISTS = ("learning_candidates", "reviewer_fallbacks", "supervisor_fallbacks")
 
 
-def rename_in_config(data: dict) -> tuple[dict, dict[str, str]]:
+def rename_in_config(data: dict, keep: frozenset = frozenset()) -> tuple[dict, dict[str, str]]:
     """``data`` (a parsed config file) with its old built-in profile ids renamed,
-    and the renames made, ``{old: new}``. Nothing is renamed unless a caller writes it."""
+    and the renames made, ``{old: new}``. Ids in ``keep`` (a custom profile
+    under that old name) are left alone. Nothing is renamed unless a caller writes it."""
     done: dict[str, str] = {}
 
     def one(v):
-        if isinstance(v, str) and v in ALIASES:
+        if isinstance(v, str) and v in ALIASES and v not in keep:
             done[v] = ALIASES[v]
             return ALIASES[v]
         return v

@@ -112,6 +112,18 @@ def test_measured_history_under_an_old_id_counts_for_its_renamed_profile():
     assert table.cell("developer-codex", "medium")["runs"] == 50
 
 
+@pytest.mark.parametrize("old_first", [True, False])
+def test_mixed_old_and_new_id_history_keeps_both_halves_in_either_order(old_first):
+    old = {"developer-codex": {"medium": {"p": 0.9, "first_try": 0.5, "usd": 1.0, "minutes": 20, "runs": 50}}}
+    new = {"dev.gpt": {"medium": {"p": 0.6, "first_try": 0.5, "usd": 1.0, "minutes": 20, "runs": 2}}}
+    raw = _table(50)
+    raw["profiles"] = {**old, **new} if old_first else {**new, **old}
+
+    cell = cascade.parse(raw).cell("dev.gpt", "medium")
+    assert cell["runs"] == 52
+    assert cell["p"] == pytest.approx((0.9 * 50 + 0.6 * 2) / 52)
+
+
 def test_a_table_built_from_records_with_near_zero_minutes_still_orders(db, repo, boss, monkeypatch):
     import build_routing_priors
 

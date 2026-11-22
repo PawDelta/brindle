@@ -486,7 +486,10 @@ def second_profile(db: DB, cfg: RepoConfig, worker: Agent, ws: Workspace) -> str
         return None
     weight = next((t.weight for t in db.list_tasks(ws.repo_root) if t.agent_id == worker.id), None)
     profile = cfg.second_review.get(weight or "")
-    if not profile or profile == agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task):
+    from brindle.profiles import current_name
+
+    primary = agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task)
+    if not profile or current_name(profile, ws.repo_root) == current_name(primary, ws.repo_root):
         return None
     return profile
 

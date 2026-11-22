@@ -411,9 +411,9 @@ def fix(confirm, repo_root: str | None = None) -> list[str]:
 
     lines: list[str] = []
     for path in _profile_config_files(repo_root):
-        found = _old_profile_ids(path)
+        found = _old_profile_ids(path, repo_root)
         if found:
-            _rewrite_profile_ids(path, found, confirm, lines)
+            _rewrite_profile_ids(path, found, confirm, lines, repo_root)
     # Self-serve setup asks only on a terminal. What it found and its menu print
     # at once (before the question, not at the end); only an applied setup adds
     # result lines, so keeping the personal setup leaves "nothing to fix".
@@ -516,7 +516,15 @@ def _profile_config_files(repo_root: str | None) -> list[Path]:
     return [p for p in paths if p.is_file()]
 
 
-def _old_profile_ids(path: Path) -> dict[str, str]:
+def _custom_old_ids(repo_root: str | None) -> frozenset:
+    """Old built-in ids that a custom profile (the person's, the repo's or the org's) still owns: those keep their names."""
+    from brindle import model_names
+    from brindle.profiles import current_name
+
+    return frozenset(o for o in model_names.ALIASES if current_name(o, repo_root) == o)
+
+
+def _old_profile_ids(path: Path, repo_root: str | None) -> dict[str, str]:
     """``{old: new}`` for the old built-in profile ids ``path`` names; {} when it names none or can't be read."""
     import json
 
@@ -528,13 +536,13 @@ def _old_profile_ids(path: Path) -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return model_names.rename_in_config(data)[1]
+    return model_names.rename_in_config(data, _custom_old_ids(repo_root))[1]
 
 
 def _profile_id_checks(repo_root: str | None) -> list[Check]:
     out = []
     for path in _profile_config_files(repo_root):
-        found = _old_profile_ids(path)
+        found = _old_profile_ids(path, repo_root)
         if found:
             names = ", ".join(f"{old} -> {new}" for old, new in sorted(found.items()))
             out.append(Check(WARN, "profile ids", f"{path} names old profile ids ({names}); "
@@ -542,7 +550,7 @@ def _profile_id_checks(repo_root: str | None) -> list[Check]:
     return out
 
 
-def _rewrite_profile_ids(path: Path, done: dict[str, str], confirm, lines: list[str]) -> None:
+def _rewrite_profile_ids(path: Path, done: dict[str, str], confirm, lines: list[str], repo_root: str | None) -> None:
     """Rewrite the old ids in ``path`` once the person says so; written to a temp file, then moved into place."""
     import json
 
@@ -551,7 +559,7 @@ def _rewrite_profile_ids(path: Path, done: dict[str, str], confirm, lines: list[
     if not confirm(f"Rewrite old profile ids in {path} ({', '.join(f'{o} -> {n}' for o, n in sorted(done.items()))})?"):
         return
     data = json.loads(path.read_text(encoding="utf-8"))
-    new, _ = model_names.rename_in_config(data)
+    new, _ = model_names.rename_in_config(data, _custom_old_ids(repo_root))
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     tmp.write_text(json.dumps(new, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, path)
