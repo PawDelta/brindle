@@ -192,7 +192,7 @@ def _who(client=None, store=None):
     except Exception as e:  # noqa: BLE001
         raise RuntimeError("not logged in to brindle Pro (`brindle account login`)") from e
     if analysis_docs.FEATURE not in ent.features or ent.in_grace:
-        raise RuntimeError("your plan has no analysis doc library (the `analysis_docs` entitlement)")
+        raise RuntimeError("your subscription has no plan library (the `analysis_docs` entitlement)")
     client = client or auth.Client(base, auth.UrllibTransport(timeout=analysis_docs.SEND_WAIT))
     return client, store, ent, _identity(base, ent.sub, ent.org_id)
 
@@ -252,7 +252,7 @@ def _snapshot(client=None, store=None) -> Snapshot:
             raise
     ent = license.verify(rec.get("entitlement") or "", issuer=base)
     if analysis_docs.FEATURE not in ent.features or ent.in_grace:
-        raise RuntimeError("your plan has no analysis doc library (the `analysis_docs` entitlement)")
+        raise RuntimeError("your subscription has no plan library (the `analysis_docs` entitlement)")
     if not rec.get("access_token"):
         raise AccountChanged("not signed in")
     return Snapshot(client, store, ent, _identity(base, ent.sub, ent.org_id), rec["access_token"],

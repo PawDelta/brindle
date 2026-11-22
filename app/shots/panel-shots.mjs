@@ -145,8 +145,8 @@ try {
       await page.waitForSelector("html[data-ready]");
       if (state === "terminal") await page.getByTestId("terminal").locator(".xterm-rows").getByText("Build complete", { exact: false }).waitFor();
       if (state === "search") { await page.getByTestId("share-search").focus(); await page.getByTestId("share-result-lee").waitFor(); }
-      if (state === "scopes") { await page.getByRole("button", { name: "Share for review", exact: true }).click(); await page.getByLabel("Share with", { exact: true }).waitFor(); }
-      if (state !== "terminal" && state !== "reviewer") await page.getByLabel("Link audience").locator("option").filter({ hasText: "Platform engineering" }).waitFor({ state: "attached" });
+      if (state === "scopes") await page.getByTestId("share-team-group-platform").waitFor();
+      if (state !== "terminal" && state !== "reviewer" && state !== "scopes") await page.getByLabel("Link audience").locator("option").filter({ hasText: "Platform engineering" }).waitFor({ state: "attached" });
       await page.evaluate(() => document.fonts.ready);
       await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
       if (errors.length) throw new Error(errors.join("\n"));

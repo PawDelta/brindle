@@ -30,8 +30,7 @@ const CURRENT = [
   ["library", "preview.html?scene=library", "view"],
   ["inbox", "preview.html?scene=inbox", "view"],
   ["share-first", "panels.html?panel=share&state=first", '[data-testid="plan-share"]', async (page) => {
-    await page.getByRole("button", { name: "Share for review", exact: true }).click();
-    await page.getByLabel("Share with", { exact: true }).waitFor();
+    await page.getByTestId("share-team-group-platform").waitFor();
   }],
   ["share-people", "panels.html?panel=share&state=people", '[data-testid="plan-share"]'],
   ["share-search", "panels.html?panel=share&state=search", '[data-testid="plan-share"]', async (page) => {
@@ -40,7 +39,7 @@ const CURRENT = [
     await page.getByTestId("share-result-lee").hover();
   }],
   ["share-person-menu", "panels.html?panel=share&state=people", '[data-testid="plan-share"]', async (page) => {
-    await page.getByTestId("share-reviewer-sam").getByRole("button", { name: "Sam Rivera" }).click();
+    await page.getByTestId("share-person-sam").getByRole("button", { name: "What Sam Rivera can do" }).click();
   }],
   ["reader-teammate", "panels.html?panel=share&state=reviewer", "view"],
 ];

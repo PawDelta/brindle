@@ -93,6 +93,7 @@ def access(parts, backend, monkeypatch):
 
 
 @pytest.mark.parametrize("target", ["plan", "library"])
+@pytest.mark.variant("the plan and Library reader routes each grant reviewer rights")
 def test_share_panel_reviewer_can_comment_and_sign_off(access, target):
     pid, library, app = access
     assert app.post(f"/v1/plans/{pid}/share", json={"scope": TEAM}).status_code == 200
@@ -111,6 +112,7 @@ def test_share_panel_reviewer_can_comment_and_sign_off(access, target):
     assert signed.status_code == 200 and signed.json()["signed_off"]
 
 
+@pytest.mark.variant("a downgrade to view must remove edit and comment")
 def test_share_viewer_reads_but_cannot_edit_after_role_change(access):
     pid, library, app = access
     route = f"/v1/plans/{pid}/share"

@@ -9,6 +9,7 @@ from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: 
 from test_shared_plan_docs import DESIGN, DOC
 
 
+@pytest.mark.variant("a plain viewer, not only a reviewer, must get Shared with you")
 def test_viewer_receives_shared_item(db, monkeypatch):
     class Feed:
         def call(self, *args, **kwargs):
@@ -29,6 +30,7 @@ def test_viewer_receives_shared_item(db, monkeypatch):
 
 
 @pytest.mark.parametrize("action", ["grant", "decline"])
+@pytest.mark.variant("grant and decline must each resolve the author's request")
 def test_access_request_reaches_author(db, lib, app, monkeypatch, action):
     queued = []
 

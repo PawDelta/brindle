@@ -36,7 +36,7 @@ const who = (p: Covered) => {
 const why = (p: Covered) => {
   if (p.when === "label") return `Has the label ${p.label}`;
   if (p.when === "paths") return `Touches ${(p.matched ?? []).join(", ")}`;
-  return "Every design";
+  return "Every plan";
 };
 
 const day = (seconds: number) => new Date(seconds * 1000).toLocaleDateString();
@@ -87,7 +87,7 @@ function Override({ plan, rev, policy, action, client, candidates, label, busy, 
         </>
       )}
       <input className={`${field} text-[12.5px]`} aria-label="Reason" placeholder={standIn ? "Why they're standing in" : "Why it's waived for this revision"} value={reason} onChange={(e) => setReason(e.target.value)} />
-      {stale && <p role="alert" className="m-0 text-xs text-sap">This design has a new revision. Cancel, read it, and start again.</p>}
+      {stale && <p role="alert" className="m-0 text-xs text-sap">This plan has a new revision. Cancel, read it, and start again.</p>}
       <div className="flex items-center gap-1.5">
         <button type="button" className={`${main} text-xs`} disabled={busy || !ready} onClick={() => void send()}>{standIn ? "Name stand-in" : "Waive once"}</button>
         <button type="button" className={`${quiet} text-xs`} onClick={close}>Cancel</button>

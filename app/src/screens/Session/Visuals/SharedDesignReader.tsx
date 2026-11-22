@@ -81,7 +81,7 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
     <>
       <BackButton onBack={onBack} label={backLabel} />
       <span className="mx-1 h-5 w-px bg-line" aria-hidden />
-      <h2 title={title ?? shown?.title} className="min-w-0 truncate text-[13px] font-semibold">{title ?? shown?.title ?? "Design doc"}</h2>
+      <h2 title={title ?? shown?.title} className="min-w-0 truncate text-[13px] font-semibold">{title ?? shown?.title ?? "Plan"}</h2>
     </>
   );
   return (

@@ -36,6 +36,7 @@ def library(team, monkeypatch):
 
 
 @pytest.mark.parametrize("concurrent", [False, True])
+@pytest.mark.variant("Enterprise and Team admins reach the setting through different gates")
 def test_admin_changes_one_setting_and_member_reads_lock(library, concurrent):
     code, state = _send("GET", "/v1/org-settings")
     assert code == 200

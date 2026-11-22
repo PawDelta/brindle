@@ -77,7 +77,7 @@ def _rows(raw: object) -> list[dict]:
             continue
         title = r.get("title")
         row = {"kind": r["kind"], "key": key, "doc_id": doc, "read": r.get("read") is True,
-               "title": title if isinstance(title, str) and title else "Design doc",
+               "title": title if isinstance(title, str) and title else "Plan",
                "created_at": _int(r.get("created_at"))}
         if r["kind"] == ACCESS:
             if r.get("role") not in ("comment", "edit") or person(r.get("requester")) is None:

@@ -97,7 +97,7 @@ function titleOf(row: Row): string {
     case "question":
       return item.detail?.trim() || describeItem(item);
     case "review_requested":
-      return n > 1 ? `${n} plans to review from ${personName(item.from_person)}` : item.detail || "Design doc";
+      return n > 1 ? `${n} plans to review from ${personName(item.from_person)}` : item.detail || "Plan";
     case "org_notice":
       return n > 1 ? `${n} notices from your ${item.detail || "admin"}` : item.reason;
     case "signoff_progress":
@@ -106,7 +106,7 @@ function titleOf(row: Row): string {
     case "shared_doc_comment":
     case "changes_requested":
     case "signed_off":
-      return item.detail || "Design doc";
+      return item.detail || "Plan";
     case "pr_ready":
       return item.detail?.trim() || describeItem(item);
     case "pr_opened":
@@ -167,7 +167,7 @@ function metaOf(row: Row, ctx: QueueContext): ReactNode[] {
     case "waiting":
       return [<><b>{who ?? "An agent"}</b> waits at its prompt</>, session, branch && <span className="mono">{branch}</span>, <span className="iq-wait">paused until you answer</span>];
     case "review_requested":
-      return row.items.length > 1 ? row.items.map((i) => <>{i.detail || "Design doc"} {decisionCount(i)}</>) : [<><b>{personName(item.from_person)}</b> asked for your review</>, "plan", decisionCount(item)];
+      return row.items.length > 1 ? row.items.map((i) => <>{i.detail || "Plan"} {decisionCount(i)}</>) : [<><b>{personName(item.from_person)}</b> asked for your review</>, "plan", decisionCount(item)];
     case "shared_with_you":
       return [<><b>{personName(item.from_person)}</b> shared this plan with you</>];
     case "access_requested":
@@ -705,7 +705,7 @@ function RowBody(props: RowProps & { title: string }) {
     return (
       <div className="iq-body" data-testid="row-body">
         {row.items.length > 1
-          ? <div className="iq-people">{row.items.map((i) => <div key={itemKey(i)}><i>○</i>{i.detail || "Design doc"} {decisionCount(i)} <button type="button" className="btn btn-quiet text-xs" disabled={i.doc == null || !nav} onClick={open(i)}>Review</button></div>)}</div>
+          ? <div className="iq-people">{row.items.map((i) => <div key={itemKey(i)}><i>○</i>{i.detail || "Plan"} {decisionCount(i)} <button type="button" className="btn btn-quiet text-xs" disabled={i.doc == null || !nav} onClick={open(i)}>Review</button></div>)}</div>
           : <div className="iq-facts"><span>plan</span>{decisionCount(item)}{item.from_person && <span>from {personName(item.from_person)}</span>}</div>}
         <div className="iq-acts">
           {row.items.length === 1 && <button type="button" className="btn btn-primary text-xs" data-primary disabled={item.doc == null || !nav} onClick={open(item)}>Review <Kbd k="⏎" /></button>}
@@ -840,7 +840,7 @@ function Threads({ row, ctx, client, settle, markRead, triage }: RowProps & { tr
   // The way to the doc and triage share the last thread's row of actions, beside its Reply.
   const rest = (
     <>
-      {nav && <button type="button" className="btn btn-quiet text-xs" onClick={() => nav({ screen: "shared-design", doc, title: item.detail ?? undefined, repo })}>Open in the doc ↗</button>}
+      {nav && <button type="button" className="btn btn-quiet text-xs" onClick={() => nav({ screen: "shared-design", doc, title: item.detail ?? undefined, repo })}>Open in the plan ↗</button>}
       {triage}
     </>
   );

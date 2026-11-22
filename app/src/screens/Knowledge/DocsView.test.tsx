@@ -146,7 +146,7 @@ describe("docs view", () => {
     await waitFor(() => expect(shown()).toEqual(["d1", "d2"]));
     fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="d1"]')!).getByRole("button"));
     await screen.findByTestId("doc-body");
-    const recordElement = screen.getByRole("complementary", { name: "Design record" });
+    const recordElement = screen.getByRole("complementary", { name: "Plan record" });
     expect(recordElement.querySelector("[data-revision='2']")).toBeTruthy();
     expect(recordElement.querySelector("[data-decision='storage']")).toBeTruthy();
     expect(within(recordElement).getByRole("region", { name: "Comments" })).toBeTruthy();
@@ -186,7 +186,7 @@ describe("docs view", () => {
     pick("Reviewer", "");
     expect(shown()).toHaveLength(4);
     fireEvent.click(screen.getByTestId("docs").querySelector("li[data-doc='d1'] button")!);
-    const record = await screen.findByRole("complementary", { name: "Design record" });
+    const record = await screen.findByRole("complementary", { name: "Plan record" });
     const rows = [...record.querySelectorAll("[data-signoff]")].map((r) => `${r.getAttribute("data-signoff")}@${r.getAttribute("data-rev") || "waiting"}:${r.getAttribute("data-signed")}`);
     // Every recorded signature keeps its revision (ops, outside the roster, signed two); dana signed rev 1 only, so she is also waiting.
     expect(rows).toEqual(["sam@2:yes", "dana@1:no", "ops@1:no", "ops@2:yes", "dana@waiting:no"]);

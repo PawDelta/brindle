@@ -90,6 +90,7 @@ def _plan(db, session):
     return plans.propose(db, boss, "# Cloud workers\n\n## Summary\n\nWorkers.", DECISIONS)["id"]
 
 
+@pytest.mark.variant("an own answer must persist across a reopen, not just in memory")
 def test_an_own_answer_survives_a_reopen(db, session):
     pid = _plan(db, session)
     _add(pid, f"  {TEXT} ")
@@ -138,6 +139,7 @@ def test_an_older_library_keeps_own_answers_here_without_barring_the_review(db, 
     pytest.param({"rev": 1, "text": "something else"}, id="edit"),
     pytest.param({"rev": 1, "remove": True}, id="remove"),
 ])
+@pytest.mark.variant("each edit path (edit/remove) must respect another person's pick")
 def test_an_answer_someone_else_picked_cant_be_changed(db, shared, change):
     pid, lib, net = shared
     answer = _add(pid)

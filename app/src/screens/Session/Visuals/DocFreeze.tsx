@@ -49,11 +49,11 @@ export function LiveStrip({ isAuthor, author, here, reviewers, editing, connecte
 }) {
   const others = here.length - 1;
   const who = editing
-    ? `${names(here)} ${here.length === 1 ? "is" : "are"} in this doc. Changes save as you type.`
-    : `${others > 0 ? `${names(here)} are in this doc.` : "Nobody else is in this doc."}`;
+    ? `${names(here)} ${here.length === 1 ? "is" : "are"} in this plan. Changes save as you type.`
+    : `${others > 0 ? `${names(here)} are in this plan.` : "Nobody else is in this plan."}`;
   const asks = reviewers.length ? ` and asks ${names(reviewers)} to sign it` : "";
   return (
-    <section aria-label="Live document" data-state="editing" data-testid="doc-live-strip" className={`${strip} bg-[color-mix(in_srgb,var(--group-1)_9%,transparent)]`}>
+    <section aria-label="Live plan" data-state="editing" data-testid="doc-live-strip" className={`${strip} bg-[color-mix(in_srgb,var(--group-1)_9%,transparent)]`}>
       <span aria-hidden className="size-[7px] flex-none rounded-full bg-[var(--group-1)] shadow-[0_0_0_3px_color-mix(in_srgb,var(--group-1)_25%,transparent)]" />
       <b className="font-semibold">Live</b>
       <span className="min-w-0 text-ink-2">{who}</span>
@@ -82,7 +82,7 @@ export function LockStrip({ version, author, writers, isAuthor, connected, refus
   onHistory?(): void;
 }) {
   return (
-    <section aria-label="Live document" data-state="sign_off" data-testid="doc-lock-strip" className={`${strip} bg-branch-soft`}>
+    <section aria-label="Live plan" data-state="sign_off" data-testid="doc-lock-strip" className={`${strip} bg-branch-soft`}>
       <LockIcon className="text-branch" />
       <b className="font-semibold" data-testid="doc-version" data-version={version.id}>{`Version ${version.id} is locked for sign-off`}</b>
       <span className="text-ink-2">
@@ -102,7 +102,7 @@ export function LockStrip({ version, author, writers, isAuthor, connected, refus
 
 export function OfflineStrip({ author, children }: { author: string; children?: ReactNode }) {
   return (
-    <section aria-label="Live document" data-state="author_offline" className={`${strip} bg-sap-soft`}>
+    <section aria-label="Live plan" data-state="author_offline" className={`${strip} bg-sap-soft`}>
       <p role="status" className="m-0 text-ink">{`${author || "The author"} went offline while editing · comments and suggestions only`}</p>
       {children}
     </section>
