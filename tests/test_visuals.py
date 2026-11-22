@@ -368,6 +368,7 @@ def test_dismiss_tells_the_agent_once_clears_the_inbox_and_a_new_revision_asks_a
 
 @pytest.mark.parametrize("close", ["answer", pytest.param("dismiss", marks=pytest.mark.variant(
     "a dismissed visual must hand the question back to the Inbox, not leave it hidden"))])
+@pytest.mark.variant("answering and dismissing are separate lifecycles that must each restore the question")
 def test_open_choice_visual_is_the_one_place_to_answer_its_sessions_question(db, session, close):
     from brindle import autopilot
 

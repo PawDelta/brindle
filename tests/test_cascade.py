@@ -105,6 +105,7 @@ def test_the_measured_table_orders_runnable_candidates_and_unmeasured_keep_tier_
     assert picks == ["dev.gpt"] + ["dev.claude-sonnet"] * 4
 
 
+@pytest.mark.variant("routing history saved under an old id must still count for its renamed profile")
 def test_measured_history_under_an_old_id_counts_for_its_renamed_profile():
     # _table keys its measured cells by the old id; the renamed profile reads them.
     table = cascade.parse(_table(50))
@@ -113,6 +114,7 @@ def test_measured_history_under_an_old_id_counts_for_its_renamed_profile():
 
 
 @pytest.mark.parametrize("old_first", [True, False])
+@pytest.mark.variant("history under both spellings must merge, not overwrite, whichever is read first")
 def test_mixed_old_and_new_id_history_keeps_both_halves_in_either_order(old_first):
     old = {"developer-codex": {"medium": {"p": 0.9, "first_try": 0.5, "usd": 1.0, "minutes": 20, "runs": 50}}}
     new = {"dev.gpt": {"medium": {"p": 0.6, "first_try": 0.5, "usd": 100.0, "minutes": 100, "runs": 2}}}

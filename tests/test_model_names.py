@@ -11,6 +11,7 @@ def test_learner_history_under_an_old_id_is_recorded_under_the_renamed_profile()
     assert body["profile"] == "dev.gpt"
 
 
+@pytest.mark.variant("a built-in profile added without a model entry would show its raw id in the app")
 def test_every_builtin_profile_has_a_display_name():
     for name in profiles._builtin_names("brindle.builtin_agents"):
         p = profiles.load_profile(name)
@@ -23,6 +24,7 @@ def test_every_builtin_profile_has_a_display_name():
         assert shown["effort"] == p.effort, name
 
 
+@pytest.mark.variant("managed and suffixed Claude ids must name the right model, not the raw route id")
 def test_full_claude_ids_resolve_to_their_model():
     # An env override or managed route gives a full id, not the alias.
     assert model_names.model_name("eu.anthropic.claude-opus-x-v1:0", "claude") == model_names.MODELS["opus"]
@@ -34,10 +36,12 @@ def test_full_claude_ids_resolve_to_their_model():
     ("reviewer-codex", True),
     ("dev.gpt", False),
 ])
+@pytest.mark.variant("role detection must accept old and new reviewer ids and reject developer ids")
 def test_reviewer_ids_are_recognised_in_both_spellings(name, reviewer):
     assert model_names.is_reviewer_id(name) is reviewer
 
 
+@pytest.mark.variant("an org policy written before the rename must keep allowing the same profiles")
 def test_an_org_allowlist_written_with_old_ids_still_allows_the_renamed_profiles():
     from brindle.pro.team_policy import Access
 
@@ -76,6 +80,7 @@ def test_handover_from_an_old_predecessor_id_is_found():
     assert cascade.parse(raw).handover_p("developer-heavy", "dev.gpt") == 0.99
 
 
+@pytest.mark.variant("an alias must never let a custom profile borrow a built-in's org permission")
 def test_a_custom_profile_under_an_old_id_is_not_allowed_by_the_renamed_entry(tmp_path):
     from brindle.pro.team_policy import Access
 

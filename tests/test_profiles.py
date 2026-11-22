@@ -4,6 +4,7 @@ from brindle import model_names
 from brindle.profiles import _frontmatter, _list, load_profile
 
 
+@pytest.mark.variant("configs naming an old built-in id must keep loading after the rename")
 def test_an_old_built_in_id_loads_its_renamed_profile():
     for old, new in model_names.ALIASES.items():
         p = load_profile(old)
@@ -11,6 +12,7 @@ def test_an_old_built_in_id_loads_its_renamed_profile():
         assert p.provider == load_profile(new).provider
 
 
+@pytest.mark.variant("custom agents extending an old id must still inherit the renamed built-in")
 def test_a_custom_agent_that_extends_an_old_id_still_works(tmp_path):
     agents = tmp_path / ".brindle" / "agents"
     agents.mkdir(parents=True)
@@ -30,6 +32,7 @@ def test_a_custom_agent_that_extends_an_old_id_still_works(tmp_path):
     ("auditor", "provider: codex", "auditor"),         # built on nothing: a custom role
     ("developer-mine", "provider: codex", "developer"),  # a standalone copy under the old naming
 ])
+@pytest.mark.variant("each row is a distinct way a profile gets its role: own line, built-in, or inherited")
 def test_base_role_follows_the_extends_chain(tmp_path, name, text, role):
     from brindle.profiles import base_role
 
@@ -138,6 +141,7 @@ def test_routing_keeps_a_custom_profile_under_an_old_id(tmp_path, custom, routed
     assert load_repo_config(repo).routing["medium"][0] == routed
 
 
+@pytest.mark.variant("primary and second review must normalise old ids the same way")
 def test_second_review_names_the_same_profile_as_the_primary(tmp_path):
     from brindle.config import load_repo_config
 
