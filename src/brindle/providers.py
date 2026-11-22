@@ -113,7 +113,7 @@ def _codex_config() -> dict:
         return {}
 
 
-def codex_default_model(cwd: str) -> str | None:
+def codex_default_model(cwd: str, *, env: dict[str, str] | None = None) -> str | None:
     """Ask the installed CLI for its configured model, else its catalog default.
 
     No guessed fallback: an unavailable CLI or an unrecognized response leaves
@@ -122,7 +122,7 @@ def codex_default_model(cwd: str) -> str | None:
     from brindle import codex_hook
 
     try:
-        server = codex_hook._AppServer(codex_binary(), [])
+        server = codex_hook._AppServer(codex_binary(), [], cwd=cwd, **({"env": env} if env is not None else {}))
         try:
             cfg = server.call("config/read", {"includeLayers": False, "cwd": cwd})["config"]
             active = (cfg.get("profiles") or {}).get(cfg.get("profile"), {})

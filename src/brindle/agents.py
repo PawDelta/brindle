@@ -1226,6 +1226,13 @@ def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = Non
                            "assign", "starting", "", None, time.time())
     effective = _effective_window_env(agent, ws, m)
     profile = replace(profile, provider=agent.provider)
+    if profile.provider == "codex" and not profile.model:
+        from brindle import policy
+        from brindle.config import load_repo_config
+
+        decision = policy.check_launch(load_repo_config(ws.repo_root), ws, agent, effective)
+        if not decision.allowed:
+            return f"profile {profile_name!r} refused by policy: {decision.reason}"
     denied = model_access.refused(profile_name, ws.repo_root, fp=fingerprint(profile, effective))
     if denied:
         return denied.line()
@@ -5041,8 +5048,15 @@ def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig) -> None:
         raise AgentError(f"reviewer profile {name!r} can't run now: {health.reason}")
     try:
         from brindle import policy as pol
-        d = pol.check_assign(cfg, ws.repo_root, name, "code review", "review")
+        if chosen.provider == "codex" and not chosen.model:
+            candidate = Agent("preflight", ws.id, name, chosen.provider, None,
+                              "review", "starting", "", None, time.time())
+            d = pol.check_launch(cfg, ws, candidate, _effective_window_env(candidate, ws))
+        else:
+            d = pol.check_assign(cfg, ws.repo_root, name, "code review", "review")
     except Exception:  # noqa: BLE001 - an unreadable policy doesn't stop a review
+        if chosen.provider == "codex" and not chosen.model:
+            raise AgentError(f"reviewer profile {name!r}: couldn't resolve its model policy in the launch context") from None
         return
     if not d.allowed:
         raise AgentError(f"reviewer profile {name!r} refused by policy: {d.reason}")

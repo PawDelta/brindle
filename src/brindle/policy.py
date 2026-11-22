@@ -120,7 +120,8 @@ def _decide(what: str, cfg: RepoConfig, repo_root: str, ask) -> Decision:
 
 
 def _profile_fields(profile: str | None, repo_root: str, *,
-                    user_library: bool = False) -> tuple[str | None, str | None]:
+                    user_library: bool = False, cwd: str | None = None,
+                    env: dict[str, str] | None = None) -> tuple[str | None, str | None]:
     """(provider, model) of ``profile``, best effort. ``user_library``: the
     person's profile of that name, never the repo's own (the company route
     is still the repo's)."""
@@ -135,6 +136,12 @@ def _profile_fields(profile: str | None, repo_root: str, *,
             from brindle import company_login
 
             model = company_login.claude_model(model, repo_root)
+        if p.provider == "codex" and not model and env is not None:
+            from brindle.providers import codex_default_model
+
+            # The launch has no --model: ask its CLI, rather than infer one
+            # from the supervisor's model environment or managed settings.
+            return p.provider, codex_default_model(cwd or repo_root, env=env)
         if not model:
             try:
                 from brindle.autopilot import effective_profile_model
@@ -145,7 +152,7 @@ def _profile_fields(profile: str | None, repo_root: str, *,
             if p.provider == "codex":
                 from brindle.providers import codex_default_model
 
-                model = codex_default_model(repo_root)
+                model = codex_default_model(cwd or repo_root, env=env)
             elif p.provider == "antigravity":
                 model = "gemini-2.5-pro"
             elif p.provider == "claude":
@@ -158,16 +165,17 @@ def _profile_fields(profile: str | None, repo_root: str, *,
 def check_assign(cfg: RepoConfig, repo_root: str, profile: str, task: str, mode: str, *,
                  files: list[str] | None = None, weight: str | None = None,
                  branch: str | None = None, actor: Agent | None = None,
-                 running_workers: int | None = None) -> Decision:
+                 running_workers: int | None = None, cwd: str | None = None,
+                 env: dict[str, str] | None = None) -> Decision:
     """The plugin's decision on starting ``task`` with ``profile`` (allow
     without a plugin). In air-gap mode (``brindle.airgap``) only a local
     profile gets as far as the plugin. A denial is audited."""
     d = assign_decision(cfg, repo_root, profile, task, mode, files=files, weight=weight, branch=branch,
-                        actor=actor, running_workers=running_workers)
+                        actor=actor, running_workers=running_workers, cwd=cwd, env=env)
     if not d.allowed:              # an air-gap refusal is audited like any other denial
         from brindle import events
 
-        provider, model = _profile_fields(profile, repo_root)
+        provider, model = _profile_fields(profile, repo_root, cwd=cwd, env=env)
         events.emit_denial(cfg, repo_root, "assign", d.reason, branch=branch, profile=profile,
                            provider=provider, model=model, actor=actor.id if actor else "user")
     return d
@@ -176,13 +184,14 @@ def check_assign(cfg: RepoConfig, repo_root: str, profile: str, task: str, mode:
 def assign_decision(cfg: RepoConfig, repo_root: str, profile: str, task: str, mode: str, *,
                     files: list[str] | None = None, weight: str | None = None,
                     branch: str | None = None, actor: Agent | None = None,
-                    running_workers: int | None = None) -> Decision:
+                    running_workers: int | None = None, cwd: str | None = None,
+                    env: dict[str, str] | None = None) -> Decision:
     """``check_assign``'s decision without auditing it: routing asks it of
     each candidate it weighs (brindle.cascade), and only the delegation that
     actually starts (or is refused) is audited."""
     from brindle import airgap
 
-    provider, model = _profile_fields(profile, repo_root)
+    provider, model = _profile_fields(profile, repo_root, cwd=cwd, env=env)
     info = AssignInfo(
         repo_root=repo_root, task=task, files=tuple(files or ()), weight=weight,
         profile=profile, provider=provider, model=model, mode=mode, branch=branch,
@@ -193,6 +202,23 @@ def assign_decision(cfg: RepoConfig, repo_root: str, profile: str, task: str, mo
         if not ok:
             return deny(why)
     return _decide("delegation", cfg, repo_root, lambda p: p.check_assign(info))
+
+
+def check_launch(cfg: RepoConfig, ws: Workspace, agent: Agent, env: dict[str, str]) -> Decision:
+    """Recheck delegation in the actual pane context before dispatch.
+
+    A queued worker may not have had its target worktree at admission. A
+    resume already has a row, so exclude itself from the capacity check.
+    """
+    from brindle.db import DB
+
+    db = DB()
+    try:
+        running = sum(a.id != agent.id for a in worker_agents(db, ws.repo_root))
+    finally:
+        db.conn.close()
+    return check_assign(cfg, ws.repo_root, agent.profile, agent.task or "", agent.mode,
+                        branch=ws.branch, running_workers=running, cwd=ws.path, env=env)
 
 
 def worker_agents(db: DB, repo_root: str) -> list[Agent]:
@@ -236,4 +262,4 @@ def check_merge(cfg: RepoConfig, ws: Workspace, worker: Agent | None,
 
 
 __all__ = ["GROUP", "AssignInfo", "Decision", "MergeInfo", "PolicyPlugin", "allow",
-           "check_assign", "check_merge", "deny", "plugin", "running_workers", "worker_agents"]
+           "check_assign", "check_launch", "check_merge", "deny", "plugin", "running_workers", "worker_agents"]

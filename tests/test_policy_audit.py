@@ -1,4 +1,5 @@
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -66,7 +67,7 @@ def test_audit_respects_policy_and_reviewer_fallbacks(db, repo, monkeypatch, org
 def test_unpinned_codex_uses_installed_default_and_fails_closed(repo, monkeypatch, org_policy,
                                                               configured, cli_default):
     class AppServer:
-        def __init__(self, *a):
+        def __init__(self, *a, **kw):
             pass
 
         def call(self, method, params):
@@ -87,8 +88,51 @@ def test_unpinned_codex_uses_installed_default_and_fails_closed(repo, monkeypatc
     org_policy[0] = replace(org_policy[0], allowed_models=("gpt-5.3-codex",))
     cfg = RepoConfig()
     assert not policy.assign_decision(cfg, str(repo), profile.name, "audit", "review").allowed
+    assert not policy.assign_decision(cfg, str(repo), profile.name, "audit", "review", cwd=str(repo), env={}).allowed
     expected = configured or cli_default
     assert policy._profile_fields(profile.name, str(repo)) == ("codex", expected)
     if expected:
         org_policy[0] = replace(org_policy[0], allowed_models=(expected,))
         assert policy.assign_decision(cfg, str(repo), profile.name, "audit", "review").allowed
+
+
+@pytest.mark.parametrize("context", ["worktree", "profile_home"])
+@pytest.mark.variant("Worktree config and profile CODEX_HOME are independent bypass paths through the same resolver")
+def test_unpinned_codex_policy_checks_the_launch_context(db, repo, tmp_path, monkeypatch, org_policy, context):
+    import json
+    from io import StringIO
+    from brindle import providers, tmux
+
+    ws = workspaces.adopt_root(db, str(repo))
+    default_home = providers.codex_home()
+    launch_home = str(tmp_path / "alternate-codex") if context == "profile_home" else default_home
+    if context == "worktree":
+        launch_dir = repo / "trusted-worktree"
+        launch_dir.mkdir()
+        ws = replace(ws, path=str(launch_dir))
+    profile = replace(profiles.load_profile("reviewer-codex", str(repo)), model=None,
+                      env={"CODEX_HOME": launch_home})
+    monkeypatch.setattr(profiles, "load_profile", lambda *a: profile)
+    monkeypatch.setattr(agents, "load_profile", lambda *a: profile)
+    monkeypatch.setattr(agents, "unusable", lambda *a: None)
+    monkeypatch.setenv("CODEX_MODEL", "gpt-allowed")
+    monkeypatch.setattr(tmux, "inherited_env", lambda *a: {})
+    monkeypatch.setattr(agents._model_checker, "check", lambda *a, **kw: SimpleNamespace(status="available"))
+    org_policy[0] = replace(org_policy[0], allowed_models=("gpt-allowed",))
+
+    def start(*a, env=None, cwd=None, **kw):
+        home = (env or {}).get("CODEX_HOME", default_home)
+        different = (cwd or str(repo)) != str(repo) if context == "worktree" else home != default_home
+        messages = [{"id": 1, "result": {}},
+                    {"id": 2, "result": {"config": {"model": "gpt-disallowed" if different else "gpt-allowed"}}}]
+        return SimpleNamespace(stdin=StringIO(), stdout=StringIO("\n".join(map(json.dumps, messages))),
+                               kill=lambda: None, wait=lambda **kw: None)
+
+    monkeypatch.setattr(codex_hook.spawn, "start", start)
+    with pytest.raises(agents.AgentError):
+        agents._reviewer_can_run(profile.name, ws, RepoConfig())
+    worker = Agent("worker", ws.id, profile.name, "codex", None, "assign", "starting", "", None, 1)
+    assert agents.model_problem(profile.name, ws, agent=worker, profile=profile, m=None)
+    org_policy[0] = replace(org_policy[0], allowed_models=("gpt-disallowed",))
+    agents._reviewer_can_run(profile.name, ws, RepoConfig())
+    assert agents.model_problem(profile.name, ws, agent=worker, profile=profile, m=None) is None
