@@ -3,10 +3,16 @@ from types import SimpleNamespace
 
 import pytest
 
-from brindle import agents, autopilot, codex_hook, policy, profiles, workspaces
+from brindle import agents, autopilot, codex_hook, policy, profiles, providers, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from brindle.pro.team_policy import OrgPolicy, ProPolicy
+
+
+@pytest.fixture
+def real_codex_default_model(codex_default_model, monkeypatch):
+    """Exercise the resolver with the test's fake CLI responses."""
+    monkeypatch.setattr(providers, "codex_default_model", codex_default_model)
 
 
 @pytest.fixture
@@ -61,10 +67,11 @@ def test_audit_respects_policy_and_reviewer_fallbacks(db, repo, monkeypatch, org
 
 @pytest.mark.parametrize("configured,cli_default", [
     (None, "gpt-6.1-terra"),
-    ("gpt-configured", "gpt-6.1-terra"),
+    pytest.param("gpt-configured", "gpt-6.1-terra", marks=pytest.mark.variant(
+        "An explicit CLI config model must take precedence over the catalog default")),
     (None, None),
 ])
-def test_unpinned_codex_uses_installed_default_and_fails_closed(repo, monkeypatch, org_policy,
+def test_unpinned_codex_uses_installed_default_and_fails_closed(repo, monkeypatch, org_policy, real_codex_default_model,
                                                               configured, cli_default):
     class AppServer:
         def __init__(self, *a, **kw):
@@ -98,10 +105,11 @@ def test_unpinned_codex_uses_installed_default_and_fails_closed(repo, monkeypatc
 
 @pytest.mark.parametrize("context", ["worktree", "profile_home"])
 @pytest.mark.variant("Worktree config and profile CODEX_HOME are independent bypass paths through the same resolver")
-def test_unpinned_codex_policy_checks_the_launch_context(db, repo, tmp_path, monkeypatch, org_policy, context):
+def test_unpinned_codex_policy_checks_the_launch_context(db, repo, tmp_path, monkeypatch, org_policy,
+                                                       real_codex_default_model, context):
     import json
     from io import StringIO
-    from brindle import providers, tmux
+    from brindle import tmux
 
     ws = workspaces.adopt_root(db, str(repo))
     default_home = providers.codex_home()

@@ -331,6 +331,7 @@ def test_pack_includes_callers_of_changed_and_deleted_functions(repo, monkeypatc
 @pytest.mark.parametrize("model", ["haiku", pytest.param("sonnet", marks=pytest.mark.variant("a Sonnet light reviewer is still refused for risky changes"))])
 def test_sizing_keeps_strong_reviewer_when_light_is_unsafe_or_unavailable(db, tmp_path, monkeypatch, model):
     ws = SimpleNamespace(id="ws", path=str(tmp_path), repo_root=str(tmp_path), base_branch="main", branch="feature")
+    monkeypatch.setattr(agents, "_effective_window_env", lambda *a: {})
     monkeypatch.setattr(git, "out", lambda *a: "1\t0\tdocs/a.md\0")
     light = load_profile("reviewer-light", str(tmp_path))
     light.model = model
