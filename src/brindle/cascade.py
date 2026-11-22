@@ -163,7 +163,11 @@ def _handover_by_identity(handover: dict) -> dict:
 
 def _merge_cells(a: dict, b: dict) -> dict:
     """One cell from two cells of the same identity, the same whichever is
-    first: runs add up and each measured field is weighted by its runs."""
+    first. Runs add up. ``p`` and ``first_try`` are weighted by runs. ``usd``
+    and ``minutes`` are medians, and a median of two medians is not the median
+    of the pooled runs, so they take the cell with more runs (the larger sample
+    speaks for both) rather than an average. The pooled median would need the
+    runs themselves, which a table keeps only as summaries."""
     wa, wb = a.get("runs") or 0, b.get("runs") or 0
     if wa + wb == 0:
         return {**b, **a}
@@ -171,6 +175,8 @@ def _merge_cells(a: dict, b: dict) -> dict:
     for k in set(a) & set(b):
         if k == "runs":
             out[k] = wa + wb
+        elif k in ("usd", "minutes"):
+            out[k] = a[k] if (wa, repr(a[k])) >= (wb, repr(b[k])) else b[k]
         elif _num(a[k]) and _num(b[k]):
             out[k] = (a[k] * wa + b[k] * wb) / (wa + wb)
         else:

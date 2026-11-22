@@ -506,10 +506,19 @@ def second_review_pending(db: DB, cfg: RepoConfig, worker: Agent, ws: Workspace)
     # An approval in each slot: the commit's review ("") and the second
     # review's (its profile). Two in one slot are one review.
     # From the reviews row first: the reviewer's own row is deleted once it's closed.
-    slots = {r.review_slot if r.review_slot is not None
-             else _review_slot(db, a) if (a := db.get_agent(r.reviewer_id)) is not None else None
+    slots = {_slot(r.review_slot if r.review_slot is not None
+                   else _review_slot(db, a) if (a := db.get_agent(r.reviewer_id)) is not None else None,
+                   ws.repo_root)
              for r in reviews if r.reviewer_id}
-    return not {"", profile} <= slots
+    return not {"", _slot(profile, ws.repo_root)} <= slots
+
+
+def _slot(slot: str | None, repo_root: str) -> str | None:
+    """A review slot as its current profile id: a slot saved under an old
+    built-in id (before the rename) matches the renamed profile's slot."""
+    from brindle.profiles import current_name
+
+    return slot if not slot else current_name(slot, repo_root)
 
 
 def _review_slot(db: DB, reviewer: Agent) -> str | None:
@@ -1421,13 +1430,13 @@ def _review_round_pending(db: DB, ws: Workspace, worker: Agent, cfg: RepoConfig,
                           sha: str, reviews: list[Review]) -> bool:
     """Wait for each configured or already-started review slot to give a verdict."""
     second = second_profile(db, cfg, worker, ws)
-    expected = {"", second} if second else set()
+    expected = {"", _slot(second, ws.repo_root)} if second else set()
     latest: dict[str, Agent] = {}
     for a in sorted(db.list_agents(ws.id), key=lambda a: a.created_at):
         if a.mode == "review" and a.review_sha == sha and (slot := _review_slot(db, a)) is not None:
-            latest[slot] = a
+            latest[_slot(slot, ws.repo_root)] = a
     expected.update(latest)
-    completed = {r.review_slot for r in reviews}
+    completed = {_slot(r.review_slot, ws.repo_root) for r in reviews}
     return not expected <= completed or any(
         not any(r.reviewer_id == a.id for r in reviews) for a in latest.values())
 

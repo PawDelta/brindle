@@ -51,5 +51,17 @@ def test_handover_from_an_old_predecessor_id_is_found():
 
     raw = _table(50)
     raw["handover"] = {"developer-heavy>developer-codex": {"p": 0.99, "runs": 10}}
-    assert cascade.parse(raw).handover_p("dev.claude-opus", "dev.gpt") == 0.99
+    assert cascade.parse(raw).handover_p("developer-heavy", "dev.gpt") == 0.99
+
+
+def test_a_custom_profile_under_an_old_id_is_not_allowed_by_the_renamed_entry(tmp_path):
+    from brindle.pro.team_policy import Access
+
+    repo = tmp_path / "proj"
+    (repo / ".brindle" / "agents").mkdir(parents=True)
+    (repo / ".brindle" / "agents" / "developer-codex.md").write_text(
+        "---\nname: developer-codex\nprovider: codex\n---\nDo it.\n")
+    acc = Access(allowed_profiles=("developer-codex",), repo_root=str(repo))
+    assert acc.allows_profile("developer-codex", "codex", None)
+    assert not acc.allows_profile("dev.gpt", "codex", None)
 
