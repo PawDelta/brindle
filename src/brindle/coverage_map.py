@@ -63,6 +63,12 @@ COVERAGE_ARGS = ("--cov=.", "--cov-context=test", "--cov-report=")
 PYTEST_CONFIG = ("pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini")
 LEFTOVER_SECONDS = 86400   # a run directory older than this belongs to a run that died
 _STAR = re.compile(r"\bimport[\s\\(]*\*")   # ``from m import *``, however spaced or continued
+_WORDS = re.compile(r"\w+")
+
+
+def _file_words(text: str) -> set[str]:
+    """Word tokens (``\\w+``) of ``text``, for cached membership checks."""
+    return set(_WORDS.findall(text))
 
 
 class Stale(Exception):
@@ -320,6 +326,7 @@ def targets(root: str | Path, data: dict, files: list[str], hits: dict[str, int]
         return {tests[i] for k in entry if not qual or k == qual or k.startswith(qual + ".")
                 for i in entry[k] if 0 <= i < len(tests)}
 
+    words_cache: dict[str, set[str]] = {}
     bindings: dict[str, tuple[set[str], set[str], set[str]]] = {}   # file -> (names rebound, names new, members)
     for f in files:
         if not f.endswith(".py"):
@@ -334,7 +341,7 @@ def targets(root: str | Path, data: dict, files: list[str], hits: dict[str, int]
             if qual and change.at_base and not any(k == qual or k.startswith(qual + ".") for k in entry):
                 raise Stale(f"{qual}() in {f} is newer than the coverage map")
             if change.tables:
-                add(tests_of_tables(root, set(change.tables)))
+                add(tests_of_tables(root, set(change.tables), words_cache=words_cache))
             if qual or change.whole:
                 add(reach(f, qual))   # a function, or a module-level statement of unknown reach
             shared, local, members = bindings.setdefault(f, (set(), set(), set()))
@@ -353,7 +360,7 @@ def targets(root: str | Path, data: dict, files: list[str], hits: dict[str, int]
                 raise Stale(f"module-level code of {f} changed")
             conftest_names[f] = {c.qual.split(".")[0] for c in changes if c.qual}
     if any(any(b) for b in bindings.values()):
-        readers = Readers(root)
+        readers = Readers(root, words_cache=words_cache)
         for f, (shared, local, members) in sorted(bindings.items()):
             if not (shared or local or members):
                 continue
@@ -368,7 +375,7 @@ def targets(root: str | Path, data: dict, files: list[str], hits: dict[str, int]
             for path in whole:
                 add(reach(path, ""))
     for path, names in sorted(conftest_names.items()):
-        add(conftest_tests(root, path, names, commit))
+        add(conftest_tests(root, path, names, commit, words_cache=words_cache))
     return found
 
 
@@ -411,7 +418,8 @@ def rank(data: dict, tests: set[str], hits: dict[str, int]) -> list[str]:
     return sorted(tests, key=key)
 
 
-def conftest_tests(root: Path, path: str, names: set[str], commit: str) -> set[str]:
+def conftest_tests(root: Path, path: str, names: set[str], commit: str, *,
+                   words_cache: dict[str, set[str]] | None = None) -> set[str]:
     """For a change reaching ``names`` (its top-level functions) in the
     conftest ``path``: the test files below it that name a fixture it reaches
     or a helper it changed, since the map credits a session or module
@@ -459,9 +467,23 @@ def conftest_tests(root: Path, path: str, names: set[str], commit: str) -> set[s
                 raise Stale(f"{d.rsplit('::', 1)[-1]}() (a hook, or a decorator brindle can't resolve) is reached "
                             f"by the change to {path}")
         words |= called(reached)
-    word = re.compile(r"\b(" + "|".join(map(re.escape, sorted(words))) + r")\b")
+    plain = {w for w in words if _WORDS.fullmatch(w)}
+    other = words - plain
+    other_re = re.compile(r"\b(" + "|".join(map(re.escape, sorted(other))) + r")\b") if other else None
+
+    def matches(t: str) -> bool:
+        if words_cache is not None and t in words_cache:
+            if plain & words_cache[t]:
+                return True
+            return bool(other_re and other_re.search(_read(root / t)))
+        text = _read(root / t)
+        tw = _file_words(text)
+        if words_cache is not None:
+            words_cache[t] = tw
+        return bool(plain & tw or (other_re and other_re.search(text)))
+
     return {t for t in files if check_scope.is_test_file(t)
-            and (below == "." or t.startswith(below + "/")) and word.search(_read(root / t))}
+            and (below == "." or t.startswith(below + "/")) and matches(t)}
 
 
 FixtureDef = tuple[str | None, bool, set[str], bool]
@@ -547,24 +569,67 @@ class Readers:
     A file that reads it in a module-level statement binding nothing counts
     whole. Over-approximates: a superset of the real readers."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, words_cache: dict[str, set[str]] | None = None):
         self.root = root
         self.files = git.paths(["ls-files", "*.py"], root)
         self._trees: dict[str, ast.Module | None] = {}
         self._texts: dict[str, str] = {}
-        self._walks: dict[str, list] = {}
+        self._words: dict[str, set[str]] = {} if words_cache is None else words_cache
+        self._stars: dict[str, bool] = {}
+        self._index: dict[str, tuple[dict[str, list], dict[str, list]]] = {}
+        self._import_asts: dict[str, tuple[list[str] | None, list[ast.Import | ast.ImportFrom]]] = {}
+        self._statements: dict[str, dict[int, frozenset[str] | None]] = {}
         self.attrs: set[str] = set()   # class members whose readers (``obj.x`` anywhere) are wanted
         self._scanned: set[str] = set()
 
-    def walked(self, path: str, tree: ast.Module) -> list:
-        if path not in self._walks:
-            self._walks[path] = _walk_scoped(tree)
-        return self._walks[path]
+    def indexed(self, path: str, tree: ast.Module) -> tuple[dict[str, list], dict[str, list]]:
+        """(reads by bare name/string, reads by attribute/class-body name/string) in ``tree``."""
+        if path not in self._index:
+            by_load: dict[str, list] = {}
+            by_attr: dict[str, list] = {}
+            for node, qual, at_run, owner in _walk_scoped(tree):
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                    entry = (node.lineno, qual, at_run, owner)
+                    by_load.setdefault(node.id, []).append(entry)
+                    # In a class body a member reads another by its bare name (``doubled = threshold * 2``).
+                    if not at_run and owner is not None and owner[0] == "attr":
+                        by_attr.setdefault(node.id, []).append(entry)
+                elif isinstance(node, ast.Attribute):
+                    by_attr.setdefault(node.attr, []).append((node.lineno, qual, at_run, owner))
+                elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    entry = (node.lineno, qual, at_run, owner)
+                    by_load.setdefault(node.value, []).append(entry)
+                    by_attr.setdefault(node.value, []).append(entry)
+                    tail = node.value.rsplit(".", 1)[-1]
+                    if tail != node.value:
+                        by_attr.setdefault(tail, []).append(entry)
+            self._index[path] = (by_load, by_attr)
+        return self._index[path]
 
     def text(self, path: str) -> str:
         if path not in self._texts:
             self._texts[path] = _read(self.root / path)
         return self._texts[path]
+
+    def words(self, path: str) -> set[str]:
+        if path not in self._words:
+            self._words[path] = _file_words(self.text(path))
+        return self._words[path]
+
+    def has_star(self, path: str) -> bool:
+        if path not in self._stars:
+            self._stars[path] = bool(_STAR.search(self.text(path)))
+        return self._stars[path]
+
+    def _import_nodes(self, path: str, tree: ast.Module) -> tuple[list[str] | None, list[ast.Import | ast.ImportFrom]]:
+        if path not in self._import_asts:
+            from brindle import check_scope
+
+            owner = check_scope._module_path(self.root, path)
+            package = None if owner is None else owner.split(".")[:None if path.endswith("__init__.py") else -1]
+            nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom))]
+            self._import_asts[path] = (package, nodes)
+        return self._import_asts[path]
 
     def tree(self, path: str) -> ast.Module | None:
         if path not in self._trees:
@@ -593,9 +658,8 @@ class Readers:
             if not work:   # members: every file that may read them
                 fresh = self.attrs - self._scanned
                 self._scanned |= fresh
-                word = re.compile(r"\b(" + "|".join(map(re.escape, sorted(fresh))) + r")\b")
                 for g in self.files:
-                    if word.search(self.text(g)):
+                    if fresh & self.words(g):
                         self._read_in(g, set(), fresh, quals, whole, work)
                 continue
             f, loads, attrs = work.pop()
@@ -607,9 +671,8 @@ class Readers:
             shared = loads - set(new) if f == path else loads
             if not shared or module is None:
                 continue
-            word = re.compile(r"\b(" + "|".join(map(re.escape, sorted(shared))) + r")\b")
             for g in self.files:   # (a star import re-exports names it never spells)
-                if g == f or not (word.search(text := self.text(g)) or _STAR.search(text)):
+                if g == f or not (shared & self.words(g) or self.has_star(g)):
                     continue
                 tree = self.tree(g)
                 if tree is None:
@@ -618,7 +681,7 @@ class Readers:
                 local = self._imported(g, tree, module, shared)
                 if local:
                     work.append((g, local, set()))
-                if module + "." in text or self._imports(g, tree, module):   # ``m.x``, ``"x"``, ``"pkg.m.x"``
+                if module + "." in self.text(g) or self._imports(g, tree, module):   # ``m.x``, ``"x"``, ``"pkg.m.x"``
                     self._read_in(g, set(), shared, quals, whole, work)
         return quals, whole
 
@@ -627,13 +690,12 @@ class Readers:
         reach it from by attribute), not just names from it."""
         from brindle import check_scope
 
-        owner = check_scope._module_path(self.root, path)
-        package = None if owner is None else owner.split(".")[:None if path.endswith("__init__.py") else -1]
-        for node in ast.walk(tree):
+        package, nodes = self._import_nodes(path, tree)
+        for node in nodes:
             if isinstance(node, ast.Import):
                 if any(module == a.name or module.startswith(a.name + ".") for a in node.names):
                     return True
-            elif isinstance(node, ast.ImportFrom):
+            else:
                 source = check_scope._relative(package, node.level, node.module or "")
                 if source is None:
                     return True
@@ -646,10 +708,9 @@ class Readers:
         """The local names ``path`` binds by importing any of ``names`` from ``module``."""
         from brindle import check_scope
 
-        owner = check_scope._module_path(self.root, path)
-        package = None if owner is None else owner.split(".")[:None if path.endswith("__init__.py") else -1]
+        package, nodes = self._import_nodes(path, tree)
         local: set[str] = set()
-        for node in ast.walk(tree):
+        for node in nodes:
             if isinstance(node, ast.ImportFrom) and check_scope._relative(package, node.level,
                                                                           node.module or "") == module:
                 for alias in node.names:
@@ -665,19 +726,14 @@ class Readers:
         if tree is None:
             whole.add(path)
             return
-        statements = _module_statements_of(tree)
-
-        def hit(node: ast.AST, in_class_body: bool) -> bool:
-            # In a class body a member reads another by its bare name (``doubled = threshold * 2``).
-            return (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
-                    and (node.id in loads or in_class_body and node.id in attrs)
-                    or isinstance(node, ast.Attribute) and node.attr in attrs
-                    or isinstance(node, ast.Constant) and isinstance(node.value, str)
-                    and (node.value in loads | attrs or node.value.rsplit(".", 1)[-1] in attrs))
-
-        for node, qual, at_run, owner in self.walked(path, tree):
-            if not hit(node, not at_run and owner is not None and owner[0] == "attr"):
-                continue
+        if path not in self._statements:
+            self._statements[path] = _module_statements_of(tree)
+        statements = self._statements[path]
+        by_load, by_attr = self.indexed(path, tree)
+        hits = [entry for n in loads for entry in by_load.get(n, ())]
+        if attrs:
+            hits += [entry for n in attrs for entry in by_attr.get(n, ())]
+        for lineno, qual, at_run, owner in hits:
             if at_run:   # read when its function runs: the tests that ran it
                 quals.setdefault(path, set()).add(qual)
             elif owner:   # a class body or a def's decorators and defaults, read on import: their users
@@ -689,11 +745,11 @@ class Readers:
                     self.attrs |= bound - dunders
                 if kind == "name" or dunders:   # protocol members are used through the class itself
                     work.append((path, set(bound) if kind == "name" else {cls.split(".")[0]}, set()))
-            elif bound := statements.get(node.lineno):
+            elif bound := statements.get(lineno):
                 work.append((path, set(bound), set()))   # a module-level name built from it
             else:   # e.g. ``register(x)``, ``CONFIG.update(x)``: the file, and whatever the statement names
                 whole.add(path)
-                work.append((path, _loads(_statement_at(tree, node.lineno)), set()))
+                work.append((path, _loads(_statement_at(tree, lineno)), set()))
 
 
 Owner = tuple[str, frozenset, str]   # ("name", module-level names, "") or ("attr", attribute names, class qual)
@@ -990,14 +1046,23 @@ def added_ddl(old: str, new: str) -> set[str] | None:
 SCHEMA_TESTS = re.compile(r"schema|migrat", re.I)
 
 
-def tests_of_tables(root: Path, tables: set[str]) -> set[str]:
+def tests_of_tables(root: Path, tables: set[str], *,
+                    words_cache: dict[str, set[str]] | None = None) -> set[str]:
     """The tracked test files naming any of ``tables``, and the schema and
     migration tests (``schema`` or ``migrat`` in their file name)."""
     from brindle import check_scope
 
-    word = re.compile(r"\b(" + "|".join(map(re.escape, sorted(tables))) + r")\b")
+    def matches(t: str) -> bool:
+        if words_cache is not None and t in words_cache:
+            tw = words_cache[t]
+        else:
+            tw = _file_words(_read(root / t))
+            if words_cache is not None:
+                words_cache[t] = tw
+        return bool(tables & tw)
+
     return {t for t in git.paths(["ls-files", "*.py"], root) if check_scope.is_test_file(t)
-            and (SCHEMA_TESTS.search(PurePosixPath(t).name) or word.search(_read(root / t)))}
+            and (SCHEMA_TESTS.search(PurePosixPath(t).name) or matches(t))}
 
 
 def _import_time_reads(tree: ast.Module) -> set[str]:

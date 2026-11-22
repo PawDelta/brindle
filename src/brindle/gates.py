@@ -97,7 +97,8 @@ def _run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: 
     diff = None if full else against if against is not None else check_scope.changed_files(db, ws)
     if diff is not None:   # a script can narrow itself; the gate never trusts that for the cache
         env = {**env, "BRINDLE_CHANGED_FILES": "\n".join(diff[1])}
-    run = _scoped(ws, cmd, diff)
+    dirty = bool(git.dirty_files(ws.path))
+    run = _scoped(ws, cmd, diff, None if dirty else sha)
     if run is None:
         out = f"{check_scope.SKIPPED}{ws.branch} changes nothing this check covers"
         db.set_check(ws.id, sha, cmd, True, out)
@@ -105,7 +106,6 @@ def _run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: 
     # A narrowed run (or one given BRINDLE_CHANGED_FILES so a script can narrow itself)
     # is cached by its diff, so its pass never satisfies a full run.
     ident = run if diff is None else run + "\n" + "\n".join(diff[1])
-    dirty = bool(git.dirty_files(ws.path))
     if dirty:
         return _run_queued(db, ws, run, env, timeout, cancel)
     # One run at a time per (workspace, commit, command): a check warmed when
@@ -142,13 +142,13 @@ def _repo_config(ws: Workspace):
         return None
 
 
-def _scoped(ws: Workspace, cmd: str, diff) -> str | None:
+def _scoped(ws: Workspace, cmd: str, diff, sha: str | None = None) -> str | None:
     """The command to run for check ``cmd`` in ``ws`` (None: skip it)."""
     cfg = _repo_config(ws)
     if cfg is None:
         return cmd
     return check_scope.command(ws, cmd, check_scope.inferred(cmd, cfg.scoped_checks), diff,
-                               cfg.scoped_checks_max_files, cfg.scoped_checks_max_tests)
+                               cfg.scoped_checks_max_files, cfg.scoped_checks_max_tests, sha=sha)
 
 
 def _run_recorded(db: DB, ws: Workspace, run: str, env: dict[str, str], timeout: int, cancel,
