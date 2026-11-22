@@ -314,12 +314,12 @@ describe("App", () => {
     }
   });
 
-  it("shows the open session once it is back from its chat's own row, while whole snapshots are still rendering", async () => {
+  it.each(["paused feed", "delayed resuming feed"])("shows the open session once it is back from its chat's own row, while whole snapshots are still rendering: %s", async (scenario) => {
     vi.useFakeTimers();
-    // The last daemon paused both on its way out: the first rows read say so.
+    // The last daemon paused both on its way out; the feed may still have its old live row.
     const rootB = { ...root, id: "proj2", agents: root.agents?.map((a) => ({ ...a, id: "sup2", status: "paused", window: null })) };
     const pausedRoot = { ...root, agents: root.agents?.map((a) => ({ ...a, status: "paused", window: null })) };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...session, status: "paused" }, { ...session, id: "sup2", status: "paused" }], workspaces: [pausedRoot, rootB] });
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...session, status: scenario === "paused feed" ? "paused" : "idle" }, { ...session, id: "sup2", status: "paused" }], workspaces: [pausedRoot, rootB] });
     const client = daemon.client();
     const store = createAppStore();
     let pending = ["sup1", "sup2"];
@@ -332,6 +332,20 @@ describe("App", () => {
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
     await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
     expect(paneWaits()).toBe(true);
+    let finishFeed: (() => void) | undefined;
+    let finishFresh!: (rows: SessionDTO[]) => void;
+    if (scenario === "delayed resuming feed") {
+      // A feed read begun before sup1 returns arrives after the open pane is released.
+      daemon.data.sessions = daemon.data.sessions.map((s) => ({ ...s, status: "resuming" }));
+      const sessions = client.sessions.bind(client);
+      vi.spyOn(client, "sessions").mockImplementationOnce(async (repo) => {
+        const rows = await sessions(repo);
+        return new Promise((ok) => { finishFeed = () => ok(rows); });
+      }).mockImplementationOnce(() => new Promise((ok) => { finishFresh = ok; })).mockImplementation(sessions);
+      daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup2", payload: { status: "starting" } });
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(finishFeed).toBeDefined();
+    }
     // sup1's chat is up in its new window; sup2 is still coming back.
     daemon.data.workspaces = [root, rootB];
     daemon.data.sessions = [session, { ...session, id: "sup2", status: "paused" }];
@@ -341,6 +355,24 @@ describe("App", () => {
     expect(screen.getByTestId("terminal").textContent).toBe("sup1");
     expect(screen.getByTestId("provider-surface").dataset.card).toBe("live");
     expect(daemon.sessionViews).toEqual(["sup1"]);
+    if (!finishFeed) return;
+    const pane = screen.getByTestId("terminal");
+    // A later recovery update for the other session must leave the open pane live.
+    daemon.data.workspaces = [root, { ...rootB, agents: rootB.agents?.map((a) => ({ ...a, status: "idle", window: windowOf("sup2") })) }];
+    daemon.data.sessions = [session, { ...session, id: "sup2" }];
+    pending = [];
+    daemon.publish("session.changed", { repo_root: REPO, root_id: "sup2", agent_id: "sup2", payload: {} });
+    await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+    await act(async () => { finishFeed!(); });
+    expect(screen.getByTestId("provider-surface").dataset.card).toBe("live");
+    expect(screen.getByTestId("terminal")).toBe(pane);
+    expect(daemon.sessionViews).toEqual(["sup1"]);
+    // A feed read begun after release finishes the barrier; a later real restart still shows.
+    await act(async () => { finishFresh(daemon.data.sessions); });
+    daemon.data.sessions = [{ ...session, status: "resuming" }, { ...session, id: "sup2" }];
+    daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup1", payload: { status: "starting" } });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByTestId("provider-surface").dataset.card).toBe("returning");
   });
 
   it("panes per session: a session that finishes coming back while its rows are being read is not shown from the old rows", async () => {
