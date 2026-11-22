@@ -915,15 +915,15 @@ def test_routing_policy_marks_what_the_org_refuses_and_locks(seeded, monkeypatch
     assert {(lock["kind"], lock["name"]) for lock in policy["locked"]} == {
         ("provider", "codex"), ("provider", "antigravity"), ("provider", "opencode"), ("keys", "personal_api_keys")}
     rows = {p["name"]: p for p in body["profiles"]}
-    assert (rows["developer-heavy"]["allowed"], rows["developer-heavy"]["refusal"] is None) == (heavy_ok, heavy_ok)
-    assert all(rows["developer-heavy"][k] for k in ("display", "maker", "tool", "effort"))
-    assert ROUTE_ID not in rows["developer-heavy"]["display"]
-    assert (rows["developer-heavy"]["builtin"], rows["mine"]["builtin"]) == (True, False)
-    for refused in ("developer-light", "developer-codex"):      # a model, then a provider, the org doesn't allow
+    assert (rows["dev.claude-opus"]["allowed"], rows["dev.claude-opus"]["refusal"] is None) == (heavy_ok, heavy_ok)
+    assert all(rows["dev.claude-opus"][k] for k in ("display", "maker", "tool", "effort"))
+    assert ROUTE_ID not in rows["dev.claude-opus"]["display"]
+    assert (rows["dev.claude-opus"]["builtin"], rows["mine"]["builtin"]) == (True, False)
+    for refused in ("dev.claude-haiku", "dev.gpt"):      # a model, then a provider, the org doesn't allow
         assert not rows[refused]["allowed"] and rows[refused]["refusal"]
-    assert ("developer-heavy" in policy["models"][allowed]) == heavy_ok
-    assert "developer-light" not in policy["models"][allowed]
-    heavy = [m for t in body["tiers"].values() for m in t["models"] if m["profile"] == "developer-heavy"]
+    assert ("dev.claude-opus" in policy["models"][allowed]) == heavy_ok
+    assert "dev.claude-haiku" not in policy["models"][allowed]
+    heavy = [m for t in body["tiers"].values() for m in t["models"] if m["profile"] == "dev.claude-opus"]
     assert heavy and all((m["model"], m["provider_name"], m["allowed"]) == (ROUTE_ID, "Claude Code", heavy_ok)
                          for m in heavy)
 
@@ -961,7 +961,7 @@ def test_routing_user_view_runs_no_learner_and_no_sign_in_probe(seeded, monkeypa
     assert code == 200 and routed == [] and probed == []
     assert len(pro_reads) == 1
     # The person's own view: their settings and library, not this repo's.
-    assert (body["tiers"]["medium"]["values"], body["tiers"]["medium"]["source"]) == (["developer-codex"], "user")
+    assert (body["tiers"]["medium"]["values"], body["tiers"]["medium"]["source"]) == (["dev.gpt"], "user")
     assert "repo-only" not in {p["name"] for p in body["profiles"]}
     assert all(k["learned"] is None for k in body["kinds"].values())
     pro_reads.clear()
