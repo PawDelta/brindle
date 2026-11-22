@@ -126,6 +126,7 @@ def person(app, pid, sub):
 
 
 @pytest.mark.parametrize("access", ["view", "comment", "edit"])
+@pytest.mark.variant("each access level must reach the Library as that role")
 def test_first_person_shares_the_plan_at_their_access_level(panel, backend, access):
     pid, library, app = panel
     before = app.get(f"/v1/plans/{pid}/access").json()

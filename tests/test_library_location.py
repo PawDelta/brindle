@@ -173,6 +173,7 @@ def test_enforced_location_beats_the_persons_choice(level, tmp_path, remote):
 
 @pytest.mark.parametrize("admin", [None, pytest.param("share", marks=pytest.mark.variant(
     "a sub-switch the admin locks off stays off when the library moves to the servers"))])
+@pytest.mark.variant("each starting switch state must end on after the move")
 def test_location_carries_the_switches_that_need_the_servers(admin, remote):
     remote.routes[MINE] = lambda f, h: (200, {"docs": []})
     if admin:
