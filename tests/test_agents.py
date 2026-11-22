@@ -300,6 +300,7 @@ CLAUDE_BUSY_CHAT_QUOTES_LAUNCHER_FOOTER = (
 )
 
 
+@pytest.mark.variant("a busy chat quoting the launcher footer above its last line was escaped mid-turn")
 def test_flush_never_escapes_a_busy_chat_that_quotes_the_launcher_footer(db, ws, monkeypatch):
     fake_agent(db, ws, status="idle", mode="interactive")
     db.enqueue("a1", "queued message", None)
