@@ -40,16 +40,54 @@ _SHELL_LANGS = frozenset({"", "sh", "bash", "shell", "zsh", "console", "text", "
 _JSON_LANGS = frozenset({"json", "jsonc"})
 
 _CONFIG_JSON_RE = re.compile(r"(?:~/)?\.brindle/config(?:\.local)?\.json\b")
-_OTHER_JSON_RE = re.compile(
-    r"(?:settings|permissions|policy|usage|package|hooks|mcp_config|daemon|quota)\.json\b",
-    re.I,
-)
+_ANY_JSON_FILE_RE = re.compile(r"(?:~/)?(?:[.\w-]+/)*[\w.-]+\.json\b", re.I)
+_POLICY_REF_RE = re.compile(r"\borg\s+policy\b", re.I)
+_FENCE_LINE_RE = re.compile(r"^\s*(?:`{3,}|~{3,})")
+_HEADING_LINE_RE = re.compile(r"^\s*(?:#{1,6}\s|<h[1-6]\b)", re.I)
+_HTML_PRE_OPEN_RE = re.compile(r"<pre\b", re.I)
+_HTML_PRE_CLOSE_RE = re.compile(r"</pre>", re.I)
+
 _CMD_TOKEN_RE = re.compile(r"^[a-z_][a-z0-9_-]*$")
 _ALT_GROUP_RE = re.compile(r"^[a-z_][a-z0-9_-]*(?:[/|][a-z_][a-z0-9_-]*)+$")
 _CONFIG_KEY_IDENT_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 _INLINE_JSON_KEY_RE = re.compile(r'^"?([a-zA-Z_][a-zA-Z0-9_-]*)"?\s*:')
+_STRICT_JSON_FRAGMENT_RE = re.compile(r'^"[a-zA-Z_][a-zA-Z0-9_-]*"\s*:')
 _QUOTED_KEY_RE = re.compile(r'^"([a-zA-Z_][a-zA-Z0-9_-]*)"$')
 _TABLE_KEY_HEADERS = frozenset({"key", "setting", "option", "config key"})
+
+# Prose invocation lead-ins and English stop words that terminate a prose command.
+_PROSE_LEADIN_RE = re.compile(
+    r"(?:^|[\s(\[,;—–-])"
+    r"(?:run|running|use|using|try|trying|call|calling|invoke|invoking|"
+    r"execute|executing|type|typing|via|command)\s+"
+    r"brindle(?=\s)",
+    re.I,
+)
+_PROSE_QUOTED_RE = re.compile(r"""(?<![\w=])(["'])brindle\s+([^"'\n]+?)\1""")
+_PROSE_PROMPT_RE = re.compile(r"^\s*(?:\$|%)\s+brindle\s+(.+)$")
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_PROSE_STOP_WORDS = frozenset({
+    "a", "about", "above", "across", "after", "again", "against", "all",
+    "alone", "already", "also", "although", "always", "an", "and", "another",
+    "any", "are", "around", "as", "at", "automatically", "be", "because",
+    "been", "before", "being", "below", "beside", "between", "both", "briefly",
+    "but", "by", "can", "continuously", "could", "desktop", "did", "directly",
+    "do", "does", "during", "each", "either", "enterprise", "every", "exactly",
+    "first", "for", "frequently", "from", "had", "has", "have", "her", "here",
+    "his", "however", "if", "in", "inside", "instead", "interactively", "into",
+    "is", "it", "its", "itself", "just", "later", "like", "locally", "manually",
+    "may", "might", "more", "most", "must", "my", "neither", "never", "no",
+    "normally", "not", "now", "of", "on", "once", "only", "onto", "or", "other",
+    "our", "outside", "over", "pro", "regularly", "remotely", "safely", "shall",
+    "should", "since", "so", "some", "still", "such", "team", "than", "that",
+    "the", "their", "then", "there", "these", "they", "this", "those", "though",
+    "through", "to", "today", "too", "twice", "unattended", "under", "unless",
+    "until", "was", "we", "were", "when", "where", "whether", "which", "while",
+    "who", "will", "with", "within", "without", "work", "would", "yet", "you",
+    "your",
+})
+# Bare `-s` / `--supervisor` accepts an optional value in brindle.cli._bare_supervisor_flag.
+_OPTIONAL_VALUE_GLOBAL_OPTS = frozenset({"-s", "--supervisor"})
 
 
 class Finding(NamedTuple):
@@ -63,8 +101,13 @@ class Finding(NamedTuple):
         return f"{self.path}:{self.line}: unknown {label}: {self.value}"
 
 
-def load_cli_tree() -> dict[str, dict | None]:
-    """Build the real CLI command tree by importing ``brindle.cli.app``."""
+class CLISchema(NamedTuple):
+    tree: dict[str, dict | None]
+    global_options: dict[str, int]   # option flag -> number of value args (0 for boolean flags)
+
+
+def load_cli_schema() -> CLISchema:
+    """Import ``brindle.cli.app`` and return its command tree and global option metadata."""
     import typer
     from brindle import cli
 
@@ -78,7 +121,22 @@ def load_cli_tree() -> dict[str, dict | None]:
             tree[name] = walk(sub) if nested else None
         return tree
 
-    return walk(root)
+    global_options: dict[str, int] = {"-h": 0, "--help": 0}
+    for param in getattr(root, "params", ()):
+        opts = list(getattr(param, "opts", ())) + list(getattr(param, "secondary_opts", ()))
+        if not opts:
+            continue
+        is_flag = bool(getattr(param, "is_flag", False))
+        nargs = 0 if is_flag else max(1, int(getattr(param, "nargs", 1) or 1))
+        for opt in opts:
+            global_options[opt] = nargs
+
+    return CLISchema(walk(root), global_options)
+
+
+def load_cli_tree() -> dict[str, dict | None]:
+    """Build the real CLI command tree by importing ``brindle.cli.app``."""
+    return load_cli_schema().tree
 
 
 def load_config_keys() -> frozenset[str]:
@@ -147,16 +205,54 @@ def _strip_shell_comment(line: str) -> str:
 
 def _split_shell_segments(text: str) -> list[str]:
     """Split a shell snippet on command separators (``&&``, ``||``, ``;``, ``->``)."""
-    # Protect markdown-escaped pipes (`\|`) before splitting.
     protected = text.replace(r"\|", "\x00")
     parts = re.split(r"\s*(?:&&|\|\||;|->)\s*", protected)
     return [p.replace("\x00", "|").strip() for p in parts if p.strip()]
 
 
-def _extract_command_candidates(snippet: str) -> list[list[str]]:
+def _consume_global_options(
+    tokens: list[str],
+    tree: dict[str, dict | None],
+    global_options: dict[str, int],
+) -> list[str]:
+    """Consume leading global Click options and their values from ``tokens``."""
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
+        if tok == "--":
+            return []
+        if not tok.startswith("-"):
+            break
+        if "=" in tok:
+            opt_name = tok.split("=", 1)[0]
+            if opt_name in global_options:
+                i += 1
+                continue
+            return []
+        if tok not in global_options:
+            return []
+        nargs = global_options[tok]
+        i += 1
+        if nargs == 0:
+            continue
+        # Handle bare `-s` / `--supervisor` followed directly by another option or real command.
+        if tok in _OPTIONAL_VALUE_GLOBAL_OPTS:
+            if i >= n or tokens[i].startswith("-") or tokens[i] in tree:
+                continue
+        i += nargs
+    return tokens[i:]
+
+
+def _extract_command_candidates(
+    snippet: str,
+    tree: dict[str, dict | None],
+    global_options: dict[str, int],
+) -> list[list[str]]:
     """Return candidate ``brindle`` subcommand paths found in ``snippet``.
 
-    Handles single commands (``brindle agent kill``), slash/pipe shorthands
+    Handles single commands (``brindle agent kill``), global options before
+    commands (``brindle -s codex start``), slash/pipe shorthands
     (``brindle keys set/unset/list``, ``brindle audit verify|export``), and
     spaced-slash alternatives (``brindle attach / cd / open [WS]``,
     ``brindle repo add PATH / rm ALIAS / ls``).
@@ -166,15 +262,13 @@ def _extract_command_candidates(snippet: str) -> list[list[str]]:
         seg = re.sub(r"^(?:\$|%)\s+", "", seg).strip()
         if not seg:
             continue
-        # Only inspect invocations where `brindle` is the command itself (not an arg
-        # such as `uv tool install brindle`).
         m = re.match(r"^brindle(?:\s+(.*))?$", seg)
         if not m or not m.group(1):
             continue
         rest = m.group(1).strip()
         if not rest:
             continue
-        candidates.extend(_parse_after_brindle(rest))
+        candidates.extend(_parse_after_brindle(rest, tree, global_options))
     return candidates
 
 
@@ -191,7 +285,6 @@ def _expand_alternatives(tokens: list[str], prefix: list[str]) -> list[list[str]
         alts = re.split(r"[/|]", first)
         return [[*prefix, a] for a in alts if _is_candidate_token(a)]
     if "|" in first:
-        # Forms like `list|restore ID|empty`: split the remainder on `|`.
         joined = " ".join(tokens)
         out: list[list[str]] = []
         for branch in joined.split("|"):
@@ -202,24 +295,20 @@ def _expand_alternatives(tokens: list[str], prefix: list[str]) -> list[list[str]
     return [[*prefix, *tokens]]
 
 
-def _parse_after_brindle(rest: str) -> list[list[str]]:
+def _parse_after_brindle(
+    rest: str,
+    tree: dict[str, dict | None],
+    global_options: dict[str, int],
+) -> list[list[str]]:
     """Parse everything after ``brindle `` into one or more token lists."""
-    # Unescape markdown table pipes (`\|` -> `|`).
     rest = rest.replace(r"\|", "|")
-    # Spaced ` / ` lists alternatives either at the top level
-    # (`brindle attach / cd / open [WS]`) or under a group
-    # (`brindle repo add PATH / rm ALIAS / ls`).
     if " / " in rest:
         branches = [b.strip() for b in rest.split(" / ") if b.strip()]
         if not branches:
             return []
-        first_tokens = branches[0].split()
+        first_tokens = _consume_global_options(branches[0].split(), tree, global_options)
         if not first_tokens:
             return []
-        if first_tokens[0].startswith("-"):
-            return []
-        # If branch 0 has at least two command-like tokens (e.g. `repo add PATH` or
-        # `permissions list`), branches 1..N share the group prefix `first_tokens[0]`.
         if len(first_tokens) >= 2 and _is_candidate_token(first_tokens[0]) and (
             _is_candidate_token(first_tokens[1]) or _ALT_GROUP_RE.match(first_tokens[1])
         ):
@@ -230,18 +319,16 @@ def _parse_after_brindle(rest: str) -> list[list[str]]:
                 if btoks:
                     paths.extend(_expand_alternatives(btoks, [group]))
             return paths
-        # Otherwise the alternatives are top-level commands (`attach / cd / open`).
         paths = []
         for br in branches:
-            btoks = br.split()
-            if btoks and not btoks[0].startswith("-"):
+            btoks = _consume_global_options(br.split(), tree, global_options)
+            if btoks:
                 paths.extend(_expand_alternatives(btoks, []))
         return paths
 
-    tokens = rest.split()
-    if not tokens or tokens[0].startswith("-"):
+    tokens = _consume_global_options(rest.split(), tree, global_options)
+    if not tokens:
         return []
-    # Check for inline slash/pipe alternatives on the first or second token.
     if _ALT_GROUP_RE.match(tokens[0]) or "|" in tokens[0]:
         return _expand_alternatives(tokens, [])
     if len(tokens) >= 2 and _is_candidate_token(tokens[0]) and (
@@ -254,6 +341,8 @@ def _parse_after_brindle(rest: str) -> list[list[str]]:
 def _validate_command_tokens(
     tokens: list[str],
     tree: dict[str, dict | None],
+    *,
+    prose: bool = False,
 ) -> str | None:
     """Validate a token list against ``tree``; return the unknown command string or None."""
     node: dict[str, dict | None] | None = tree
@@ -261,21 +350,81 @@ def _validate_command_tokens(
     for tok in tokens:
         if node is None:
             return None
-        # Strip trailing punctuation from prose-adjacent snippets if any.
         clean = tok.rstrip(",.:;)")
         if not clean:
             return None
         if clean.startswith("-") or not _is_candidate_token(clean):
-            # Option, placeholder (<id>, [WS], BRANCH), version (0.6.3), or path.
             return None
-        if clean not in node:
-            return " ".join(["brindle", *matched, clean])
-        matched.append(clean)
-        node = node[clean]
+        if clean in node:
+            matched.append(clean)
+            node = node[clean]
+            continue
+        if prose and clean in _PROSE_STOP_WORDS:
+            return None
+        return " ".join(["brindle", *matched, clean])
     return None
 
 
+def _extract_prose_command_tokens(
+    tail: str,
+    tree: dict[str, dict | None],
+    global_options: dict[str, int],
+) -> list[list[str]]:
+    """Slice a prose clause after ``brindle `` up to punctuation boundaries."""
+    # Stop before sentence/clause punctuation, quotes, or backticks.
+    clause = re.split(r"""[.,;:?!)\]}"'`—–·]""", tail, maxsplit=1)[0].strip()
+    if not clause:
+        return []
+    return _parse_after_brindle(clause, tree, global_options)
+
+
+def _scan_prose_line(
+    line_text: str,
+    lineno: int,
+    tree: dict[str, dict | None],
+    global_options: dict[str, int],
+    record,
+) -> None:
+    """Find ``brindle <subcommand>`` invocations in a single line of plain prose."""
+    if "brindle" not in line_text:
+        return
+
+    # 1. Shell-prompt line in plain text (`$ brindle ...`).
+    pm = _PROSE_PROMPT_RE.match(line_text)
+    if pm:
+        for tokens in _extract_command_candidates(
+            _strip_shell_comment(line_text), tree, global_options
+        ):
+            bad = _validate_command_tokens(tokens, tree)
+            if bad:
+                record(lineno, "command", bad)
+        return
+
+    # 2. Quoted invocations (`"brindle bogus-cmd"` or `'brindle bogus-cmd'`).
+    for qm in _PROSE_QUOTED_RE.finditer(line_text):
+        for tokens in _parse_after_brindle(qm.group(2).strip(), tree, global_options):
+            bad = _validate_command_tokens(tokens, tree, prose=True)
+            if bad:
+                record(lineno, "command", bad)
+
+    # 3. Lead-in CLI invocations (`Run brindle bogus-cmd to diagnose problems.`).
+    for lm in _PROSE_LEADIN_RE.finditer(line_text):
+        tail = line_text[lm.end():].lstrip()
+        if not tail:
+            continue
+        for tokens in _extract_prose_command_tokens(tail, tree, global_options):
+            bad = _validate_command_tokens(tokens, tree, prose=True)
+            if bad:
+                record(lineno, "command", bad)
+
+
 # -- JSON config key extraction -----------------------------------------------
+
+
+def _looks_like_json_block(text: str) -> bool:
+    """Return True when ``text`` looks like a JSON object or JSON key/value fragment."""
+    stripped = text.lstrip()
+    return stripped.startswith("{") or bool(_STRICT_JSON_FRAGMENT_RE.match(stripped))
 
 
 def _extract_top_level_json_keys(text: str, start_line: int) -> list[tuple[int, str]]:
@@ -307,7 +456,6 @@ def _extract_top_level_json_keys(text: str, start_line: int) -> list[tuple[int, 
         if ch == "\n":
             line += 1
             if in_string:
-                # Unterminated string in malformed snippet; reset cleanly.
                 in_string = False
                 escaped = False
                 buf = []
@@ -330,7 +478,6 @@ def _extract_top_level_json_keys(text: str, start_line: int) -> list[tuple[int, 
             i += 1
             continue
 
-        # Outside string: skip `//` comments if present.
         if ch == "/" and i + 1 < n and text[i + 1] == "/":
             nl = text.find("\n", i)
             if nl == -1:
@@ -384,16 +531,67 @@ def _extract_inline_config_keys(code_text: str, line: int) -> list[tuple[int, st
     return []
 
 
-def _context_is_config_json(lines: list[str], start_idx: int, end_idx: int, in_config_heading: bool) -> bool:
-    """Decide whether a JSON block spanning ``lines[start_idx:end_idx]`` is a
-    ``.brindle/config.json`` snippet (rather than org policy, settings.json, etc.)."""
-    before = "\n".join(lines[max(0, start_idx - 6):start_idx])
-    after = "\n".join(lines[end_idx:min(len(lines), end_idx + 6)])
-    nearby = before + "\n" + after
-    if _CONFIG_JSON_RE.search(nearby):
-        return True
-    if _OTHER_JSON_RE.search(before) or re.search(r"\borg policy\b", before, re.I):
-        return False
+def _file_refs(text: str) -> list[tuple[int, bool]]:
+    """Return ``(pos, is_brindle_config)`` for every JSON file or org-policy mention."""
+    refs: list[tuple[int, bool]] = []
+    for m in _ANY_JSON_FILE_RE.finditer(text):
+        refs.append((m.start(), bool(_CONFIG_JSON_RE.search(m.group(0)))))
+    for m in _POLICY_REF_RE.finditer(text):
+        refs.append((m.start(), False))
+    refs.sort(key=lambda item: item[0])
+    return refs
+
+
+def _looks_like_next_block_intro(line: str) -> bool:
+    """True when ``line`` ends with ``:`` as an intro for a following code block."""
+    plain = re.sub(r"<[^>]+>", "", line).strip()
+    return plain.endswith(":")
+
+
+def _context_is_config_json(
+    lines: list[str],
+    start_idx: int,
+    end_idx: int,
+    in_config_heading: bool,
+) -> bool:
+    """Resolve whether a JSON block at ``lines[start_idx:end_idx]`` belongs to
+    ``.brindle/config.json``, preferring the block's own nearest file context
+    and stopping at structural boundaries so adjacent examples cannot bleed."""
+    # 1. Nearest preceding file/policy reference (stop at previous block or heading).
+    before_lines: list[str] = []
+    for idx in range(start_idx - 1, max(-1, start_idx - 7), -1):
+        ln = lines[idx]
+        if _FENCE_LINE_RE.match(ln) or _HTML_PRE_CLOSE_RE.search(ln):
+            break
+        before_lines.append(ln)
+        if _HEADING_LINE_RE.match(ln):
+            break
+    before_lines.reverse()
+    before_refs = _file_refs("\n".join(before_lines))
+    if before_refs:
+        return before_refs[-1][1]
+
+    # 2. Immediate following prose (stop at next block or heading, excluding the next block's intro).
+    after_lines: list[str] = []
+    hit_next_block = False
+    for idx in range(end_idx, min(len(lines), end_idx + 7)):
+        ln = lines[idx]
+        if _HEADING_LINE_RE.match(ln):
+            break
+        if _FENCE_LINE_RE.match(ln) or _HTML_PRE_OPEN_RE.search(ln):
+            hit_next_block = True
+            break
+        after_lines.append(ln)
+    if hit_next_block:
+        while after_lines and not after_lines[-1].strip():
+            after_lines.pop()
+        if after_lines and _looks_like_next_block_intro(after_lines[-1]):
+            after_lines.pop()
+    after_refs = _file_refs("\n".join(after_lines))
+    if after_refs:
+        return after_refs[0][1]
+
+    # 3. Fall back to whether the enclosing heading names `.brindle/config.json`.
     return in_config_heading
 
 
@@ -403,9 +601,10 @@ def _context_is_config_json(lines: list[str], start_idx: int, end_idx: int, in_c
 def _check_markdown(
     text: str,
     path: str,
-    cli_tree: dict[str, dict | None],
+    schema: CLISchema,
     config_keys: frozenset[str],
 ) -> list[Finding]:
+    cli_tree, global_options = schema
     lines = text.splitlines()
     findings: list[Finding] = []
     seen: set[tuple[int, str, str]] = set()
@@ -417,7 +616,7 @@ def _check_markdown(
             findings.append(Finding(path, line, kind, value))
 
     def check_command_snippet(snippet: str, line: int) -> None:
-        for tokens in _extract_command_candidates(snippet):
+        for tokens in _extract_command_candidates(snippet, cli_tree, global_options):
             bad = _validate_command_tokens(tokens, cli_tree)
             if bad:
                 record(line, "command", bad)
@@ -460,7 +659,6 @@ def _check_markdown(
                 in_config_table = False
                 continue
 
-            # Markdown table under a `.brindle/config.json` heading.
             if in_config_heading and stripped.startswith("|") and stripped.endswith("|"):
                 cells = [c.strip() for c in stripped.strip("|").split("|")]
                 if not in_config_table:
@@ -480,12 +678,14 @@ def _check_markdown(
             if re.match(close_re, stripped):
                 body = "\n".join(fence_lines)
                 body_start_line = fence_start_idx + 2
-                if fence_lang in _JSON_LANGS:
+                is_json_fence = fence_lang in _JSON_LANGS or (
+                    fence_lang == "" and _looks_like_json_block(body)
+                )
+                if is_json_fence:
                     if _context_is_config_json(lines, fence_start_idx, idx + 1, in_config_heading):
                         for kl, kn in _extract_top_level_json_keys(body, body_start_line):
                             check_key(kl, kn)
                 elif fence_lang in _SHELL_LANGS:
-                    # Join shell line continuations while preserving the starting line number.
                     i = 0
                     while i < len(fence_lines):
                         cmd_line = body_start_line + i
@@ -500,23 +700,31 @@ def _check_markdown(
             else:
                 fence_lines.append(raw_line)
 
-    # Pass 2: inline code spans outside fenced code blocks.
-    # Mask fenced lines with empty lines to preserve exact line numbers.
+    # Pass 2: inline code spans and visible prose outside fenced code blocks.
     unmasked = "\n".join("" if i in fenced_line_indices else ln for i, ln in enumerate(lines))
 
-    # Extract all inline code spans (`...` or ``...``) with start/end offsets and line numbers.
     code_spans: list[tuple[int, int, int, str]] = []
+    prose_parts: list[str] = []
+    last_end = 0
     for m in re.finditer(r"(`+)([^`]+?)\1", unmasked):
         start_pos, end_pos = m.start(), m.end()
+        prose_parts.append(unmasked[last_end:start_pos])
+        # Replace inline code spans with newlines-preserving spaces for prose scanning.
+        prose_parts.append("\n" * m.group(0).count("\n") or " ")
+        last_end = end_pos
         span_line = unmasked.count("\n", 0, start_pos) + 1
         span_text = " ".join(m.group(2).split())
         code_spans.append((start_pos, end_pos, span_line, span_text))
         check_command_snippet(span_text, span_line)
+    prose_parts.append(unmasked[last_end:])
 
-    # Inline config.json key references:
-    # 1) `<key-or-json>` in [repo config or] `~/.brindle/config.json` / `.brindle/config.json`
-    # 2) `<key-or-json>` (repo config or `~/.brindle/config.json`)
-    # 3) `.brindle/config.json` as `<key: ...>`
+    # Scan plain prose lines for unformatted `brindle <subcommand>` invocations.
+    # Strip raw inline HTML tags (e.g. `<img alt="brindle logo">`) while preserving line count.
+    prose_text = _HTML_TAG_RE.sub(lambda m: "\n" * m.group(0).count("\n"), "".join(prose_parts))
+    for lineno, prose_line in enumerate(prose_text.splitlines(), start=1):
+        _scan_prose_line(prose_line, lineno, cli_tree, global_options, record)
+
+    # Inline config.json key references.
     after_target_re = re.compile(
         r"^\s*(?:"
         r"(?:\([^)]*config[^)]*\)\s*)?(?:in|of|under)\s+"
@@ -534,7 +742,6 @@ def _check_markdown(
         if _CONFIG_JSON_RE.search(span_text):
             continue
         after_text = unmasked[end_pos:end_pos + 100]
-        # Don't cross paragraph breaks, table cells, or sentence boundaries (keep `.brindle`/`.json`).
         after_clause = re.split(r"\n\s*\n|[;|]|\.(?:\s|$)", after_text, maxsplit=1)[0]
         am = after_target_re.match(after_clause)
         if am and _CONFIG_JSON_RE.search(am.group(1) or am.group(2) or ""):
@@ -555,7 +762,7 @@ def _check_markdown(
 
 
 class _HTMLDocExtractor(HTMLParser):
-    """Collect ``<pre>``, ``<code>``, headings, and tables with source line numbers."""
+    """Collect ``<pre>``, ``<code>``, plain prose, headings, and tables with line numbers."""
 
     _BLOCK_TAGS = frozenset({
         "p", "div", "li", "td", "th", "tr", "section", "article",
@@ -571,22 +778,18 @@ class _HTMLDocExtractor(HTMLParser):
         self.heading_buf: list[str] = []
         self.in_config_heading = False
 
-        # Captured blocks:
-        # pre_blocks: (start_line, end_line, chunks[(line, text)], in_config_heading)
         self.pre_blocks: list[tuple[int, int, list[tuple[int, str]], bool]] = []
         self._cur_pre_start = 1
         self._cur_pre_chunks: list[tuple[int, str]] = []
 
-        # Inline streams grouped by block element: list of segments [(is_code, line, text)]
         self.inline_blocks: list[list[tuple[bool, int, str]]] = []
         self._cur_block: list[tuple[bool, int, str]] = []
         self._cur_code_start = 1
         self._cur_code_buf: list[str] = []
 
-        # Table rows under config headings: list of (is_header_row, first_cell_code_line, first_cell_text)
         self.in_table = False
         self.in_config_table = False
-        self._row_cells: list[tuple[bool, int, str, bool]] = []  # (is_th, line, text, has_code)
+        self._row_cells: list[tuple[bool, int, str, bool]] = []
         self._cur_cell_is_th = False
         self._cur_cell_line = 1
         self._cur_cell_buf: list[str] = []
@@ -715,9 +918,10 @@ class _HTMLDocExtractor(HTMLParser):
 def _check_html(
     text: str,
     path: str,
-    cli_tree: dict[str, dict | None],
+    schema: CLISchema,
     config_keys: frozenset[str],
 ) -> list[Finding]:
+    cli_tree, global_options = schema
     lines = text.splitlines()
     parser = _HTMLDocExtractor()
     parser.feed(text)
@@ -734,7 +938,7 @@ def _check_html(
             findings.append(Finding(path, line, kind, value))
 
     def check_command_snippet(snippet: str, line: int) -> None:
-        for tokens in _extract_command_candidates(snippet):
+        for tokens in _extract_command_candidates(snippet, cli_tree, global_options):
             bad = _validate_command_tokens(tokens, cli_tree)
             if bad:
                 record(line, "command", bad)
@@ -749,15 +953,12 @@ def _check_html(
             continue
         full_text = "".join(chunk for _, chunk in chunks)
         first_chunk_line = chunks[0][0]
-        stripped = full_text.lstrip()
-        leading_newlines = full_text[:len(full_text) - len(stripped)].count("\n")
-        looks_json = stripped.startswith("{") or bool(_INLINE_JSON_KEY_RE.match(stripped))
-        if looks_json and _context_is_config_json(lines, start_line - 1, end_line, in_config_heading):
-            for kl, kn in _extract_top_level_json_keys(stripped, first_chunk_line + leading_newlines):
-                check_key(kl, kn)
+        if _looks_like_json_block(full_text):
+            if _context_is_config_json(lines, start_line - 1, end_line, in_config_heading):
+                for kl, kn in _extract_top_level_json_keys(full_text, first_chunk_line):
+                    check_key(kl, kn)
             continue
 
-        # Treat as shell/command lines with accurate per-line numbers.
         line_map: dict[int, list[str]] = {}
         for chunk_line, chunk_text in chunks:
             for offset, part in enumerate(chunk_text.split("\n")):
@@ -771,7 +972,7 @@ def _check_html(
         for key_line, key_name in _extract_inline_config_keys(cell_code, kl):
             check_key(key_line, key_name)
 
-    # 3. Inline <code> spans inside block elements.
+    # 3. Inline <code> spans and plain prose inside block elements.
     html_after_target_re = re.compile(
         r"^\s*(?:"
         r"(?:\([^)]*config[^)]*\)\s*)?(?:in|of|under)\s+"
@@ -788,12 +989,14 @@ def _check_html(
     for block in parser.inline_blocks:
         for i, (is_code, line, seg_text) in enumerate(block):
             if not is_code:
+                for offset, prose_line in enumerate(seg_text.split("\n")):
+                    _scan_prose_line(prose_line, line + offset, cli_tree, global_options, record)
                 continue
+
             check_command_snippet(seg_text, line)
             if _CONFIG_JSON_RE.search(seg_text):
                 continue
 
-            # Look immediately after and before this <code> within the same HTML block.
             after_text = "".join(t for _, _, t in block[i + 1:i + 5])
             after_clause = re.split(r";|\.(?:\s|$)", after_text, maxsplit=1)[0]
             am = html_after_target_re.match(after_clause)
@@ -821,14 +1024,20 @@ def check_text(
     is_html: bool = False,
     cli_tree: dict[str, dict | None] | None = None,
     config_keys: frozenset[str] | None = None,
+    cli_schema: CLISchema | None = None,
 ) -> list[Finding]:
     """Check markdown or HTML text and return findings sorted by line number."""
-    tree = cli_tree if cli_tree is not None else load_cli_tree()
+    if cli_schema is not None:
+        schema = cli_schema
+    elif cli_tree is not None:
+        schema = CLISchema(cli_tree, load_cli_schema().global_options)
+    else:
+        schema = load_cli_schema()
     keys = config_keys if config_keys is not None else load_config_keys()
     if is_html:
-        found = _check_html(text, path, tree, keys)
+        found = _check_html(text, path, schema, keys)
     else:
-        found = _check_markdown(text, path, tree, keys)
+        found = _check_markdown(text, path, schema, keys)
     return sorted(found, key=lambda f: (f.line, f.kind, f.value))
 
 
@@ -837,11 +1046,19 @@ def check_file(
     *,
     cli_tree: dict[str, dict | None] | None = None,
     config_keys: frozenset[str] | None = None,
+    cli_schema: CLISchema | None = None,
 ) -> list[Finding]:
     """Check one markdown or HTML file on disk."""
     is_html = path.suffix.lower() in _HTML_SUFFIXES
     text = path.read_text(encoding="utf-8")
-    return check_text(text, str(path), is_html=is_html, cli_tree=cli_tree, config_keys=config_keys)
+    return check_text(
+        text,
+        str(path),
+        is_html=is_html,
+        cli_tree=cli_tree,
+        config_keys=config_keys,
+        cli_schema=cli_schema,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -851,7 +1068,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("files", nargs="+", type=Path, help="Markdown or HTML files to check.")
     args = parser.parse_args(argv)
 
-    cli_tree = load_cli_tree()
+    schema = load_cli_schema()
     config_keys = load_config_keys()
 
     findings: list[Finding] = []
@@ -861,7 +1078,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{path}: file not found", file=sys.stderr)
             missing = True
             continue
-        findings.extend(check_file(path, cli_tree=cli_tree, config_keys=config_keys))
+        findings.extend(check_file(path, cli_schema=schema, config_keys=config_keys))
 
     for f in findings:
         print(f.format())
