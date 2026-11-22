@@ -463,6 +463,11 @@ def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
             goal = routing_goal.for_learner(repo_root)
         pick = p.suggest(TaskInfo(repo_root=repo_root, task=task or "", files=tuple(files or ()),
                                   weight=weight, weights=routing_goal.as_tuple(goal)), names, default)
+        if isinstance(pick, str) and pick not in names:
+            from brindle.profiles import current_name
+
+            current = current_name(pick, repo_root)
+            pick = next((name for name in names if current_name(name, repo_root) == current), pick)
         if pick not in names or pick == default:
             return None, None
         return pick, p.last_reason

@@ -72,7 +72,8 @@ class RoutingPolicy:
             model = acc.route_model(provider, model)
             return team_policy.model_refusal(acc.org_id, acc.allowed_models, model or "no declared model",
                                              who=f"profile {profile.name!r}")
-        if acc.allowed_profiles is not None and profile.name not in acc.allowed_profiles:
+        if acc.allowed_profiles is not None and not team_policy._listed(
+                profile.name, acc.allowed_profiles, None if self.user_library else self.repo_root):
             return (f"org {acc.org_id} allows only the profiles "
                     f"{', '.join(acc.allowed_profiles) or '(none)'}, not {profile.name!r}")
         return managed_models.refusal(self.managed, profile) if self.managed is not None else None

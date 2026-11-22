@@ -903,6 +903,7 @@ def test_routing_policy_marks_what_the_org_refuses_and_locks(seeded, monkeypatch
     setup = team_policy.AgentSetup(claude=team_policy.ClaudeSetup(
         route="bedrock", models=team_policy.ModelsSetup(opus=ROUTE_ID)), enforce=True)
     acc = team_policy.Access(org_id="acme", allowed_providers=("claude",), allowed_models=(allowed,),
+                             allowed_profiles=("developer-heavy",),
                              deny_personal_keys=True, agent_setup=setup)
     monkeypatch.setattr(team_policy, "access", lambda repo: acc)
     monkeypatch.setattr(managed_models, "current", lambda repo: None)

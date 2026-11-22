@@ -10,10 +10,10 @@ from test_routing import boss, clear_cache, config, everything_available, instal
 
 
 @pytest.mark.parametrize("enabled,design_heavy,expected", [
-    pytest.param(True, False, "developer-heavy", marks=pytest.mark.variant("non-design advanced work routes away from Fable")),
-    pytest.param(True, True, "developer-fable",
+    pytest.param(True, False, "dev.claude-opus", marks=pytest.mark.variant("non-design advanced work routes away from Fable")),
+    pytest.param(True, True, "dev.claude-fable",
                  marks=pytest.mark.variant("design-heavy work remains eligible for Fable")),
-    pytest.param(False, False, "developer-fable",
+    pytest.param(False, False, "dev.claude-fable",
                  marks=pytest.mark.variant("opting out preserves existing advanced routing")),
 ])
 def test_advanced_design_routing(db, repo, boss, enabled, design_heavy, expected):
@@ -47,11 +47,11 @@ def test_learner_respects_design_eligibility(db, repo, boss, monkeypatch, weight
     config(repo, fable_for_design_only=True, learning="cloud", default_agent=default,
            routing={"advanced": ["developer-heavy", "developer-fable", "developer-gemini"]},
            learning_candidates=["developer-fable", "developer-heavy", "developer-gemini"])
-    expected = ("developer-fable", True) if design_heavy else ("developer-heavy", False)
+    expected = ("dev.claude-fable", True) if design_heavy else ("dev.claude-opus", False)
     options = {"design_heavy": True} if design_heavy else {}
     assert autopilot.choose_profile(db, "boss", str(repo), task="Implement storage",
                                     weight=weight, **options) == expected
-    assert offered and all(("developer-fable" in names) == design_heavy for names in offered)
+    assert offered and all(("dev.claude-fable" in names) == design_heavy for names in offered)
 
 
 @pytest.mark.variant("assign(design_heavy=True) must reach routing, or Fable is never eligible")
@@ -61,4 +61,4 @@ def test_assign_marks_design_heavy_work(db, repo, boss, monkeypatch):
     asyncio.run(mcp_server.assign(task="Design the shared interfaces", branch="shared-design",
                                  weight="advanced", design_heavy=True))
     [task] = db.list_tasks(str(repo), state="started")
-    assert task.profile == "developer-fable"
+    assert task.profile == "dev.claude-fable"
