@@ -3,7 +3,7 @@
 The daemon runs ``ReadinessWatch.sweep`` every 5 seconds and, for an open
 app, the events feed's git sweep; the cull runs once a minute. On a repo with
 many paused and done sessions an unchanged round used to start git for many of
-them, and an antivirus inspects every process (docs/investigations/process-count.md)."""
+them, and an antivirus inspects every process."""
 
 import shutil
 import subprocess

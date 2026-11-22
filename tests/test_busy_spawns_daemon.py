@@ -4,10 +4,9 @@ Whether ``origin/main`` exists, which of ``main`` and ``origin/main`` is
 ahead, what origin's default branch is and whether there is an origin at all
 are the same in every checkout of a repo, and change only when a ref or the
 config does. With sessions at work the sweeps asked git each of them for every
-checkout, every 5 seconds, and an antivirus inspects every process
-(docs/investigations/process-count.md, S6). So did a session whose goal is
-reached while its workers are at work: each sweep judged its readiness again,
-asking git about commits and files that hadn't moved."""
+checkout, every 5 seconds, and an antivirus inspects every process. So did a
+session whose goal is reached while its workers are at work: each sweep judged
+its readiness again, asking git about commits and files that hadn't moved."""
 
 import os
 import shutil
