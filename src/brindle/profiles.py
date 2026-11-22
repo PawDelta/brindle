@@ -602,7 +602,8 @@ def base_role(name: str, repo_root: str | None = None) -> str | None:
     (brindle's coordinator and subagent) or a custom role. It is the
     ``role:`` nearest ``name`` along its ``extends`` chain (a built-in base
     profile states its own, and a profile built on it inherits it); with
-    none, the base of the chain names it. None when there is no such profile."""
+    none, the base of the chain names it. None when there is no such profile,
+    or a profile along the chain can't be read."""
     current, seen = name, set()
     while True:
         found = _read(current, repo_root)
@@ -610,7 +611,10 @@ def base_role(name: str, repo_root: str | None = None) -> str | None:
             if current == name:
                 return None
             break    # a missing parent is still the base it names
-        meta = _frontmatter(found[0])[0]
+        try:
+            meta = _frontmatter(found[0])[0]
+        except ProfileError:
+            return None     # unreadable along the chain: the role is unknown (lint reports why)
         if meta.get("role"):
             return meta["role"]
         parent = meta.get("extends", "")
