@@ -293,7 +293,7 @@ SETUP_FIELDS = ("name", "usd", "minutes", "first_try", "measured", "runs", "note
 
 MIN_USD = 0.01          # a free (local) model still costs something to run and review
 GAP_CAP = 5.0           # doublings: no goal swamps the others by more than 32x
-YARDSTICK_PROFILE = "developer-fable"     # "one model doing everything", as the references' yardstick
+YARDSTICK_PROFILE = "dev.claude-fable"   # "one model doing everything", as the references' yardstick
 HISTORY = 30            # the person's last tasks whose tier mix the preview uses
 
 

@@ -26,13 +26,13 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1"
 # Ranked worker profiles for each tier. Availability checks fall through this
 # order; the learner may choose another eligible candidate when enabled.
 TIER_PREFERENCES: dict[str, tuple[str, ...]] = {
-    "light": ("developer-codex", "developer-light", "developer-sonnet", "developer", "developer-local",
-              "developer-codex-luna", "developer-codex-terra"),
-    "medium": ("developer-codex", "developer-sonnet", "developer", "developer-heavy",
-               "developer-codex-terra", "developer-codex-sol"),
-    "heavy": ("developer-heavy", "developer-gemini", "developer", "developer-codex",
-              "developer-codex-sol", "developer-codex-astra"),
-    "advanced": ("developer-fable", "developer-heavy", "developer-gemini"),
+    "light": ("dev.gpt", "dev.claude-haiku", "dev.claude-sonnet", "developer", "dev.qwen3-coder",
+              "dev.gpt-luna", "dev.gpt-terra"),
+    "medium": ("dev.gpt", "dev.claude-sonnet", "developer", "dev.claude-opus",
+               "dev.gpt-terra", "dev.gpt-sol"),
+    "heavy": ("dev.claude-opus", "dev.gemini", "developer", "dev.gpt",
+              "dev.gpt-sol", "dev.gpt-astra"),
+    "advanced": ("dev.claude-fable", "dev.claude-opus", "dev.gemini"),
 }
 
 
@@ -49,16 +49,16 @@ class Model:
 
 
 CATALOG: tuple[Model, ...] = (
-    Model("claude-haiku", "Claude Haiku", CLI, "claude", "developer-light", ("light",)),
-    Model("claude-sonnet", "Claude Sonnet", CLI, "claude", "developer-sonnet", ("light", "medium")),
-    Model("claude-opus", "Claude Opus", CLI, "claude", "developer-heavy", ("medium", "heavy")),
-    Model("codex", "Codex", CLI, "codex", "developer-codex"),
-    Model("gpt-6-luna", "GPT-6-Luna", CLI, "codex", "developer-codex-luna", ("light",)),
-    Model("gpt-6.1-terra", "GPT-6.1-Terra", CLI, "codex", "developer-codex-terra", ("light", "medium")),
-    Model("gpt-6.1-sol", "GPT-6.1-Sol", CLI, "codex", "developer-codex-sol", ("medium", "heavy")),
-    Model("gpt-6-astra", "GPT-6-Astra", CLI, "codex", "developer-codex-astra", ("heavy",)),
-    Model("antigravity", "Gemini (Antigravity)", CLI, "antigravity", "developer-gemini", ("medium", "heavy")),
-    Model("local-qwen3-coder", "Qwen3 Coder 30B", LOCAL, "native", "developer-local", ("light", "medium"),
+    Model("claude-haiku", "Claude Haiku", CLI, "claude", "dev.claude-haiku", ("light",)),
+    Model("claude-sonnet", "Claude Sonnet", CLI, "claude", "dev.claude-sonnet", ("light", "medium")),
+    Model("claude-opus", "Claude Opus", CLI, "claude", "dev.claude-opus", ("medium", "heavy")),
+    Model("codex", "Codex", CLI, "codex", "dev.gpt"),
+    Model("gpt-6-luna", "GPT-6-Luna", CLI, "codex", "dev.gpt-luna", ("light",)),
+    Model("gpt-6.1-terra", "GPT-6.1-Terra", CLI, "codex", "dev.gpt-terra", ("light", "medium")),
+    Model("gpt-6.1-sol", "GPT-6.1-Sol", CLI, "codex", "dev.gpt-sol", ("medium", "heavy")),
+    Model("gpt-6-astra", "GPT-6-Astra", CLI, "codex", "dev.gpt-astra", ("heavy",)),
+    Model("antigravity", "Gemini (Antigravity)", CLI, "antigravity", "dev.gemini", ("medium", "heavy")),
+    Model("local-qwen3-coder", "Qwen3 Coder 30B", LOCAL, "native", "dev.qwen3-coder", ("light", "medium"),
           "qwen3-coder:30b"),
     Model("or-qwen3-coder", "Qwen3 Coder", KEY, "native", "developer-or-qwen3-coder", ("light", "medium"),
           "qwen/qwen3-coder", OPENROUTER_KEY),

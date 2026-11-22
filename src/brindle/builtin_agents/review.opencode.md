@@ -1,5 +1,5 @@
 ---
-name: reviewer-opencode
+name: review.opencode
 description: Reviews a branch's changes for bugs and risks without editing code, using OpenCode for another model's view
 provider: opencode
 permission_mode: dontAsk  # nobody watches a reviewer: refuse what allowed_tools doesn't cover, never prompt

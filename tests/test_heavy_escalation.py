@@ -1,4 +1,4 @@
-"""A heavy task whose worker failed is retried once on developer-heavy (Fable),
+"""A heavy task whose worker failed is retried once on dev.claude-opus (Fable),
 only when Fable is enabled; otherwise it goes to the supervisor as before."""
 import json
 import time
@@ -141,7 +141,7 @@ def test_heavy_escalation_preserves_cap_notice(db, heavy, monkeypatch, queued):
     if queued:
         monkeypatch.setattr(agents, "delegate", delegate)
         tasks.start_queued(db, next(t for t in db.list_tasks(ws.repo_root) if t.state == "pending"))
-    assert [r[0] for r in retries] == ["developer-heavy"]
+    assert [r[0] for r in retries] == ["dev.claude-opus"]
     assert "check `pytest` failed" in retries[0][1]
     worker = next(a for a in db.list_agents(ws.id) if a.profile == pipeline.ESCALATION_PROFILE)
     for round_number in (1, 2):

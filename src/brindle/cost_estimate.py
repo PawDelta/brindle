@@ -349,7 +349,7 @@ def available_reviewers(repo_root: str | None) -> list[str]:
         if p.provider == "native":
             if memory_problem(p):
                 continue
-            if p.name == "reviewer-local" and not agents._local_reviewer_available():
+            if p.name == "review.qwen3-coder" and not agents._local_reviewer_available():
                 continue
         elif p.provider in ("claude", "codex", "antigravity"):
             try:

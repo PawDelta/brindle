@@ -1,4 +1,12 @@
-from brindle import model_names, profiles
+from brindle import learning, model_names, profiles
+from brindle.pro import learning as pro_learning
+
+
+def test_learner_history_under_an_old_id_is_recorded_under_the_renamed_profile():
+    key = pro_learning.OrgKey("org_1", "k1", b"0" * 32)
+    task = learning.TaskInfo(repo_root="/repo", task="fix it", profile="developer-codex")
+    body = pro_learning.record_payload(key, "id", task, learning.Outcome("merged"))
+    assert body["profile"] == "dev.gpt"
 
 
 def test_every_builtin_profile_has_a_display_name():

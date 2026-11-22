@@ -1,6 +1,24 @@
 import pytest
 
+from brindle import model_names
 from brindle.profiles import _frontmatter, _list, load_profile
+
+
+def test_an_old_built_in_id_loads_its_renamed_profile():
+    for old, new in model_names.ALIASES.items():
+        p = load_profile(old)
+        assert p.name == new
+        assert p.provider == load_profile(new).provider
+
+
+def test_a_custom_agent_that_extends_an_old_id_still_works(tmp_path):
+    agents = tmp_path / ".brindle" / "agents"
+    agents.mkdir(parents=True)
+    (agents / "mine.md").write_text(
+        "---\nname: mine\ndescription: a custom Codex agent\nextends: developer-codex\n---\nDo the task.\n")
+
+    p = load_profile("mine", str(tmp_path))
+    assert p.name == "mine" and p.provider == "codex"
 
 
 @pytest.mark.parametrize("name, model", [
@@ -57,3 +75,25 @@ def test_an_unknown_user_in_add_dirs_is_reported_not_raised(tmp_path):
     p = load_profile("developer", str(repo))
     assert p.add_dirs == ["~no-such-user-brindle/cache"]
     assert missing_add_dirs(p) == ["~no-such-user-brindle/cache"]
+
+
+def test_doctor_offers_to_rewrite_old_ids_in_config_and_writes_only_when_told(tmp_path):
+    import json
+
+    from brindle import doctor
+
+    repo = tmp_path / "proj"
+    (repo / ".brindle").mkdir(parents=True)
+    config = repo / ".brindle" / "config.json"
+    config.write_text(json.dumps({"reviewer": "reviewer-codex", "routing": {"light": ["developer-codex"]}}))
+
+    [check] = doctor._profile_id_checks(str(repo))
+    assert check.level == doctor.WARN and "reviewer-codex -> review.gpt" in check.detail
+
+    lines: list[str] = []
+    doctor._rewrite_profile_ids(config, {"reviewer-codex": "review.gpt"}, lambda prompt: False, lines)
+    assert json.loads(config.read_text())["reviewer"] == "reviewer-codex" and not lines
+
+    doctor._rewrite_profile_ids(config, {"reviewer-codex": "review.gpt"}, lambda prompt: True, lines)
+    rewritten = json.loads(config.read_text())
+    assert rewritten["reviewer"] == "review.gpt" and rewritten["routing"] == {"light": ["dev.gpt"]}

@@ -4843,7 +4843,7 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
     a Claude worker reviewed by a Claude reviewer is fine."""
     if cfg.review_profile:
         return cfg.review_profile
-    if cfg.reviewer and cfg.reviewer != "reviewer-sonnet-high":
+    if cfg.reviewer and cfg.reviewer != "review.claude-sonnet.high":
         return cfg.reviewer
     if db is None or not repo_root or cfg.routing_locked.get("reviewer"):
         return cfg.reviewer
@@ -4854,18 +4854,18 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
     candidates = [cfg.reviewer]
     if unusable("antigravity") is None:
         try:
-            load_profile("reviewer-gemini", repo_root)
-            candidates.append("reviewer-gemini")
+            load_profile("review.gemini", repo_root)
+            candidates.append("review.gemini")
         except Exception:
             pass
     if unusable("codex") is None:
         try:
-            load_profile("reviewer-codex", repo_root)
-            candidates.append("reviewer-codex")
+            load_profile("review.gpt", repo_root)
+            candidates.append("review.gpt")
         except Exception:
             pass
     if _local_reviewer_available():
-        candidates.append("reviewer-local")
+        candidates.append("review.qwen3-coder")
     candidates = list(dict.fromkeys(candidates))
     files, weight = learning._task_files(db, worker, repo_root) if worker else ((), None)
     pick, _ = learning.choose_why(db, cfg, repo_root, task, candidates=candidates,
@@ -4875,13 +4875,13 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
 
 
 def _local_reviewer_available() -> bool:
-    """Whether the built-in ``reviewer-local`` profile's model is served
+    """Whether the built-in ``review.qwen3-coder`` profile's model is served
     right now and fits in free memory. Any failure counts as not available."""
     from brindle.local_setup import memory_problem
     from brindle.native import runner
 
     try:
-        profile = load_profile("reviewer-local")
+        profile = load_profile("review.qwen3-coder")
         return runner.served(profile) and not memory_problem(profile)
     except Exception:
         return False
@@ -4978,7 +4978,7 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
         worker = workspace_worker(db, ws)
         pick = default_review_profile(cfg, worker, db, ws.repo_root, worker.task if worker else None)
         candidates = list(dict.fromkeys([pick, *cfg.reviewer_fallbacks]))
-        if pick == "reviewer-sonnet-high" and not cfg.review_profile and not cfg.routing_locked.get("reviewer"):
+        if pick == "review.claude-sonnet.high" and not cfg.review_profile and not cfg.routing_locked.get("reviewer"):
             if "reviewer" not in candidates:
                 candidates.append("reviewer")
         if cfg.review_sizing and not cfg.review_profile and not cfg.routing_locked.get("reviewer"):

@@ -31,6 +31,8 @@ import math
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 
+from brindle.model_names import canonical
+
 log = logging.getLogger(__name__)
 
 TIERS = ("light", "medium", "heavy", "advanced")
@@ -43,12 +45,12 @@ MIN_MINUTES = 0.1      # a run measured at ~0 minutes still takes some time: sco
 MIN_P = 0.01
 
 # Built-in profiles a role falls back to once its configured candidates are out.
-DEVELOPERS = ("developer-codex", "developer-sonnet", "developer", "developer-light", "developer-heavy",
-              "developer-gemini", "developer-opencode", "developer-fable", "developer-local")
-REVIEWERS = ("reviewer-sonnet-high", "reviewer", "reviewer-codex", "reviewer-gemini", "reviewer-opencode",
-             "reviewer-local")
+DEVELOPERS = ("dev.gpt", "dev.claude-sonnet", "developer", "dev.claude-haiku", "dev.claude-opus",
+              "dev.gemini", "dev.opencode", "dev.claude-fable", "dev.qwen3-coder")
+REVIEWERS = ("review.claude-sonnet.high", "reviewer", "review.gpt", "review.gemini", "review.opencode",
+             "review.qwen3-coder")
 # The supervisor takes its provider, model and effort from one of these.
-SUPERVISORS = ("supervisor", "developer-codex", "developer-gemini", "developer-opencode")
+SUPERVISORS = ("supervisor", "dev.gpt", "dev.gemini", "dev.opencode")
 
 
 def balanced() -> dict[str, float]:
@@ -89,7 +91,7 @@ class Table:
     def cell(self, profile: str, role: str, kind: str | None = None) -> dict | None:
         """``profile``'s measured cell for ``role`` (the ``role/kind`` cell
         before the ``role`` one), or None when it has none with ``min_runs``."""
-        mine = self.profiles.get(profile) or {}
+        mine = self.profiles.get(canonical(profile)) or {}
         for key in ([f"{role}/{kind}"] if kind else []) + [role]:
             c = mine.get(key)
             if isinstance(c, dict) and _measured(c, self.min_runs):
@@ -136,7 +138,12 @@ def parse(raw) -> Table:
             isinstance(k, str) and ">" in k and isinstance(c, dict) and _valid(c.get("p"), "p")
             and isinstance(c.get("runs"), int) for k, c in handover.items()):
         raise TableError("handover must map from>to pairs to {p, runs}")
-    return Table(min_runs, tiers, profiles, handover)
+    # The table's rows predate the renames: an old id's cells count for its renamed profile.
+    by_current: dict = {}
+    for name, cells in profiles.items():
+        by_current.setdefault(canonical(name), {}).update(cells)
+    handover = {">".join(canonical(p) for p in k.split(">", 1)): c for k, c in handover.items()}
+    return Table(min_runs, tiers, by_current, handover)
 
 
 _warned = False
@@ -271,7 +278,7 @@ def worker_pool(cfg, repo_root: str, tier: str, ceiling: str | None = None) -> l
         heavier = [t for t in TIERS[i + 1:top + 1]]
         lighter = list(reversed(TIERS[:i]))
         names = own + [n for t in heavier + lighter for n in autopilot.tier_order(cfg, t)] + list(DEVELOPERS)
-    names = list(dict.fromkeys(names))
+    names = list(dict.fromkeys(canonical(n) for n in names))
     if ceiling in rank:
         names = [n for n in names if rank.get(_weight(autopilot.profile_weight(n, cfg, repo_root)), 3)
                  <= rank[ceiling]]

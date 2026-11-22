@@ -73,7 +73,7 @@ def install(monkeypatch, plugin):
 
 @pytest.mark.parametrize("names,expected", [
     (["missing-worker", "developer"], "developer"),
-    pytest.param(["missing-worker"], "developer-codex", marks=pytest.mark.variant("failure path: an entirely missing routing tier cascades to the next heavier tier and remains a doctor warning")),
+    pytest.param(["missing-worker"], "dev.gpt", marks=pytest.mark.variant("failure path: an entirely missing routing tier cascades to the next heavier tier and remains a doctor warning")),
 ])
 def test_unknown_routing_profiles_are_skipped_and_reported(db, repo, boss, names, expected):
     path = user_config_path()
@@ -96,10 +96,10 @@ def test_invalid_weight_is_refused(db, repo, boss):
 
 
 @pytest.mark.parametrize("weight,candidates,expected", [
-    ("light", ["developer-local", "developer"], "developer"),
-    pytest.param("medium", ["developer-codex", "developer-heavy"], "developer-codex",
+    ("light", ["dev.qwen3-coder", "developer"], "developer"),
+    pytest.param("medium", ["dev.gpt", "dev.claude-opus"], "dev.gpt",
                  marks=pytest.mark.variant("changing the tier preference ranking changes the routed worker")),
-    pytest.param("light", None, "developer-codex",
+    pytest.param("light", None, "dev.gpt",
                  marks=pytest.mark.variant("light tasks prefer Sol over the available Claude workers")),
 ])
 def test_weight_routing_prefers_available_candidates(db, repo, boss, monkeypatch, weight, candidates, expected):
@@ -109,7 +109,7 @@ def test_weight_routing_prefers_available_candidates(db, repo, boss, monkeypatch
         config(repo, routing={weight: candidates})
     why = []
     assert choose(db, repo, weight=weight, why=why)[0] == expected
-    if candidates and "developer-local" in candidates:
+    if candidates and "dev.qwen3-coder" in candidates:
         assert "local model server not answering" in why[0]
     if weight == "medium":
         from brindle import worker_models
@@ -118,14 +118,14 @@ def test_weight_routing_prefers_available_candidates(db, repo, boss, monkeypatch
         first, second = (ranked.index(name) for name in candidates)
         ranked[first], ranked[second] = ranked[second], ranked[first]
         monkeypatch.setitem(worker_models.TIER_PREFERENCES, weight, tuple(ranked))
-        assert choose(db, repo, weight=weight)[0] == "developer-heavy"
+        assert choose(db, repo, weight=weight)[0] == "dev.claude-opus"
 
 
 @pytest.mark.parametrize("weight,blocked,expected", [
-    ("light", ["developer-codex"], "developer-light"),
-    pytest.param("light", ["developer-codex", "developer-light"], "developer-sonnet",
+    ("light", ["dev.gpt"], "dev.claude-haiku"),
+    pytest.param("light", ["dev.gpt", "dev.claude-haiku"], "dev.claude-sonnet",
                  marks=pytest.mark.variant("Sonnet takes light work when both Sol and Haiku cannot run")),
-    pytest.param("medium", ["developer-codex"], "developer-sonnet",
+    pytest.param("medium", ["dev.gpt"], "dev.claude-sonnet",
                  marks=pytest.mark.variant("medium work falls back to Sonnet when Sol cannot run")),
 ])
 @pytest.mark.variant("availability changes must advance to the next benchmark-ranked worker")
@@ -137,7 +137,7 @@ def test_ranked_worker_fallback(db, repo, boss, monkeypatch, weight, blocked, ex
 
 
 @pytest.mark.parametrize("unavailable,expected", [
-    pytest.param(None, "reviewer-sonnet-high", marks=pytest.mark.variant(
+    pytest.param(None, "review.claude-sonnet.high", marks=pytest.mark.variant(
         "with nothing blocking it, the default reviewer is the Sonnet high profile, not the baseline")),
     pytest.param("policy", "reviewer", marks=pytest.mark.variant(
         "an org refusal of the default reviewer must use the available baseline fallback")),
@@ -147,12 +147,12 @@ def test_ranked_worker_fallback(db, repo, boss, monkeypatch, weight, blocked, ex
 def test_default_reviewer_pick(db, repo, boss, monkeypatch, unavailable, expected):
     from brindle import policy, providers
 
-    db.add_agent(Agent("writer", boss.id, "developer-sonnet", "claude", None,
+    db.add_agent(Agent("writer", boss.id, "dev.claude-sonnet", "claude", None,
                        "assign", "done", "@0", "done", time.time()))
     monkeypatch.setattr(policy, "check_assign", lambda cfg, root, name, *args:
-                        policy.Decision(allowed=not (unavailable == "policy" and name == "reviewer-sonnet-high")))
+                        policy.Decision(allowed=not (unavailable == "policy" and name == "review.claude-sonnet.high")))
     if unavailable == "codex":
-        path = repo / ".brindle" / "agents" / "reviewer-sonnet-high.md"
+        path = repo / ".brindle" / "agents" / "review.claude-sonnet.high.md"
         path.parent.mkdir(exist_ok=True)
         path.write_text("---\nextends: reviewer\nprovider: codex\n---\n")
         monkeypatch.setattr(providers, "signed_out", lambda provider, env=None:
@@ -164,9 +164,9 @@ def test_default_reviewer_pick(db, repo, boss, monkeypatch, unavailable, expecte
 
 @pytest.mark.variant("nondefault learner choice: weighted routing must select the eligible profile chosen by the learner")
 def test_learning_plugin_reorders_the_remaining_candidates(db, repo, boss, monkeypatch):
-    install(monkeypatch, Picker(prefer="developer-sonnet"))
+    install(monkeypatch, Picker(prefer="dev.claude-sonnet"))
     config(repo, learning="cloud")
-    assert choose(db, repo, weight="medium") == ("developer-sonnet", True)
+    assert choose(db, repo, weight="medium") == ("dev.claude-sonnet", True)
 
 
 @pytest.mark.parametrize("pinned", [
@@ -178,8 +178,8 @@ def test_an_exhausted_cascade_refuses_and_says_why(db, repo, boss, monkeypatch, 
     if pinned:   # medium pinned to Sonnet, which can't run; everything else could
         unavailable = autopilot._unavailable
         monkeypatch.setattr(autopilot, "_unavailable", lambda name, *args: "unavailable"
-                            if name == "developer-sonnet" else unavailable(name, *args))
-        config(repo, default_agent="developer-codex", routing={"medium": ["developer-sonnet"]},
+                            if name == "dev.claude-sonnet" else unavailable(name, *args))
+        config(repo, default_agent="dev.gpt", routing={"medium": ["dev.claude-sonnet"]},
                routing_locked={"medium": True})
     else:
         monkeypatch.setattr("shutil.which", lambda cli: None)
@@ -197,9 +197,9 @@ def test_assign_reply_names_the_pick_and_stores_the_weight(db, repo, boss, monke
     config(repo, pipeline=False)
     out = asyncio.run(mcp_server.assign(task="do A", branch="feat-a", weight="medium"))
     assert "Started worker" in out
-    assert "weight medium -> developer-sonnet" in out and "Codex at 93%, skipped developer-codex" in out
+    assert "weight medium -> dev.claude-sonnet" in out and "Codex at 93%, skipped dev.gpt" in out
     [t] = db.list_tasks(str(repo), state="started")
-    assert t.weight == "medium" and t.profile == "developer-sonnet"
+    assert t.weight == "medium" and t.profile == "dev.claude-sonnet"
 
 
 def test_learning_outcomes_carry_the_weight(db, repo, boss, monkeypatch):

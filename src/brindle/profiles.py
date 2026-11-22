@@ -36,6 +36,7 @@ from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
 
+from brindle import model_names
 from brindle.config import CONFIG_DIR, brindle_home, user_profiles_dir
 
 
@@ -546,6 +547,16 @@ def _pinned_over(kind: str, name: str, found: list[Path]) -> None:
 
 
 def _read(name: str, repo_root: str | None) -> tuple[str, str] | None:
+    """The text of ``<name>.md`` and where it came from. An old built-in id
+    (see ``model_names.ALIASES``) that no file has under its own name reads
+    the renamed profile."""
+    found = _read_exact(name, repo_root)
+    if found is None and name in model_names.ALIASES:
+        found = _read_exact(model_names.ALIASES[name], repo_root)
+    return found
+
+
+def _read_exact(name: str, repo_root: str | None) -> tuple[str, str] | None:
     """The text of ``<name>.md`` and where it came from, by lookup order:
     the repo, the user, the org's library, the built-ins. A pinned org
     profile comes before the repo and user files."""
@@ -613,6 +624,8 @@ def _resolve(name: str, repo_root: str | None, chain: tuple[str, ...] = ()) -> t
 
 
 def _load(name: str, repo_root: str | None) -> Profile:
+    if name in model_names.ALIASES and _read_exact(name, repo_root) is None:
+        name = model_names.ALIASES[name]     # an old built-in id: load the renamed profile
     meta, body = _resolve(name, repo_root)
     profile = replace(_build(meta, body, name), name=name)
     if "auth" in meta:
@@ -625,8 +638,9 @@ def _load(name: str, repo_root: str | None) -> Profile:
 
 def load_profile(name: str, repo_root: str | None = None) -> Profile:
     """The profile in ``<name>.md``, with its ``extends`` parent folded in.
-    Its ``name`` is always ``name``, even if the file's frontmatter says
-    otherwise (a copied profile whose name wasn't changed): agents record it,
+    An old built-in id loads its renamed profile, and that is the ``name``
+    then. Otherwise ``name`` is always ``name``, even if the file's
+    frontmatter says otherwise (a copied profile whose name wasn't changed): agents record it,
     and a resume or relaunch loads the profile again by that name, so it must
     find this same file, permissions and all. Raises KeyError when there is
     no such profile (or no such parent) and ProfileError on an extends cycle."""

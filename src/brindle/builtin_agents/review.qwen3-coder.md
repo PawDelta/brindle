@@ -1,5 +1,5 @@
 ---
-name: reviewer-local
+name: review.qwen3-coder
 description: Reviews a branch's changes on a local open-weight model (Ollama), at no cost, without editing code
 provider: native
 api: openai

@@ -1,5 +1,5 @@
 ---
-name: developer-codex
+name: dev.gpt
 description: Implements a well-scoped coding task on its own branch, using Codex (the medium tier of weight routing)
 extends: developer
 provider: codex

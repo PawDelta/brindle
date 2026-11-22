@@ -89,9 +89,9 @@ check: python3 -m unittest tests.test_wrap -q
 # signed in to (the app's demo): every agent of the demo on that one provider.
 PROFILES = {
     "claude": ("developer", "reviewer"),
-    "codex": ("developer-codex", "reviewer-codex"),
-    "antigravity": ("developer-gemini", "reviewer-gemini"),
-    "opencode": ("developer-opencode", "reviewer-opencode"),
+    "codex": ("dev.gpt", "review.gpt"),
+    "antigravity": ("dev.gemini", "review.gemini"),
+    "opencode": ("dev.opencode", "review.opencode"),
 }
 
 
@@ -111,8 +111,8 @@ def _config(local: bool, provider: str | None = None) -> dict:
         "delegation": "fast",
     }
     if local:
-        cfg.update(default_agent="developer-local", review_profile="reviewer-local",
-                   routing={"light": ["developer-local"]})
+        cfg.update(default_agent="dev.qwen3-coder", review_profile="review.qwen3-coder",
+                   routing={"light": ["dev.qwen3-coder"]})
     elif provider in PROFILES:
         developer, reviewer = PROFILES[provider]
         cfg.update(local_models=False, default_agent=developer, review_profile=reviewer,
