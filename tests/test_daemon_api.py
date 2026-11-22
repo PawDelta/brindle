@@ -914,6 +914,8 @@ def test_routing_policy_marks_what_the_org_refuses_and_locks(seeded, monkeypatch
         ("provider", "codex"), ("provider", "antigravity"), ("provider", "opencode"), ("keys", "personal_api_keys")}
     rows = {p["name"]: p for p in body["profiles"]}
     assert (rows["developer-heavy"]["allowed"], rows["developer-heavy"]["refusal"] is None) == (heavy_ok, heavy_ok)
+    assert all(rows["developer-heavy"][k] for k in ("display", "maker", "tool", "effort"))
+    assert ROUTE_ID not in rows["developer-heavy"]["display"]
     for refused in ("developer-light", "developer-codex"):      # a model, then a provider, the org doesn't allow
         assert not rows[refused]["allowed"] and rows[refused]["refusal"]
     assert ("developer-heavy" in policy["models"][allowed]) == heavy_ok

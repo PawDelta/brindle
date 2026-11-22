@@ -916,6 +916,12 @@ class RoutingProfileDTO(_DTO):
     provider: str
     provider_name: str | None = None
     model: str | None = None
+    # How the model is named to a person (brindle.model_names): "Claude Opus",
+    # who made it, the tool that runs it, and the profile's effort.
+    display: str | None = None
+    maker: str | None = None
+    tool: str | None = None
+    effort: str | None = None
     installed: bool
     signed_in: bool
     excluded: bool

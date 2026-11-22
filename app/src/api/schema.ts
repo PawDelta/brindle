@@ -1570,16 +1570,20 @@ export interface RoutingLockDTO {
 export interface RoutingProfileDTO {
   allowed?: boolean;
   cost_tier: string;
+  display?: string | null;
+  effort?: string | null;
   excluded: boolean;
   installed: boolean;
   lint_errors?: string[];
   lint_warnings?: string[];
+  maker?: string | null;
   model?: string | null;
   name: string;
   provider: string;
   provider_name?: string | null;
   refusal?: string | null;
   signed_in: boolean;
+  tool?: string | null;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
