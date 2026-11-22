@@ -347,6 +347,7 @@ def test_permission_policy_denies_through_the_plugins_pre_tool_hook(db, ws, brin
     ({"decision": "deny"}, ["reject"]),
     (None, []),                            # nobody answered: OpenCode's own prompt stays
 ])
+@pytest.mark.variant("each decision (allow/deny/ask) must reach OpenCode's own ask")
 def test_plugin_answers_opencodes_own_ask_with_brindles_decision(decided, response):
     """The real plugin hands an OpenCode ask to brindle (opencode-permission-ask) and
     answers that very permission through OpenCode's API: never a different one."""
