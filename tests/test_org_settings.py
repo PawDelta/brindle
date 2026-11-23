@@ -96,6 +96,7 @@ def test_org_edit_refuses_unauthorised_or_outdated_form(library, case, expected)
         assert not library.changes[0].get("switches")
 
 
+@pytest.mark.variant("a member refused org settings must still be bound by the org's CLI-update lock")
 def test_member_denied_organization_settings_keeps_provider_update_lock(library):
     library.docs_policy["provider_cli_updates"] = {"mode": "off", "locked": True}
     login(library, team_claims(plan="enterprise", role="member", features=[

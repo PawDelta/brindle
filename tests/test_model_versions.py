@@ -51,6 +51,7 @@ def test_routing_silently_skips_missing_profile(db, repo, routing):
     pytest.param("gpt-6.1-terra", {"gpt-6.2-sol"}, None, "gpt-6.1-terra",
                  marks=pytest.mark.variant("a newer version in another model line cannot replace the pin")),
 ])
+@pytest.mark.variant("each row is a distinct listed/allowed combination that must pick the newest usable version or keep the pin")
 def test_routing_launches_newest_allowed_version_in_same_line(
         db, repo, routing, launches, detached, monkeypatch, pinned, listed, allowed, expected):
     configure(repo, ["pinned", "dev.gpt"], pinned)
@@ -93,6 +94,7 @@ def test_launch_refuses_a_pin_disallowed_after_the_catalog_changes(db, repo, rou
     [],
     pytest.param(["suite"], marks=pytest.mark.variant("a queued review reroutes after checks in the current account")),
 ])
+@pytest.mark.variant("the writer's model is the version it actually launched on, not the pinned one")
 def test_reviewer_order_demotes_the_writers_launched_model(db, repo, routing, launches, detached, monkeypatch, checks):
     configure(repo, ["pinned"])
     profiles = repo / ".brindle" / "agents"
@@ -164,6 +166,7 @@ def test_reviewer_order_demotes_the_writers_launched_model(db, repo, routing, la
         assert sum("_review-after-checks" in argv for argv in queued) == 2
 
 
+@pytest.mark.variant("the resolved model must show before launch and roll back if the pane fails to open")
 def test_launch_model_visible_before_pane_starts_and_restored_if_open_fails(
         db, repo, routing, launches, detached, monkeypatch):
     configure(repo, ["pinned"], pinned="gpt-6.2-sol")
@@ -211,6 +214,7 @@ def test_post_start_theme_error_keeps_launched_model(db, repo, routing, detached
     pytest.param("unconfirmed-registration", marks=pytest.mark.variant(
         "an unconfirmed teardown after registration failure must keep the model and leave the gate closed")),
 ])
+@pytest.mark.variant("each row is a distinct launch path where a pane startup failure must be reported")
 def test_critical_pane_startup_failure_is_reported(db, repo, routing, detached, monkeypatch, fault):
     configure(repo, ["pinned"], pinned="gpt-6.2-astra")
     opened = []

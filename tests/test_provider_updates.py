@@ -41,6 +41,7 @@ def machine(monkeypatch, tmp_path, db):
     return state
 
 
+@pytest.mark.variant("an idle outdated CLI must update and drop the cached model list so new models appear")
 def test_updates_idle_codex_and_invalidates_cached_catalog(db, machine, monkeypatch):
     def discover(request, limit):
         models = {"new"} if machine.installed() == "0.171.0" else {"old"}
@@ -76,6 +77,7 @@ def test_updates_idle_codex_and_invalidates_cached_catalog(db, machine, monkeypa
     assert machine.installed() == "0.172.0"
 
 
+@pytest.mark.variant("a worker that starts mid-check must stop the update (re-checked before acting)")
 def test_worker_appearing_during_release_check_defers_update(db, machine, monkeypatch, tmp_path):
     path = str(tmp_path)
     ws = Workspace("ws", path, "main", "main", "main", "main", path, 9000, "session", machine.now)
@@ -123,6 +125,7 @@ def test_self_updaters_are_untouched(db, machine):
     assert checked.isdisjoint({"claude", "antigravity"})
 
 
+@pytest.mark.variant("off must not even contact the registry")
 def test_off_skips_provider_checks(db, machine):
     config.set_user(updates.SETTING, "off")
     machine.sweep()
@@ -130,6 +133,7 @@ def test_off_skips_provider_checks(db, machine):
     assert machine.installed() == "0.170.0"
 
 
+@pytest.mark.variant("ask must raise an Inbox item instead of updating")
 def test_ask_queues_an_inbox_update(db, machine):
     config.set_user(updates.SETTING, "ask")
     machine.sweep()
@@ -206,6 +210,7 @@ def test_failed_staged_install_preserves_old_version_and_one_notice(db, machine,
     assert not list((config.brindle_home() / "provider-clis" / "codex").iterdir())
 
 
+@pytest.mark.variant("an unreadable org policy must fall back to the member's choice, never to off or locked")
 def test_refused_org_policy_leaves_updates_unlocked(db, machine, monkeypatch):
     ent = SimpleNamespace(org_id="org_refused", sub="person", plan="enterprise",
                           features=["analysis_docs_enterprise"])
@@ -269,6 +274,7 @@ def test_older_org_policy_success_cannot_restore_lock_after_a_refusal(db, monkey
     "automatic",
     pytest.param("ask", marks=pytest.mark.variant("a renewed offer needs a fresh Inbox approval")),
 ])
+@pytest.mark.variant("a failed release must not retry while a worker uses that CLI")
 def test_same_failed_release_waits_for_live_worker_after_next_check(db, machine, monkeypatch, tmp_path, mode):
     config.set_user(updates.SETTING, mode)
     installer = installs._run_installer
