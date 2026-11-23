@@ -66,12 +66,15 @@ def claude(route, **kw):
     (IDS[0], IDS, IDS[0]),
     pytest.param("claude-sonnet-4-6", IDS, IDS[-1],
                  marks=pytest.mark.variant("route default differs from its first served id")),
+    pytest.param(None, (), IDS[-1], marks=pytest.mark.variant(
+        "An unpinned profile must use the company's declared default when the route has no model list")),
 ])
 def test_route_model_is_used_by_launch_and_policy(repo, monkeypatch, model, ids, expected):
     from brindle import policy, providers
     from brindle.config import RepoConfig
-    from brindle.pro.team_policy import OrgPolicy, ProPolicy
+    from brindle.pro.team_policy import Access, OrgPolicy, ProPolicy
     from brindle.profiles import Profile
+    from brindle.service.routing import RoutingPolicy
 
     setup = claude("bedrock", aws=OWN_AWS, model_ids=ids, default_model=IDS[-1])
     monkeypatch.setattr(company_login, "org_setup", lambda *a, **k: (ORG, setup))
@@ -87,6 +90,9 @@ def test_route_model_is_used_by_launch_and_policy(repo, monkeypatch, model, ids,
     decision = policy.check_assign(RepoConfig(), str(repo), p.name, "task", "assign")
     assert (argv[argv.index("--model") + 1], policy._profile_fields(p.name, str(repo)),
             decision.allowed) == (expected, ("claude", expected), True)
+    routing = RoutingPolicy(Access(org_id=ORG, allowed_models=(expected,), agent_setup=setup), None, str(repo))
+    assert routing.runs(p.name) == ("claude", expected)
+    assert routing.refusal(p) is None
 
 
 def test_a_pinned_alias_wins_over_the_route_default(repo, monkeypatch):
