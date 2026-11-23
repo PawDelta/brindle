@@ -216,8 +216,8 @@ CATALOG: dict[str, Model] = dict([
 
 ALIASES = {alias: key for key, model in CATALOG.items() for alias in model.aliases}
 _PROVIDER_DEFAULTS = {"claude": "sonnet", "codex": "gpt-6.2-sol", "opencode": "opencode/big-pickle"}
-# For unpinned Claude and Codex profiles. Codex config and managed Claude routes take priority.
-PREFER_CLI_DEFAULTS = True
+# For unpinned Claude and Codex profiles. Explicit config and managed Claude routes take priority.
+PREFER_CLI_DEFAULTS = False
 
 
 def default_model(provider: str) -> str | None:

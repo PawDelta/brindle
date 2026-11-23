@@ -103,7 +103,7 @@ def test_unpinned_profile_shows_the_launched_model(db, repo, monkeypatch, codex_
                                                   profile, provider, model, display):
     from types import SimpleNamespace
 
-    from brindle import agents, codex_hook, model_availability, model_catalog, policy, providers, spawn, view, workspaces
+    from brindle import agents, codex_hook, model_availability, policy, providers, spawn, view, workspaces
     from brindle.service.routing import RoutingPolicy
 
     class AppServer:
@@ -114,7 +114,7 @@ def test_unpinned_profile_shows_the_launched_model(db, repo, monkeypatch, codex_
             if method == "config/read":
                 return {"config": {}}
             assert method == "model/list"
-            return {"data": []}
+            return {"data": [{"model": "gpt-6.1-terra", "isDefault": True}]}
 
         def close(self):
             pass
@@ -136,7 +136,6 @@ def test_unpinned_profile_shows_the_launched_model(db, repo, monkeypatch, codex_
 
         monkeypatch.setattr(spawn, "read", configured)
     if provider == "claude":
-        monkeypatch.setattr(model_catalog, "PREFER_CLI_DEFAULTS", True)
         monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
         settings = repo / ".claude" / "settings.json"
         settings.parent.mkdir()

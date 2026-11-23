@@ -186,11 +186,10 @@ def default_launch_model(profile: Profile, cwd: str, *, env: dict[str, str] | No
         return opencode.configured_model(cwd, effective) or fallback
     if model := company_login.claude_model(None, cwd):
         return model
-    if not model_catalog.PREFER_CLI_DEFAULTS:
-        return fallback
     model = _claude_configured_model(profile, cwd, effective)
     if not model:
-        return effective.get("ANTHROPIC_DEFAULT_SONNET_MODEL") or fallback
+        implicit = effective.get("ANTHROPIC_DEFAULT_SONNET_MODEL") if model_catalog.PREFER_CLI_DEFAULTS else None
+        return implicit or fallback
     if model in ("haiku", "sonnet", "opus"):
         return effective.get(f"ANTHROPIC_DEFAULT_{model.upper()}_MODEL") or model_catalog.ALIASES.get(model, model)
     return model
