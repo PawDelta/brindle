@@ -10,6 +10,7 @@ import pytest
 from brindle import agents, autopilot, doctor, learning, mcp_server, plugins, quota, workspaces
 from brindle.config import RepoConfig, load_repo_config, user_config_path
 from brindle.db import Agent
+from test_launch_health import detached, launches  # noqa: F401 - fixtures: the real spawn, no CLI process
 from test_merge_order import fake_spawn
 
 
@@ -221,31 +222,32 @@ def test_assign_reply_names_the_pick_and_stores_the_weight(db, repo, boss, monke
     assert "developer-sonnet" not in queued
 
 
-@pytest.mark.parametrize("override", [
-    False,
-    pytest.param(True, marks=pytest.mark.variant(
+@pytest.mark.parametrize("named,override,expected", [
+    ("qa", False, "dev.claude-sonnet"),
+    pytest.param("qa", True, "dev.claude-opus", marks=pytest.mark.variant(
         "the agent's own agent_models order replaces the shared table and the learner")),
+    pytest.param("", True, "dev.claude-opus", marks=pytest.mark.variant(
+        "an unnamed weighted task is done by the repo's default agent, with its own order")),
 ])
-def test_assign_routes_an_agent_by_size(db, repo, boss, monkeypatch, override):
-    launched = []
+def test_assign_routes_an_agent_by_size(db, repo, boss, monkeypatch, launches, detached, named, override, expected):
+    from brindle import cascade
 
-    def spawn(db, ws, profile, *, agent_name=None, **kw):
-        launched.append((profile, agent_name))
-        return fake_spawn(db, ws, profile, **kw)
-
-    monkeypatch.setattr(agents, "spawn", spawn)
+    unavailable = autopilot._unavailable
+    monkeypatch.setattr(autopilot, "_unavailable", lambda name, *args: "unavailable"
+                        if name == "dev.claude-haiku" else unavailable(name, *args))
+    monkeypatch.setattr(cascade, "table", lambda: None)   # the tier's own order, unmeasured
     plugin = Picker()
     install(monkeypatch, plugin)
-    config(repo, pipeline=False, learning="cloud",
-           **({"agent_models": {"qa": {"light": ["dev.claude-sonnet"]}}} if override else {}))
-    expected = "dev.claude-sonnet" if override else choose(db, repo, weight="light")[0]
-    plugin.asked.clear()
-    out = asyncio.run(mcp_server.assign(agent_profile="qa", task="cover the parser", branch="feat-qa",
+    config(repo, pipeline=False, learning="cloud", default_agent="qa" if not named else "developer",
+           routing={"light": ["dev.claude-haiku", "dev.claude-sonnet", "dev.gpt"]},
+           **({"agent_models": {"qa": {"light": ["dev.claude-haiku", "dev.claude-opus"]}}} if override else {}))
+    out = asyncio.run(mcp_server.assign(agent_profile=named, task="cover the parser", branch="feat-qa",
                                         weight="light"))
     assert "Started worker" in out
-    assert launched == [(expected, "qa")]
     [t] = db.list_tasks(str(repo), state="started")
-    assert t.profile == expected
+    worker = db.get_agent(t.agent_id)
+    assert (t.profile, worker.profile, worker.agent) == (expected, expected, "qa")
+    assert len(launches) == 1
     assert db.routing_decision_for_agent(t.agent_id).agent == "qa"
     # The learner weighs the shared table for the agent; an agent's own order is locked.
     assert [task.agent for task, _ in plugin.asked] == ([] if override else ["qa"])

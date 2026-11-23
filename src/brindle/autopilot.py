@@ -1313,7 +1313,8 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
 
     Who does a ``weight`` task: ``requested`` when it names an agent (a
     profile with no model of its own, see ``routed_agent``), else ``agent``,
-    else the milestone's profile when it is an agent. The task is then routed
+    else the milestone's profile when it is an agent, else the repo's
+    ``default_agent`` when it is an agent. The task is then routed
     by size like any other (the agent's own ``agent_models`` order first) and
     ``decision["agent"]`` names who, for the launch to join to the pick.
     Naming a model or a pinned profile runs that profile, as before."""
@@ -1369,6 +1370,8 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             if norm_weight not in WEIGHTS:
                 raise AutopilotError(f"weight must be one of {', '.join(WEIGHTS)}, not {weight!r}")
             weight = norm_weight
+            if who is None:   # nobody named, no agent milestone: the repo's default agent does it
+                who = routed_agent(cfg.default_agent, repo_root)
             if ceiling and weight_order[weight] > weight_order[ceiling]:
                 orig_weight = weight
                 weight = ceiling
