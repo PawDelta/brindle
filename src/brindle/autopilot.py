@@ -1963,7 +1963,7 @@ def start_audit(db: DB, root_id: str, ws: Workspace, cfg: RepoConfig | None = No
     cfg = cfg or workspace_config(ws, session=True)
     profile, _ = agents._review_choice(db, ws, None, cfg)
     auditor = agents.spawn(db, ws, profile, prompt=audit_prompt(db, ap, head), parent_id=root_id,
-                           mode="review", background_setup=True)
+                           mode="review", background_setup=True, agent_name="reviewer")
     db.update_autopilot(root_id, auditor_id=auditor.id, audit_sha=head, audit_ok=None)
     bus.publish_agent(db, "autopilot.audit_started", root_id, auditor_id=auditor.id, sha=head)
     return auditor

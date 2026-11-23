@@ -941,7 +941,8 @@ def _repo_pins_reviewer(repo_root: str | None) -> bool:
 
 
 def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
-                       repo_root: str | None = None) -> tuple[str, str]:
+                       repo_root: str | None = None, *, db: DB | None = None,
+                       ws: Workspace | None = None, worker: Agent | None = None) -> tuple[str, str]:
     """Which reviewer profile to run for the fallback and why: keeps an
     explicitly pinned ``cfg.review_profile`` / ``cfg.reviewer``; otherwise
     routes to the cheapest available reviewer tier (reusing weight/price
@@ -949,6 +950,9 @@ def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
     falling back to ``cfg.reviewer``."""
     if cfg.review_profile:
         return cfg.review_profile, f"using {cfg.review_profile} (pinned by review_profile)"
+    if db is not None and ws is not None and "reviewer" in cfg.agent_models and not cfg.reviewer_models_inherited:
+        name, why = agents._review_choice(db, ws, None, cfg)
+        return name, why or f"using {name} from this task size's reviewer pool"
     default = cfg.reviewer or "review.claude-sonnet.high"
     if default != "review.claude-sonnet.high" or _repo_pins_reviewer(repo_root):
         return default, f"using {default} (pinned by reviewer config)"
@@ -983,8 +987,12 @@ def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
         scored.append(((rank_of.get(tier, 1), rate, 0 if name == default else 1), name, tier))
     if scored:
         scored.sort(key=lambda item: item[0])
-        _, best, tier = scored[0]
+        order, same_model = review_scope.writer_model_last([item[1] for item in scored], worker, repo_root or "")
+        best = order[0]
+        _, _, tier = next(item for item in scored if item[1] == best)
         info = autopilot.model_cost_info(best, cfg, repo_root)
+        if best in same_model:
+            return best, f"using {info} (the writer's model; no different reviewer model can run)"
         return best, f"using {info} (cheapest available {tier} reviewer tier)"
     tier = autopilot.profile_weight(default, cfg, repo_root)
     return default, f"using {default} ({tier} reviewer tier; no other reviewer available)"
@@ -1139,7 +1147,7 @@ def _other_provider_reviewers(db: DB, cfg: RepoConfig, reviewer: Agent, ws: Work
     reviewer list. A profile another live reviewer of ``sha`` runs is left to
     it. Also why each candidate was skipped (the list is empty when none can
     run)."""
-    from brindle import cascade
+    from brindle import cascade, review_scope
     from brindle.profiles import load_profile
 
     taken = {a.profile for a in db.list_agents(ws.id) if a.mode == "review" and a.id != reviewer.id
@@ -1148,6 +1156,14 @@ def _other_provider_reviewers(db: DB, cfg: RepoConfig, reviewer: Agent, ws: Work
     own = (cfg.review_profile, cfg.reviewer, *cfg.reviewer_fallbacks)
     pool = [n for n in dict.fromkeys(canonical(x) for x in (*own, *(() if locked else cascade.REVIEWERS)) if x)
             if n not in taken]
+    worker = agents.workspace_worker(db, ws)
+    if not cfg.review_profile and "reviewer" in cfg.agent_models and not cfg.reviewer_models_inherited:
+        size = review_scope.review_size(worker, db, ws.repo_root, ws, cfg)
+        configured = review_scope.model_order(cfg, size)
+        if configured is not None:
+            pool = [n for n in configured if n not in taken]
+            locked = size in cfg.agent_models["reviewer"] or bool(cfg.routing_locked.get(size))
+    pool, same_model = review_scope.writer_model_last(pool, worker, ws.repo_root)
 
     def why_not(name: str) -> str | None:
         try:
@@ -1166,7 +1182,11 @@ def _other_provider_reviewers(db: DB, cfg: RepoConfig, reviewer: Agent, ws: Work
 
     found = cascade.run("reviewer", pool, why_not, repo_root=ws.repo_root,
                         after=[reviewer.profile], pinned=locked)
-    return found.order, "; ".join(why for _, why in found.skipped)
+    order = [n for n in found.order if n not in same_model] + [n for n in found.order if n in same_model]
+    reasons = [why for _, why in found.skipped]
+    if order and order[0] in same_model:
+        reasons.append("using the writer's model because no different reviewer model can run")
+    return order, "; ".join(reasons)
 
 
 def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
@@ -1249,14 +1269,14 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
         return True
     parent = db.get_agent(worker.parent_id) if worker.parent_id else None
     if not tried and parent is not None:
-        profile, reason = _fallback_reviewer(cfg, reviewer, ws.repo_root)
-        focus_parts = [f"Fallback review ({reason})."]
-        if partial:
-            focus_parts.append(
-                f"Earlier reviewer {reviewer.id} ({reviewer.profile}) stopped without a verdict; "
-                f"its partial findings:\n{partial}"
-            )
         try:
+            profile, reason = _fallback_reviewer(cfg, reviewer, ws.repo_root, db=db, ws=ws, worker=worker)
+            focus_parts = [f"Fallback review ({reason})."]
+            if partial:
+                focus_parts.append(
+                    f"Earlier reviewer {reviewer.id} ({reviewer.profile}) stopped without a verdict; "
+                    f"its partial findings:\n{partial}"
+                )
             # Through start_review: with checks they run (or are reused, by
             # sha) on the branch's current commit before the fallback starts.
             agents.start_review(

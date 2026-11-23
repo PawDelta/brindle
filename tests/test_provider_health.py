@@ -39,7 +39,7 @@ def _profile(repo, name, text):
 def test_review_choice_passes_over_a_limited_providers_reviewer(db, repo, clock, available):
     _profile(repo, "review.claude-sonnet.high", "---\nextends: reviewer\nprovider: codex\n---\n")
     ws = workspaces.adopt_root(db, str(repo))
-    db.add_agent(Agent("writer", ws.id, "developer-sonnet", "claude", None,
+    db.add_agent(Agent("writer", ws.id, "dev.claude-opus", "claude", None,
                        "assign", "done", "@0", "done", NOW))
     quota.record_limit("codex", now=NOW)
 
