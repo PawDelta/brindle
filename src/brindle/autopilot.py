@@ -1039,7 +1039,7 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
                      decision: dict | None = None, gate=None,
                      ceiling: str | None = None, design_heavy: bool = False,
                      goal: dict | None = None, after: list[str] | None = None,
-                     policy: dict | None = None) -> tuple[str | None, bool, str]:
+                     policy: dict | None = None, agent: str | None = None) -> tuple[str | None, bool, str]:
     """(profile, learned, why) for a task of ``weight``; profile is None when
     every candidate for the tier is out. ``decision`` gets the ``baseline``
     (the pick without learning), and ``over_budget`` (why each candidate was
@@ -1050,10 +1050,15 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     profiles this task already ran on (their providers are left out).
     ``policy``: the assignment's context for the repo's policy (``mode``,
     ``branch``, ``actor``), asked of each candidate as a fresh assign would;
-    the delegation's own policy guard still decides the final pick."""
+    the delegation's own policy guard still decides the final pick.
+    ``agent``: who does the task (an agent profile, joined to the pick at
+    launch); its own ``agent_models`` order for ``weight``, when set, is the
+    pool, locked like ``routing_locked``. The learner is told who it is."""
     from brindle import cascade, learning, policy as pol, routing_goal
 
-    if goal is None and not cfg.routing_locked.get(weight):
+    own_order = cascade.agent_pool(cfg, repo_root, agent, weight, ceiling)
+    locked = bool(cfg.routing_locked.get(weight)) or own_order is not None
+    if goal is None and not locked:
         goal = routing_goal.for_learner(repo_root)
     ctx = dict(policy or {})
     try:
@@ -1070,13 +1075,13 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
 
     try:
         # With a learner, every replacement is checked so it can weigh them all.
-        learner = not cfg.routing_locked.get(weight) and learning.plugin(cfg, repo_root) is not None
+        learner = not locked and learning.plugin(cfg, repo_root) is not None
     except Exception:  # noqa: BLE001 - no learner: the table's order stands
         learner = False
     found = cascade.workers(cfg, repo_root, weight, gate=gate, ceiling=ceiling, design_heavy=design_heavy,
-                            after=after or (), weights=goal, policy=refusal, full=learner)
+                            after=after or (), weights=goal, policy=refusal, full=learner, agent=agent)
     order, remaining = found.pool, found.order
-    own = set(tier_order(cfg, weight))
+    own = set(own_order if own_order is not None else tier_order(cfg, weight))
     over = {n: why for n, why in found.skipped if why.startswith("over budget")}
     # The tier's own reasons, as before; the rest of the pool's only once the tier is out.
     in_tier = not remaining or any(n in own for n in remaining)
@@ -1100,8 +1105,8 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
         return None, False, f"every {weight} candidate was out ({'; '.join(skipped) or 'none configured'})"
     if not in_tier:
         skipped.insert(0, f"every {weight} candidate was out, so the cascade went on")
-    if cfg.routing_locked.get(weight):
-        pick, reason = None, None   # the owner pinned this tier: learning never overrides it
+    if locked:
+        pick, reason = None, None   # the owner pinned this tier (or the agent's own order): learning never overrides it
     else:
         # The cascade's order (the measured table, on the goal's weights) is
         # the pick without hosted learning, and the default the learner must
@@ -1109,6 +1114,8 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
         options: dict = {"design_heavy": True} if design_heavy else {}
         if goal is not None:
             options["goal"] = goal
+        if agent is not None:
+            options["agent"] = agent
         pick, reason = learning.choose_why(db, cfg, repo_root, task, files, candidates=remaining,
                                            weight=weight, default=remaining[0], **options)
     name = pick or remaining[0]
@@ -1281,7 +1288,8 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                    task: str | None = None, files: list[str] | None = None,
                    weight: str | None = None, why: list[str] | None = None,
                    decision: dict | None = None, *, design_heavy: bool = False,
-                   max_tier: str | None = None, goal=None, policy: dict | None = None) -> tuple[str, bool]:
+                   max_tier: str | None = None, goal=None, policy: dict | None = None,
+                   agent: str | None = None) -> tuple[str, bool]:
     """The worker profile for a delegation, and whether learning chose it:
     ``requested`` if given, else (when no ``weight`` is given) the first
     unverified milestone's profile in the caller's session, else the repo's
@@ -1301,8 +1309,18 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     the session's, the repo's and the person's (brindle.routing_goal); the
     learner is asked with the one in force. ``policy``: the delegation's
     ``mode`` and ``branch``, so routing asks the repo's policy about each
-    candidate as the assignment will (default mode "assign")."""
+    candidate as the assignment will (default mode "assign").
+
+    Who does a ``weight`` task: ``requested`` when it names an agent (a
+    profile with no model of its own, see ``routed_agent``), else ``agent``,
+    else the milestone's profile when it is an agent. The task is then routed
+    by size like any other (the agent's own ``agent_models`` order first) and
+    ``decision["agent"]`` names who, for the launch to join to the pick.
+    Naming a model or a pinned profile runs that profile, as before."""
     cfg = load_repo_config(repo_root)
+    who = routed_agent(agent, repo_root) if agent else None
+    if requested and weight and (named := routed_agent(requested.strip(), repo_root)):
+        who, requested = named, None
     options: dict = {"design_heavy": True} if design_heavy else {}
     weights = _goal_weights(db, caller_id, repo_root, goal)
     if weights is not None:
@@ -1327,7 +1345,9 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     if not name:
         pending = next((m for m in db.milestones(root_of(db, caller_id)) if m.status != "passed"), None)
         if pending and pending.profile and weight:
-            if why is not None:
+            if who is None and (milestone_agent := routed_agent(pending.profile.strip(), repo_root)):
+                who = milestone_agent
+            elif why is not None and who is None:
                 why.append(f"weight {weight} overrides milestone profile {pending.profile.strip()}")
         elif pending and pending.profile:
             m_profile = pending.profile.strip()
@@ -1372,7 +1392,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             gate = budget.Gate(db, cfg, repo_root, caller_id)
             picked, learned, note = _route_by_weight(db, cfg, repo_root, weight, task, files, routed, gate,
                                                      ceiling=ceiling, policy=_policy_context(db, caller_id, policy),
-                                                     **options)
+                                                     agent=who, **options)
             if routed.get("over_budget"):
                 message = budget.refusal(routed["over_budget"])
                 try:
@@ -1389,7 +1409,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                 raise AutopilotError(f"{where} can take a {weight} task now: {note}")
             name = picked
             if why is not None:
-                why.append(note)
+                why.append(f"{note} (as {who})" if who else note)
         if not name:
             name = learning.choose(db, cfg, repo_root, task, files, weight=weight,
                                    default=cfg.default_agent, **options) or ""
@@ -1452,7 +1472,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             why.append(f"{problem}; using {replacement} instead of {name}")
         name, learned = replacement, False
     if decision is not None:
-        decision.update(profile=name, learned=learned, weight=weight,
+        decision.update(profile=name, learned=learned, weight=weight, agent=who,
                         prior=bool(routed.get("prior")),
                         baseline=routed.get("baseline", name) if learned else name,
                         demoted_from=routed.get("demoted_from"))
@@ -1461,6 +1481,26 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
         if info_str and not any("cost tier" in w for w in why):
             why.append(info_str)
     return name, learned
+
+
+def routed_agent(name: str | None, repo_root: str) -> str | None:
+    """``name``'s current id when it is an agent that task routing joins to a
+    model by job size (a profile built on developer with no model of its
+    own), else None: a model, a pinned profile, a reviewer, supervisor or
+    helper, or no such profile runs as itself."""
+    from brindle import profiles
+
+    if not name:
+        return None
+    try:
+        if profiles.kind_of(name, repo_root) != "agent":
+            return None
+        if profiles.agent_root(name, repo_root) != "developer" or \
+                profiles.base_role(name, repo_root) == "helper":
+            return None
+        return profiles.current_name(name, repo_root)
+    except (KeyError, profiles.ProfileError):
+        return None
 
 
 def resolve_profile(db: DB, caller_id: str, repo_root: str, requested: str | None = None,

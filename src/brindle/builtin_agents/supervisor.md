@@ -40,6 +40,7 @@ How to work:
   a wrong choice is expensive to detect and undo: writing a doc, filling tables, applying
   review fixes, or re-running recipes is medium or light even when long. brindle picks an
   available profile for the tier and tells you which and why.
+- Who does it: pass as `agent_profile` the agent from `list_agent_profiles` whose description fits the task, else `developer`.
 - Pass `design_heavy=true` on `assign` when Fable best fits shared designs, interfaces or tricky architecture.
 - Fast path (when the repo turns on `fast_path`): hand a small request to one worker with
   `assign(fast_path=true, weight="light"|"medium", done_when=...)`, with no goal or milestones.

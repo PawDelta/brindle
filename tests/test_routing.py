@@ -147,7 +147,8 @@ def test_ranked_worker_fallback(db, repo, boss, monkeypatch, weight, blocked, ex
 def test_default_reviewer_pick(db, repo, boss, monkeypatch, unavailable, expected):
     from brindle import policy, providers
 
-    db.add_agent(Agent("writer", boss.id, "dev.claude-sonnet", "claude", None,
+    # Written on Opus: a Sonnet writer would move the Sonnet reviewers last (not the writer's model).
+    db.add_agent(Agent("writer", boss.id, "dev.claude-opus", "claude", None,
                        "assign", "done", "@0", "done", time.time()))
     monkeypatch.setattr(policy, "check_assign", lambda cfg, root, name, *args:
                         policy.Decision(allowed=not (unavailable == "policy" and name == "review.claude-sonnet.high")))
@@ -218,6 +219,51 @@ def test_assign_reply_names_the_pick_and_stores_the_weight(db, repo, boss, monke
     assert pending.id in queued and pending.agent_id is None
     assert "dev.claude-sonnet" in queued and model_name("sonnet").display in queued
     assert "developer-sonnet" not in queued
+
+
+@pytest.mark.parametrize("override", [
+    False,
+    pytest.param(True, marks=pytest.mark.variant(
+        "the agent's own agent_models order replaces the shared table and the learner")),
+])
+def test_assign_routes_an_agent_by_size(db, repo, boss, monkeypatch, override):
+    launched = []
+
+    def spawn(db, ws, profile, *, agent_name=None, **kw):
+        launched.append((profile, agent_name))
+        return fake_spawn(db, ws, profile, **kw)
+
+    monkeypatch.setattr(agents, "spawn", spawn)
+    plugin = Picker()
+    install(monkeypatch, plugin)
+    config(repo, pipeline=False, learning="cloud",
+           **({"agent_models": {"qa": {"light": ["dev.claude-sonnet"]}}} if override else {}))
+    expected = "dev.claude-sonnet" if override else choose(db, repo, weight="light")[0]
+    plugin.asked.clear()
+    out = asyncio.run(mcp_server.assign(agent_profile="qa", task="cover the parser", branch="feat-qa",
+                                        weight="light"))
+    assert "Started worker" in out
+    assert launched == [(expected, "qa")]
+    [t] = db.list_tasks(str(repo), state="started")
+    assert t.profile == expected
+    assert db.routing_decision_for_agent(t.agent_id).agent == "qa"
+    # The learner weighs the shared table for the agent; an agent's own order is locked.
+    assert [task.agent for task, _ in plugin.asked] == ([] if override else ["qa"])
+
+
+@pytest.mark.parametrize("requested", [
+    "custom-opus",
+    pytest.param("dev.claude-haiku", marks=pytest.mark.variant(
+        "a named model with a weight still runs that exact model")),
+])
+def test_a_pinned_profile_or_model_runs_as_itself(db, repo, boss, requested):
+    path = repo / ".brindle" / "agents" / "custom-opus.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("---\nextends: developer\nmodel: opus\n---\nCareful.\n")
+    decision = {}
+    assert autopilot.choose_profile(db, "boss", str(repo), requested, "task", None, "light",
+                                    None, decision) == (requested, False)
+    assert decision["agent"] is None
 
 
 def test_learning_outcomes_carry_the_weight(db, repo, boss, monkeypatch):

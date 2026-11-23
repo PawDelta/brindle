@@ -117,6 +117,19 @@ def mark_fast_path(db: DB, task_id: str) -> None:
                   (task_id, FAST_PATH, time.time()))
 
 
+# Who does a task routed by agent and size (autopilot.choose_profile's
+# decision["agent"]): a task note "agent:<name>", the task's profile being
+# the model it is joined to at launch (a released table gains no column).
+_AGENT = "agent:"
+
+
+def task_agent(db: DB, task_id: str) -> str | None:
+    """The agent task ``task_id``'s worker launches as, joined to its profile."""
+    row = db.conn.execute("SELECT kind FROM task_notes WHERE task_id=? AND substr(kind, 1, ?) = ?",
+                          (task_id, len(_AGENT), _AGENT)).fetchone()
+    return (row["kind"][len(_AGENT):] or None) if row else None
+
+
 def fast_path_task(db: DB, task_id: str) -> bool:
     return db.conn.execute("SELECT 1 FROM task_notes WHERE task_id=? AND kind=?",
                            (task_id, FAST_PATH)).fetchone() is not None
@@ -1368,7 +1381,7 @@ def enqueue(
     files: list[str] | None, depends_on: list[str] | None, plan_first: bool | None = None,
     weight: str | None = None, waiting: str | None = None,
     pipeline: str | None = None, unanswered: bool = False, milestone: str | None = None,
-    regions_from: str | None = None, fast_path: bool = False,
+    regions_from: str | None = None, fast_path: bool = False, agent: str | None = None,
 ) -> Task:
     """Record a task that can't start yet: no worker, no workspace, just what
     it takes to start it once its dependencies are merged, or (``waiting``,
@@ -1378,7 +1391,8 @@ def enqueue(
     starts it until ``answered`` (or ``drop_unanswered`` cancels it).
     ``regions_from``: the commit its declared regions were read against
     (``regions_at``); by default the caller's checkout now. ``fast_path``:
-    a small request on the repo's fast path (``mark_fast_path``)."""
+    a small request on the repo's fast path (``mark_fast_path``). ``agent``:
+    who does it (``task_agent``), joined to ``profile`` at launch."""
     t = Task(
         id=new_id(), repo_root=caller_ws.repo_root, agent_id=None,
         caller_id=caller.id if caller else None, caller_ws_id=caller_ws.id,
@@ -1390,6 +1404,10 @@ def enqueue(
     db.add_task(t)
     if fast_path:
         mark_fast_path(db, t.id)
+    if agent:
+        with db.tx() as c:
+            c.execute("INSERT OR IGNORE INTO task_notes (task_id, kind, noted) VALUES (?,?,?)",
+                      (t.id, f"{_AGENT}{agent}", time.time()))
     if any(_region(f)[1] for f in files or []):
         at = regions_from or _checkout_head(caller_ws.path)
         if at:
@@ -1830,6 +1848,7 @@ def start_queued(db: DB, task: Task) -> Agent:
     caller = db.get_agent(task.caller_id) if task.caller_id else None
     profile = task.profile
     launch_weight = task.weight
+    agent_name = task_agent(db, task.id)
     cfg = load_repo_config(caller_ws.repo_root)
     weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
     ceiling = cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None
@@ -1845,6 +1864,7 @@ def start_queued(db: DB, task: Task) -> Agent:
                     weight=effective_weight,
                     task=task.task_text,
                     files=_loads(task.files),
+                    agent=agent_name,
                 )
                 profile = routed_profile
                 launch_weight = effective_weight
@@ -1858,6 +1878,7 @@ def start_queued(db: DB, task: Task) -> Agent:
         plan_first=None if task.plan_first is None else bool(task.plan_first),
         start=_holder_start(db, caller_ws, _loads(task.depends_on), task.caller_id), files=_loads(task.files),
         weight=launch_weight, milestone=db.task_milestone(task.id),
+        **({"agent_name": agent_name} if agent_name else {}),
         admit=False,   # every caller has just looked for room (_start_if_ready, requeue)
         # Nobody waits on a queued handoff (its reply said "queued" long ago):
         # detached from its first row, so even a result it reports before this
@@ -2268,7 +2289,7 @@ def requeue(db: DB, caller: Agent | None, caller_ws: Workspace, task_id: str,
         branch=old.branch, done_when=old.done_when, files=_loads(old.files), depends_on=deps,
         plan_first=None if old.plan_first is None else bool(old.plan_first), weight=old.weight,
         milestone=db.task_milestone(old.id), regions_from=regions_at(db, old.id),
-        fast_path=fast_path_task(db, old.id),
+        fast_path=fast_path_task(db, old.id), agent=task_agent(db, old.id),
     )
     if unmet:
         return f"Requeued task {old.id} as {new.id}, waiting on {', '.join(unmet)}."
