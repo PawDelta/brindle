@@ -1198,11 +1198,16 @@ def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | N
 
 
 def cost_tier(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
-    """How expensive profile ``name`` runs: "low", "medium" or "high", by its weight."""
-    pw = profile_weight(name, cfg, repo_root)
-    if pw in ("heavy", "advanced", "reasoning"):
-        return "high"
-    return "low" if pw == "light" else "medium"
+    """Relative token cost; an unpriced model is explicitly unknown."""
+    from brindle import model_catalog, pricing
+
+    try:
+        profile = load_profile(name, repo_root)
+    except (KeyError, ValueError):
+        return "unknown"
+    price = (pricing.FREE if pricing.is_local(profile.base_url) else
+             pricing.price_for(effective_profile_model(profile, repo_root), pricing.repo_overrides(repo_root)))
+    return model_catalog.cost_tier(price)
 
 
 def profile_weight(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:

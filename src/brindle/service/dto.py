@@ -934,7 +934,7 @@ class RoutingProfileDTO(_DTO):
     installed: bool
     signed_in: bool
     excluded: bool
-    cost_tier: str           # "low", "medium" or "high"
+    cost_tier: str           # "low", "medium", "high" or "unknown"
     allowed: bool = True     # whether the org's policy lets a worker run on it
     refusal: str | None = None
     lint_errors: list[str] = []     # the profile's automatic check (`brindle profile lint`)

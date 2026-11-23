@@ -24,11 +24,69 @@ def test_every_builtin_profile_has_a_display_name():
         assert shown["effort"] == p.effort, name
 
 
+def test_catalog_models_reach_pricing_display_and_worker_tiers():
+    from brindle import model_catalog, pricing, worker_models
+
+    for model in model_catalog.CATALOG.keys() | model_names.MODELS.keys():
+        assert pricing.price_for(model) is not None, model
+        shown = model_names.model_name(model)
+        assert shown.display and shown.display != model, model
+        assert shown.family and shown.maker, model
+    for model in model_names.MODELS:
+        assert worker_models.model_tiers(model), model
+    for pick in worker_models.CATALOG:
+        found = model_catalog.lookup(pick.model)
+        if found:
+            assert (pick.label, pick.tiers) == (found.name.display, found.tiers)
+
+
+@pytest.mark.parametrize("model, provider, family, display", [
+    ("claude-opus-5-7", "claude", "Claude", "Claude Opus 5.7"),
+    pytest.param("gpt-6.2-unlisted", "codex", "GPT", "GPT‑6.2 Unlisted", marks=pytest.mark.variant(
+        "a new GPT-6.2 suffix must retain the dotted version and never inherit another model's price")),
+])
+def test_uncatalogued_model_keeps_its_family_version_and_unknown_cost(repo, model, provider, family, display):
+    from brindle import autopilot, pricing
+    from test_pricing import profile
+
+    profile(repo, "future", provider=provider, model=model)
+    shown = model_names.describe(profiles.load_profile("future", str(repo)))
+    assert shown["display"] == display
+    assert model_names.model_name(model).family == family
+    assert pricing.price_for(model) is None
+    assert autopilot.cost_tier("future", repo_root=str(repo)) == "unknown"
+
+
+def test_gemini_worker_launch_selects_the_catalog_model(monkeypatch):
+    from brindle.providers import Antigravity, LaunchContext
+
+    monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/agy")
+    p = profiles.load_profile("dev.gemini")
+    argv = Antigravity().command(LaunchContext("worker", p, None))
+    assert argv[argv.index("--model") + 1] == "gemini-4-argon"
+    assert argv[argv.index("--effort") + 1] == "high"
+
+
 @pytest.mark.variant("managed and suffixed Claude ids must name the right model, not the raw route id")
 def test_full_claude_ids_resolve_to_their_model():
     # An env override or managed route gives a full id, not the alias.
-    assert model_names.model_name("eu.anthropic.claude-opus-x-v1:0", "claude") == model_names.MODELS["opus"]
+    managed = model_names.model_name("eu.anthropic.claude-opus-x-v1:0", "claude")
+    assert managed.family == "Claude" and "Opus" in managed.display
+    assert "eu.anthropic" not in managed.display
     assert model_names.model_name("claude-sonnet-5-5[1m]", "claude") == model_names.MODELS["sonnet"]
+
+
+def test_discovered_effort_variant_uses_canonical_price_and_reports_effort():
+    from brindle import pricing, worker_models
+    from brindle.usage import Usage, usage_cost
+
+    model = "gemini-4-argon-high"
+    p = profiles.Profile(name="discovered", description="", provider="antigravity", prompt="", model=model)
+    shown = model_names.describe(p)
+    assert shown["display"] == "Gemini 4 Argon" and shown["effort"] == "high"
+    price = pricing.price_for("gemini-4-argon")
+    assert usage_cost(Usage(input_tokens=1_000_000, model=model)) == price.input
+    assert worker_models.model_tiers(model) == worker_models.model_tiers("gemini-4-argon")
 
 
 @pytest.mark.parametrize("name, reviewer", [

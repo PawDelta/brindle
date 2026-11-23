@@ -39,8 +39,8 @@ export const FLOW: [string, string][] = [
 export const EFFORT = ["low", "medium", "high"] as const;
 
 export type Cost = "low" | "medium" | "high";
-export const COST_MARK: Record<string, string> = { low: "$", medium: "$$", high: "$$$" };
-export const COST_WORDS: Record<string, string> = { low: "low cost", medium: "medium cost", high: "high cost" };
+export const COST_MARK: Record<string, string> = { low: "$", medium: "$$", high: "$$$", unknown: "?" };
+export const COST_WORDS: Record<string, string> = { low: "low cost", medium: "medium cost", high: "high cost", unknown: "unknown cost" };
 
 /* The providers in the order lists show them, by their product names. */
 export const PROVIDER_ORDER = ["claude", "codex", "opencode", "antigravity", "native"];

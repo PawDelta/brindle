@@ -52,7 +52,7 @@ def test_review_choice_passes_over_a_limited_providers_reviewer(db, repo, clock,
 def test_routing_checks_the_cap_on_the_effective_model(repo, brindle_home, clock, available, monkeypatch):
     # No model field: the model comes from the profile's GEMINI_MODEL.
     for name, model in (("gemini-pro", "gemini-3-pro"), ("gemini-flash", "gemini-3-flash")):
-        _profile(repo, name, f"---\nextends: developer-gemini\nenv.GEMINI_MODEL: {model}\n---\n")
+        _profile(repo, name, f"---\nextends: developer\nprovider: antigravity\nenv.GEMINI_MODEL: {model}\n---\n")
     monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
     quota.record("antigravity", [quota.Window(100, NOW + HOUR, 300, "Gemini Pro 5h")])
 

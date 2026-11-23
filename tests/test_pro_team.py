@@ -118,6 +118,30 @@ def test_undeclared_model_is_denied_when_a_list_is_set(team):
     assert not d.allowed and "no declared model" in d.reason
 
 
+@pytest.mark.variant("unpinned CLI defaults must not borrow permission from the old hard-coded Gemini model")
+def test_unpinned_antigravity_does_not_borrow_a_stale_models_permission(team, repo, monkeypatch):
+    from dataclasses import replace
+
+    from brindle import policy
+    from test_pricing import profile
+
+    profile(repo, "unpinned", provider="antigravity")
+    for key in ("GEMINI_MODEL", "MODEL"):
+        monkeypatch.delenv(key, raising=False)
+    provider, model = policy._profile_fields("unpinned", str(repo))
+    p = plugin(team)
+    org = replace(p.policy(), allowed_providers=("antigravity",), allowed_models=("gemini-2.5-pro",))
+    monkeypatch.setattr(p, "policy", lambda: org)
+    info = assign(provider=provider, model=model, profile="unpinned")
+    assert not p.check_assign(info).allowed
+    assert model is None  # the CLI, not brindle's catalog, chooses this default
+    org = replace(org, allowed_models=None)
+    assert p.check_assign(info).allowed
+    provider, model = policy._profile_fields("dev.gemini", str(repo))
+    org = replace(org, allowed_models=("gemini-4-argon",))
+    assert p.check_assign(assign(provider=provider, model=model, profile="dev.gemini")).allowed
+
+
 @pytest.mark.variant("the reported bug: other tests reach these refusals but none asserts the org and link each one tells the person")
 @pytest.mark.parametrize("path", ["assign", "routing", "create"])
 def test_model_refusal_points_at_the_org_to_change(team, monkeypatch, path):
