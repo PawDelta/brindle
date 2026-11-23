@@ -1,0 +1,26 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Visual choices test</title>
+<style>
+:root{--bg:#fbfbfa;--panel:#fff;--ink:#1d1d1f;--ink3:#8a8c91;--line:#e7e7e4}
+@media (prefers-color-scheme:dark){:root{--bg:#18181a;--panel:#202023;--ink:#ececee;--ink3:#86878c;--line:#2e2e32}}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,Inter,system-ui,sans-serif}
+main{max-width:640px;margin:0 auto;padding:24px 16px}
+h1{font-size:18px;margin:0 0 4px}
+.sub{color:var(--ink3);font-size:13px;margin:0 0 16px}
+fieldset{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:0 0 12px;background:var(--panel)}
+legend{font-weight:600;padding:0 4px}
+p{margin:2px 0 10px;color:var(--ink3);font-size:13px}
+button{font:inherit;font-size:13px;border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:8px;padding:6px 12px;margin:0 6px 6px 0}
+</style></head><body><main>
+<h1>Visual choices: test</h1>
+<p class="sub">Click an option in each group, then Send. Press Esc from inside this page to go back. These are real questions; your answers are used.</p>
+<fieldset data-choice="dock"><legend>After today's update, how many brindle icons are in your Dock?</legend>
+<p>Tells me whether the Dock fix worked on its first real restart.</p>
+<button data-option="one">One</button><button data-option="two">Two</button></fieldset>
+<fieldset data-choice="astra"><legend>Move the last October profile (developer-codex-heavy, GPT‑6 Astra) aside?</legend>
+<p>Nothing uses it now. It goes into the same backup folder as the others, nothing deleted. My pick: yes.</p>
+<button data-option="yes">Yes, move it aside</button><button data-option="no">No, keep it</button></fieldset>
+<fieldset data-choice="worked"><legend>Did clicking these buttons work?</legend>
+<p>If you can pick an option here, the fix works.</p>
+<button data-option="yes">Yes</button><button data-option="no">No</button></fieldset>
+</main></body></html>
