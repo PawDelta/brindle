@@ -20,7 +20,7 @@ identity/entitlement discovery is deliberately unsupported: no Claude CLI is
 called. Native OpenAI/Anthropic-compatible HTTP catalogs are supported; generic
 gateway lists are advisory. Ollama uses /api/tags on its conventional port.
 
-Cache entries live in memory for 30 seconds, with salted identity digests only.
+Catalog snapshots live in memory for 30 seconds, keyed by salted identity digests.
 CLI callers must supply ``account_identity`` (an opaque login/config revision)
 to opt into caching, and change it on login/config/keyring changes. Without it
 CLI discovery is uncached, since env alone cannot identify a subscription.
@@ -65,6 +65,7 @@ TIMEOUT = 5.0
 # and the discovery helper's bounded process-group cleanup.
 PROVISIONING_TIMEOUT = 1.0
 CACHE_TTL = 30.0
+VERSION_DISCOVERY_PROVIDERS = ("codex", "antigravity", "opencode")
 MAX_BYTES = 1024 * 1024
 MAX_PAGES = 10
 _MODEL_ID = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9._-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*"
@@ -124,11 +125,13 @@ class ModelAvailabilityChecker:
         self._discover = discover or _isolated_discovery
         self._timeout, self._ttl, self._clock = timeout, ttl, clock
         self._salt = os.urandom(32)
-        self._cache: dict[bytes, tuple[float, Availability]] = {}
+        self._cache: dict[bytes, tuple[float, Catalog | Availability]] = {}
         self._lock = threading.Lock()
+        self._generation = 0
 
     def clear(self) -> None:
         with self._lock:
+            self._generation += 1
             self._cache.clear()
 
     def check(self, profile: Profile, *, effective_env: Mapping[str, str],
@@ -142,7 +145,6 @@ class ModelAvailabilityChecker:
         """
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError("timeout must be positive and finite")
-        discovery_timeout = self._timeout if timeout is None else min(self._timeout, timeout)
         model = profile.model
         if not model or not model.strip() or model == "default":
             return Availability("unverified", "No explicit model to check; keep the provider's default selection.")
@@ -154,6 +156,24 @@ class ModelAvailabilityChecker:
             if subscription_token_problem(profile):
                 return Availability("unverified", "Native discovery cannot use Claude subscription credentials; "
                                     "configure an API key for this profile.")
+        result = self._catalog(profile, effective_env, cwd, account_identity, catalog_context, timeout)
+        return _selected(model, result) if isinstance(result, Catalog) else result
+
+    def first_listed(self, profile: Profile, candidates: list[str], *, effective_env: Mapping[str, str],
+                     cwd: str, account_identity: str | None, catalog_context: str) -> str | None:
+        """Use explicit CLI catalog membership for an automatic version upgrade."""
+        if not candidates or profile.provider not in VERSION_DISCOVERY_PROVIDERS:
+            return None
+        catalog = self._catalog(profile, effective_env, cwd, account_identity, catalog_context,
+                                PROVISIONING_TIMEOUT)
+        if isinstance(catalog, Catalog):
+            return next((candidate for candidate in candidates if candidate in catalog.models), None)
+        return None
+
+    def _catalog(self, profile: Profile, effective_env: Mapping[str, str], cwd: str | None,
+                 account_identity: str | None, catalog_context: str | None,
+                 timeout: float | None) -> Catalog | Availability:
+        discovery_timeout = self._timeout if timeout is None else min(self._timeout, timeout)
         request = Request(profile.provider, profile.base_url, profile.api,
                           profile.api_key_env, dict(effective_env), os.path.abspath(cwd or os.getcwd()))
         # Hash the WHOLE effective environment: provider plugins may choose
@@ -163,7 +183,7 @@ class ModelAvailabilityChecker:
             from brindle.launch_health import _LAUNCH_ENV
             identity_env = {k: v for k, v in request.env.items()
                             if k not in _LAUNCH_ENV or k == request.api_key_env}
-        payload = [request.provider, model, request.base_url, request.api,
+        payload = [request.provider, request.base_url, request.api,
                    request.api_key_env, sorted(identity_env.items()),
                    catalog_context if catalog_context is not None else request.cwd, account_identity]
         key = hmac.digest(self._salt, json.dumps(payload).encode(), hashlib.sha256)
@@ -171,12 +191,12 @@ class ModelAvailabilityChecker:
                                        or catalog_context is not None))
         now = self._clock()
         with self._lock:
+            generation = self._generation
             self._cache = {k: v for k, v in self._cache.items() if v[0] > now}
             if cacheable and key in self._cache:
                 return self._cache[key][1]
         try:
-            catalog = self._discover(request, discovery_timeout)
-            result = _selected(model, catalog)
+            result = self._discover(request, discovery_timeout)
         except (TimeoutError, subprocess.TimeoutExpired):
             result = Availability("unverified", _FAILURES["timeout"])
         except _DiscoveryError as exc:
@@ -185,9 +205,10 @@ class ModelAvailabilityChecker:
             result = Availability("unverified", _FAILURES["failed"])
         if cacheable:
             with self._lock:
-                if len(self._cache) >= 128:
-                    self._cache.pop(next(iter(self._cache)))
-                self._cache[key] = (self._clock() + self._ttl, result)
+                if generation == self._generation:
+                    if len(self._cache) >= 128:
+                        self._cache.pop(next(iter(self._cache)))
+                    self._cache[key] = (self._clock() + self._ttl, result)
         return result
 
 
@@ -240,6 +261,12 @@ def provisioning_context(provider: str, cwd: str, env: Mapping[str, str]) -> str
         return os.path.abspath(cwd)
     settings = (".codex/config.toml",) if provider == "codex" else (".gemini/settings.json",)
     digest = hashlib.sha256()
+    from brindle import providers_install
+
+    if provider in providers_install.UPDATE_PROVIDERS:
+        # Worker launchers in other processes also need a new cache key when
+        # the daemon selects the verified install.
+        digest.update(json.dumps(providers_install.selected(provider)).encode())
     path = Path(cwd).absolute()
     for parent in (*reversed(path.parents), path):
         for name in settings:

@@ -663,13 +663,15 @@ def _key_rows(repo: str | None) -> list[dict]:
 
 @_json
 def get_user_settings(db: DB, request: Request) -> Any:
+    from brindle import provider_updates
     from brindle.provider_switch import quota_switch
 
     return {"visuals": config.visuals_setting(), "claude_permission_mode": config.claude_permission_mode(),
             "quota_switch": quota_switch(),
             "opencode_permission_mode": config.opencode_permission_mode(),
             "visuals_enabled": "on" if config.visuals_enabled_setting() else "off",
-            "login_shell_env": "on" if config.login_shell_env_setting() else "off"}
+            "login_shell_env": "on" if config.login_shell_env_setting() else "off",
+            **provider_updates.setting_fields()}
 
 
 @_json

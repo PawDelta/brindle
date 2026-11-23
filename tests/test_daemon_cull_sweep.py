@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from brindle import agents, tmux
+from brindle import agents, procs, tmux
 from brindle.db import Agent, Workspace
 
 CODEX_APPROVAL = """\
@@ -47,6 +47,7 @@ def a_session(db, tmp_path, monkeypatch, w1_status, w1_provider="codex"):
     panes = tmux.PaneSnapshot(server_name)
     panes.update({"%boss": True, "%w1": True})
     monkeypatch.setattr(tmux, "list_panes", lambda server=None: panes)
+    monkeypatch.setattr(procs, "table", lambda: {})
     monkeypatch.setattr(agents, "pane_owners", lambda db, panes=None: {"%boss": "boss", "%w1": "w1"})
     sent = []
     monkeypatch.setattr(agents, "send_message", lambda db, to, body, sender_id=None, **kw: sent.append((to, body)))
@@ -109,6 +110,7 @@ def test_one_watch_tick_with_no_sidebar_tells_the_supervisor_of_a_codex_approval
     monkeypatch.setattr(lifecycle, "_purge_typed_words", lambda: None)
     monkeypatch.setattr(lifecycle, "_keep_codex_hook", lambda settle=0.0: None)
     monkeypatch.setattr(lifecycle, "_sync_shared_docs", lambda: None)
+    monkeypatch.setattr(lifecycle, "_provider_update_sweep", lambda refresh_policy: None)
     monkeypatch.setattr(InstallWatch, "changed", lambda self: False)
     now = [0.0]
     server = SimpleNamespace(should_exit=False)
@@ -138,6 +140,7 @@ def test_one_watch_tick_runs_the_provider_switch_sweep(db, tmp_path, monkeypatch
     monkeypatch.setattr(lifecycle, "_keep_codex_hook", lambda settle=0.0: None)
     monkeypatch.setattr(lifecycle, "_sync_shared_docs", lambda: None)
     monkeypatch.setattr(lifecycle, "_cull_sweep", lambda: None)
+    monkeypatch.setattr(lifecycle, "_provider_update_sweep", lambda refresh_policy: None)
     monkeypatch.setattr(InstallWatch, "changed", lambda self: False)
     now = [0.0]
     server = SimpleNamespace(should_exit=False)

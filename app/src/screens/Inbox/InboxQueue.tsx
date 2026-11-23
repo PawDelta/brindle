@@ -185,6 +185,8 @@ function metaOf(row: Row, ctx: QueueContext): ReactNode[] {
     }
     case "org_notice":
       return row.items.length > 1 ? row.items.map((i) => <>{i.reason}{i.from_name && <span data-notice-sender> · {i.from_name}</span>}</>) : [<>From <b>your {item.detail || "admin"}</b></>, item.from_name && <span data-notice-sender>{item.from_name}</span>];
+    case "provider_update":
+      return [item.detail];
     case "pr_ready":
       return [item.checks_state === "running" ? <b>Preparing PR</b> : <><b>PR ready</b> to open</>, ctx.repoName(item), ...prFacts(item), branch && <span className="mono">{branch}</span>];
     case "pr_opened":
@@ -644,6 +646,9 @@ function goOf({ row, ctx, actions, settle, markRead, onToggle, refresh, client }
       return btn("Open", item.doc == null || !nav ? undefined : () => nav({ screen: "knowledge", view: "docs", doc: item.doc!, section: item.section ?? undefined }));
     case "org_notice":
       return many ? btn(`Show ${row.items.length}`, onToggle) : btn("Mark read", () => actions.run(item, "read", {}, (ok) => ok && settle({ what: "Read", text: titleOf(row), where: "", back: false })));
+    case "provider_update":
+      return item.action ? btn("Update", () => actions.run(item, "provider-update", {},
+        (ok) => ok && settle({ what: "Update queued", text: titleOf(row), where: "", back: false }))) : null;
     case "pr_ready":
       return <span className="iq-go" onClick={(e) => e.stopPropagation()}><OpenPr item={item} actions={actions} onDone={() => void refresh()} openUrl={ctx.openUrl} look="btn btn-secondary text-xs iq-go"
         onOpened={() => recordDone({ key: row.key, what: "Opened PR", text: titleOf(row), where: ctx.repoName(item) ?? "", back: false, at: Date.now() })} /></span>;

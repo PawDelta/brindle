@@ -1,7 +1,7 @@
 """Provider CLIs as the person has them: brindle finds each one the way a
 terminal would (PATH, then each maker's standard install locations), runs it
-as it is, and leaves its updates to the CLI itself. On request it runs the
-maker's official install command, exactly as the maker documents it, into
+as it is, and can keep it current through brindle.provider_updates. On request
+it runs the maker's official install command, exactly as the maker documents it, into
 its default place, and looks again. brindle never uninstalls anything:
 turning a provider off only stops brindle using it. (brindle's own config
 home for each CLI is brindle.provider_homes'.)
@@ -11,12 +11,16 @@ run when several are found, and which providers are turned off."""
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
+import tempfile
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +29,9 @@ from brindle import provider_homes, spawn
 PROVIDERS = ("claude", "codex", "opencode", "antigravity")
 NAMES = {"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode", "antigravity": "Antigravity"}
 CLI = {"claude": "claude", "codex": "codex", "opencode": "opencode", "antigravity": "agy"}
+# Claude Code and Antigravity ship their own automatic updaters.
+UPDATE_PROVIDERS = ("codex", "opencode")
+OPENCODE_V2 = "curl -fsSL https://opencode.ai/v2/install | bash"
 
 # The makers' install commands, as documented (desktop/docs/provider-install.md).
 OFFICIAL = {
@@ -76,6 +83,8 @@ def detect(provider: str) -> list[str]:
     later = [os.path.join(d, name) for d in os.environ.get("PATH", "").split(os.pathsep) if d] if first else []
     candidates = [*([first] if first else []), *(p for p in later if _executable(p))]
     candidates += [p for p in (os.path.expanduser(s) for s in STANDARD[provider]) if _executable(p)]
+    if (active := selected(provider)) is not None:
+        candidates.append(active)
     found, seen = [], set()
     wsl = providers.is_wsl()
     for path in candidates:
@@ -249,16 +258,33 @@ def statuses() -> list[dict[str, Any]]:
 # -- install ---------------------------------------------------------------------
 
 
-def install(provider: str, progress: Callable[[str], None]) -> dict[str, Any]:
+def install(provider: str, progress: Callable[[str], None], *,
+            update: tuple[str, str] | None = None) -> dict[str, Any]:
     """Run the maker's install command, each line of its output to
-    ``progress``, then find the CLI again. Turns the provider back on."""
+    ``progress``, then find the CLI again. An update verifies a private
+    install of the requested version before activating it."""
     from brindle.pro import auth
 
     _check(provider)
-    command = OFFICIAL[provider]
+    if update is not None:
+        path, version = update
+        return _install_update(provider, path, version, progress)
+    with update_gate(provider):
+        _run_installer(provider, OFFICIAL[provider], progress)
+        if not detect(provider):
+            raise InstallError(f"{NAMES[provider]}'s installer finished, but brindle doesn't find {CLI[provider]}")
+        if turned_off(provider):
+            _set(provider, {})
+    auth.refresh_after_provider_update()
+    return status(provider)
+
+
+def _run_installer(provider: str, command: str, progress: Callable[[str], None],
+                   env: dict[str, str] | None = None) -> None:
     progress(f"$ {command}")
-    proc = spawn.start(["bash", "-c", command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                       stderr=subprocess.STDOUT, text=True)
+    proc = spawn.start(["bash", "-o", "pipefail", "-c", command],
+                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, text=True, **({"env": env} if env is not None else {}))
     timer = threading.Timer(INSTALL_TIMEOUT, proc.kill)
     timer.start()
     tail: list[str] = []
@@ -274,12 +300,56 @@ def install(provider: str, progress: Callable[[str], None]) -> dict[str, Any]:
         timer.cancel()
     if code != 0:
         raise InstallError(f"{NAMES[provider]}'s installer exited {code}: " + " / ".join(tail[-3:]))
-    if not detect(provider):
-        raise InstallError(f"{NAMES[provider]}'s installer finished, but brindle doesn't find {CLI[provider]}")
-    if turned_off(provider):
-        _set(provider, {})
-    auth.refresh_after_provider_update()
-    return status(provider)
+
+
+def _install_update(provider: str, path: str, version: str, progress: Callable[[str], None]) -> dict[str, Any]:
+    """Verify a separate install before selecting it, including for npm shims."""
+    if provider not in UPDATE_PROVIDERS:
+        raise InstallError(f"{NAMES[provider]} manages its own updates")
+    directory = _path().parent / "provider-clis" / provider
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    staged = Path(tempfile.mkdtemp(dir=directory))
+    env = {**os.environ, "HOME": str(staged), "XDG_CONFIG_HOME": str(staged / ".config"),
+           "ZDOTDIR": str(staged)}
+    command = OFFICIAL[provider]
+    if provider == "codex":
+        binary = staged / "bin" / "codex"
+        env.update(CODEX_INSTALL_DIR=str(binary.parent), CODEX_HOME=str(staged / ".codex"),
+                   CODEX_RELEASE=version, CODEX_NON_INTERACTIVE="1",
+                   CODEX_INSTALL_DAEMON_ONLY="0", CODEX_INSTALL_DEFER_SELECTION="0")
+    else:
+        binary = staged / ".opencode" / "bin" / "opencode"
+        if version.startswith("2."):
+            command = OPENCODE_V2
+        command += " -s -- --no-modify-path"
+        env.update(VERSION=version, SHELL=env.get("SHELL") or "/bin/sh")
+    committed = False
+    try:
+        _run_installer(provider, command, progress, env)
+        if probe_version(str(binary)) != version:
+            raise InstallError(f"{NAMES[provider]}'s installer did not produce version {version}")
+        with _lock:
+            if turned_off(provider) or found(provider) != path:
+                raise InstallError(f"{NAMES[provider]}'s selected install changed")
+            _set(provider, {"path": str(binary)})
+        committed = True
+        return {"version": version}
+    finally:
+        if not committed:
+            shutil.rmtree(staged, ignore_errors=True)
+
+
+@contextmanager
+def update_gate(provider: str, *, updating: bool = False):
+    """Share the launch gate across processes. Updates enter only between launches."""
+    if provider not in UPDATE_PROVIDERS:
+        yield
+        return
+    directory = _path().parent / "locks"
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / f"provider-update-{provider}.lock").open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB if updating else fcntl.LOCK_SH)
+        yield
 
 
 _running: dict[str, Any] = {}

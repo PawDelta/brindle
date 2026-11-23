@@ -292,7 +292,7 @@ def test_unresolved_sizing_profile_preserves_candidate_fallback(db, repo, monkey
                      reviewer="missing-reviewer-profile" if missing == "current" else "reviewer-codex")
     chosen, reason = agents._review_choice(db, ws, None, cfg)
     assert chosen == ("reviewer" if missing == "current" else "reviewer-codex")
-    assert (reason is not None) == (missing == "current")
+    assert reason is None
 
 
 @pytest.mark.parametrize("graph", [

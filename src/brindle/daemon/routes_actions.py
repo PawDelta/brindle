@@ -557,6 +557,10 @@ def inbox_read(db: DB, params: dict, body: Body) -> Any:
 def inbox_action(db: DB, params: dict, body: Body) -> Any:
     """``id`` is the item's agent (an org notice's ``notice_id`` for "read")."""
     item, action = params["id"], params["action"]
+    if action == "provider-update":
+        from brindle import provider_updates
+
+        return provider_updates.approve(db, item)
     if action == "dismiss":
         if "item" in body:
             return inbox.dismiss_item(db, _get(body, "item", dict, required=True))
@@ -1697,21 +1701,27 @@ def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
     ("on" or "off": the login shell's proxy and certificate settings for launched CLIs;
     "off" applies to the next launch, "on" from the next daemon start) into
     ~/.brindle/config.json; its other keys are kept."""
-    from brindle import config
+    from brindle import config, provider_updates
     from brindle.provider_switch import quota_switch
 
     allowed = {"visuals": ("on", "off"), "visuals_enabled": ("on", "off"), "login_shell_env": ("on", "off"),
                "quota_switch": ("ask", "auto"),
                "claude_permission_mode": PERMISSION_MODES,
-               "opencode_permission_mode": config.OPENCODE_PERMISSION_MODES}
+               "opencode_permission_mode": config.OPENCODE_PERMISSION_MODES,
+               provider_updates.SETTING: provider_updates.MODES}
     changes = {key: _get(body, key) for key in allowed if body.get(key) is not None}
     if not changes:
         raise ServiceError("invalid", f"one of {', '.join(allowed)} is required")
     for key, mode in changes.items():
         if mode not in allowed[key]:
             raise ServiceError("invalid", f"{key} must be one of: {', '.join(allowed[key])}")
+    if (provider_updates.SETTING in changes
+            and provider_updates.setting_fields(refresh=True)["provider_cli_updates_locked"]):
+        raise ServiceError("forbidden", "Your organization manages provider CLI updates.", 403)
     for key, mode in changes.items():
         config.set_user(key, mode)
+    if provider_updates.SETTING in changes:
+        bus.publish(db, "inbox.changed")
     if "visuals" in changes or "visuals_enabled" in changes:
         # The setting applies to every repo; scoped feeds need their own row.
         bus.publish(db, "visual.offers_setting")
@@ -1721,7 +1731,8 @@ def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
             "quota_switch": quota_switch(),
             "opencode_permission_mode": config.opencode_permission_mode(),
             "visuals_enabled": "on" if config.visuals_enabled_setting() else "off",
-            "login_shell_env": "on" if config.login_shell_env_setting() else "off"}
+            "login_shell_env": "on" if config.login_shell_env_setting() else "off",
+            **provider_updates.setting_fields()}
 
 
 def put_debug(db: DB, params: dict, body: Body) -> Any:

@@ -5,10 +5,14 @@ from __future__ import annotations
 import re
 import subprocess
 from pathlib import PurePosixPath
+from typing import TYPE_CHECKING
 
 from brindle import check_scope, codemap, git, spawn
 from brindle.config import RepoConfig
 from brindle.db import Agent, DB, Workspace
+
+if TYPE_CHECKING:
+    from brindle.agents import ReviewLaunch
 
 
 LIGHT_PROFILE = "review.claude-sonnet.low"
@@ -44,32 +48,45 @@ def review_size(worker: Agent | None, db: DB | None, repo_root: str,
     return normalize_weight(weight or "medium")
 
 
-def writer_model_last(names: list[str], worker: Agent | None, repo_root: str) -> tuple[list[str], set[str]]:
+def writer_model_last(names: list[str], worker: Agent | None, repo_root: str, *,
+                      db: DB | None = None, workspace: Workspace | None = None,
+                      parent_id: str | None = None,
+                      launches: dict[str, ReviewLaunch] | None = None) -> tuple[list[str], set[str]]:
     """Demote the writer's effective model, including aliases and effort variants.
 
     Other models on the same provider remain independent review candidates.
     Unknown profiles stay in the pool so normal validation reports their errors.
     """
+    from brindle import agents, model_catalog
     from brindle.autopilot import effective_profile_model
     from brindle.profiles import ProfileError, compose, load_profile
 
     names = list(dict.fromkeys(names))
     if worker is None:
         return names, set()
-    try:
-        writer = (compose(worker.agent, worker.profile, repo_root) if worker.agent
-                  else load_profile(worker.profile, repo_root))
-        model = effective_profile_model(writer, repo_root)
-    except (KeyError, ProfileError):
-        return names, set()
+    model = db.agent_launch_model(worker.id) if db is not None else None
+    if not model:
+        try:
+            writer = (compose(worker.agent, worker.profile, repo_root) if worker.agent
+                      else load_profile(worker.profile, repo_root))
+            model = effective_profile_model(writer, repo_root)
+        except (KeyError, ProfileError):
+            return names, set()
     same = set()
     if model:
+        writer_model = model_catalog.normalize(model)
         for name in names:
             try:
                 candidate = load_profile(name, repo_root)
-                if (candidate.provider, effective_profile_model(candidate, repo_root)) == (worker.provider, model):
+                if candidate.provider != worker.provider:
+                    continue
+                launch = agents.resolve_review_launch(candidate, workspace, parent_id) if workspace else None
+                if launches is not None and launch is not None:
+                    launches[name] = launch
+                resolved = launch.model if launch else effective_profile_model(candidate, repo_root)
+                if resolved and model_catalog.normalize(resolved) == writer_model:
                     same.add(name)
-            except (KeyError, ProfileError):
+            except (KeyError, ProfileError, agents.AgentError):
                 continue
     return [name for name in names if name not in same] + [name for name in names if name in same], same
 
