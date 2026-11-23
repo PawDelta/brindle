@@ -2576,8 +2576,11 @@ class DB:
 
     def record_agent_launch_model(self, agent_id: str, model: str | None) -> None:
         with self.tx() as c:
-            c.execute("INSERT OR REPLACE INTO agent_launch_models (agent_id, model) VALUES (?,?)",
-                      (agent_id, model))
+            if model is not None:
+                c.execute("INSERT OR REPLACE INTO agent_launch_models (agent_id, model) VALUES (?,?)",
+                          (agent_id, model))
+            else:
+                c.execute("DELETE FROM agent_launch_models WHERE agent_id=?", (agent_id,))
 
     def agent_launch_model(self, agent_id: str) -> str | None:
         row = self.conn.execute("SELECT model FROM agent_launch_models WHERE agent_id=?", (agent_id,)).fetchone()

@@ -120,10 +120,10 @@ def test_review_size_pool_avoids_writers_model_when_possible(env, db, tmp_path, 
     monkeypatch.setattr(git, "out", lambda *a: f"{1 if small else 500}\t0\tsrc/main.py\0")
     can_run = agents._reviewer_can_run
 
-    def available(name, workspace, config):
+    def available(name, workspace, config, **kwargs):
         if not alternative and name != "dev.claude-opus":
             raise agents.AgentError("model unavailable")
-        can_run(name, workspace, config)
+        can_run(name, workspace, config, **kwargs)
 
     monkeypatch.setattr(agents, "_reviewer_can_run", available)
     chosen, why = agents._review_choice(db, ws, None, cfg)

@@ -1157,7 +1157,7 @@ def test_reviewer_override_requires_removing_an_existing_pin(repo, db, monkeypat
     assert (order["model"], order["fallbacks"], order["locked"]) == (pin, [fallback], False)
     assert all(routing["kinds"]["reviewer"][field] == value for field, value in order.items())
 
-    def can_run(name, ws, cfg):
+    def can_run(name, ws, cfg, **kwargs):
         if name == pin:
             raise agents.AgentError("provider unavailable")
 

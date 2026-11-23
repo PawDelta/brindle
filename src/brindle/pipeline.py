@@ -488,7 +488,7 @@ def second_profile(db: DB, cfg: RepoConfig, worker: Agent, ws: Workspace) -> str
     profile = cfg.second_review.get(weight or "")
     from brindle.profiles import current_name
 
-    primary = agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task)
+    primary = agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task, parent_id=worker.parent_id)
     if not profile or (primary and current_name(profile, ws.repo_root) == current_name(primary, ws.repo_root)):
         return None
     return profile
@@ -704,7 +704,8 @@ def _start_report_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, 
         second = second_profile(db, cfg, worker, ws)
         # With a second review both calls carry a concrete profile, so the
         # reviewer dedupe compares profiles and neither can swallow the other.
-        first = agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task) if second else None
+        first = agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task,
+                                              parent_id=parent.id if parent else None) if second else None
         focus = FAST_PATH_REVIEW if fast_path(db, cfg, worker) else None
         started = agents.start_review(db, parent, ws, first, focus, cfg, slot="", report=report)
         if second:
@@ -774,8 +775,10 @@ def restart_review(db: DB, worker: Agent, ws: Workspace, since: float) -> bool:
         # launch grace. Reusing that claim must not consume its one recovery.
         try:
             second = second_profile(db, cfg, current, ws)
-            first = agents.default_review_profile(cfg, current, db, ws.repo_root, current.task) if second else None
-            profile = agents._review_choice(db, ws, first, cfg)[0]   # start_review tells the reason
+            parent_id = parent.id if parent else None
+            first = agents.default_review_profile(cfg, current, db, ws.repo_root, current.task,
+                                                  parent_id=parent_id) if second else None
+            profile = agents._review_choice(db, ws, first, cfg, parent_id=parent_id)[0]
             sha = gates.head(ws)
             if agents._live_reviewer(db, ws, sha, profile) or (
                     cfg.checks and agents._review_pending(ws.id, profile, sha, current.reviewing_since)):
@@ -954,7 +957,7 @@ def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
     if review_pin:
         return cfg.review_profile, f"using {cfg.review_profile} (pinned by review_profile)"
     if db is not None and ws is not None and "reviewer" in cfg.agent_models and not cfg.reviewer_models_inherited:
-        name, why = agents._review_choice(db, ws, None, cfg)
+        name, why = agents._review_choice(db, ws, None, cfg, parent_id=worker.parent_id if worker else None)
         return name, why or f"using {name} from this task size's reviewer pool"
     default = next(iter(existing_profiles([cfg.reviewer, *cfg.reviewer_fallbacks], repo_root)),
                    "review.claude-sonnet.high")
@@ -992,7 +995,8 @@ def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
     if scored:
         scored.sort(key=lambda item: item[0])
         order, same_model = review_scope.writer_model_last([item[1] for item in scored], worker, repo_root or "",
-                                                           db=db, workspace=ws)
+                                                           db=db, workspace=ws,
+                                                           parent_id=worker.parent_id if worker else None)
         best = order[0]
         _, _, tier = next(item for item in scored if item[1] == best)
         info = autopilot.model_cost_info(best, cfg, repo_root)
@@ -1170,7 +1174,8 @@ def _other_provider_reviewers(db: DB, cfg: RepoConfig, reviewer: Agent, ws: Work
             pool = [n for n in configured if n not in taken]
             locked = size in cfg.agent_models["reviewer"] or bool(cfg.routing_locked.get(size))
     pool, same_model = review_scope.writer_model_last(existing_profiles(pool, ws.repo_root), worker, ws.repo_root,
-                                                      db=db, workspace=ws)
+                                                      db=db, workspace=ws,
+                                                      parent_id=worker.parent_id if worker else None)
 
     def why_not(name: str) -> str | None:
         try:

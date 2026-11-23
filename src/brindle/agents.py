@@ -607,6 +607,12 @@ def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: s
     return prompt
 
 
+@dataclass(frozen=True)
+class ReviewLaunch:
+    model: str
+    config_home: str | None
+
+
 def spawn(
     db: DB,
     ws: Workspace,
@@ -631,6 +637,7 @@ def spawn(
     defer_launch: bool = False,
     launched: Callable[[], None] | None = None,
     agent_name: str | None = None,
+    review_launch: ReviewLaunch | None = None,
 ) -> Agent:
     """Start an agent in ``ws``. ``defer_launch``: return once the agent's row
     exists and start its CLI on a thread of its own (a launch that fails marks
@@ -721,10 +728,12 @@ def spawn(
         done_when=done_when, review_sha=review_sha,
         # Its CLI's config home, decided once here: every later check, its
         # pane and a resume use this one, whatever a sign-in changes meanwhile.
-        config_home=provider_homes.decide(provider.name),
+        config_home=review_launch.config_home if review_launch else provider_homes.decide(provider.name),
         weight=_weight_kind(weight) if mode in ("handoff", "assign") else None,
         agent=agent_name,
     )
+    if review_launch is not None:
+        agent._review_launch = review_launch
     with provider_homes.using(agent.provider, agent.config_home):
         composed = {"profile": _profile_for(db, agent, ws)} if agent_name else {}
         why = model_problem(profile_name, ws, agent=agent, **composed)
@@ -1050,6 +1059,8 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
         if why:
             raise AgentError(f"managed models: {why}")
         profile = managed_models.apply_profile(m, profile)
+    if review_launch := getattr(agent, "_review_launch", None):
+        return replace(profile, model=review_launch.model)
     return _with_newest_model(profile, ws, agent=agent, m=m)
 
 
@@ -1281,11 +1292,31 @@ def _with_newest_model(profile, ws: Workspace, *, agent: Agent | None = None, m=
 
 
 def routing_model(profile, repo_root: str, *, cwd: str | None = None,
-                  env: dict[str, str] | None = None, workspace: Workspace | None = None) -> str | None:
-    """Resolve a routing candidate in its workspace when one is known."""
-    ws = workspace or Workspace("preflight", repo_root, "preflight", "root", "", None,
-                                cwd or repo_root, None, "", 0.0)
+                  env: dict[str, str] | None = None) -> str | None:
+    """The model a routing preview sees before the target workspace exists."""
+    ws = Workspace("preflight", repo_root, "preflight", "root", "", None,
+                   cwd or repo_root, None, "", 0.0)
     return _with_newest_model(profile, ws, effective=env).model
+
+
+def resolve_review_launch(profile, ws: Workspace, parent_id: str | None) -> ReviewLaunch | None:
+    """Use the reviewer role, caller session and CLI home the pane will use."""
+    if profile.provider not in VERSION_DISCOVERY_PROVIDERS or not profile.model:
+        return None
+    from brindle import preflight, provider_homes
+
+    try:
+        _airgap_check(profile, ws.repo_root)
+    except AgentError:
+        return None
+    if preflight.turned_off(profile.provider):
+        return None
+    config_home = provider_homes.decide(profile.provider)
+    candidate = Agent("preflight", ws.id, profile.name, profile.provider, parent_id, "review",
+                      "starting", "", None, time.time(), config_home=config_home, agent="reviewer")
+    with provider_homes.using(profile.provider, config_home):
+        resolved = _with_newest_model(profile, ws, agent=candidate)
+    return ReviewLaunch(resolved.model, config_home)
 
 
 def _check_launch_model(repo_root: str, provider: str, model: str | None) -> None:
@@ -1794,7 +1825,7 @@ def _launch_checked(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         off = preflight.turned_off(agent.provider)
     if off:
         raise PreflightBlocked([off])
-    if agent.config_home is None:
+    if agent.config_home is None and not getattr(agent, "_review_launch", None):
         with _launch_step("config_home_s"):
             agent.config_home = provider_homes.decide(agent.provider)
         if agent.config_home is not None:
@@ -1945,10 +1976,18 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         db.conn.execute("DELETE FROM launch_health WHERE agent_id=?", (agent.id,))
     opening = time.monotonic()
     with _launch_step("window_s"):
-        target = _open_window(db, agent, ws, f"{profile.name}-{agent.id[:4]}", argv, watch_pane,
-                              **({"m": m} if m is not None else {}))
-        if agent.provider in VERSION_DISCOVERY_PROVIDERS:
+        record_model = agent.provider in VERSION_DISCOVERY_PROVIDERS
+        previous_model = db.agent_launch_model(agent.id) if record_model else None
+        if record_model:
             db.record_agent_launch_model(agent.id, profile.model)
+        try:
+            target = _open_window(db, agent, ws, f"{profile.name}-{agent.id[:4]}", argv, watch_pane,
+                                  **({"m": m} if m is not None else {}))
+        except BaseException:
+            if record_model:
+                db.record_agent_launch_model(agent.id, previous_model)
+            raise
+        agent.__dict__.pop("_review_launch", None)
     if (spent := _window_seconds.get()) is not None:
         spent.append(time.monotonic() - opening)
     from brindle import launch_health
@@ -4954,7 +4993,8 @@ def _hand_edited_merges(ws: Workspace, prev_sha: str) -> list[str]:
 
 
 def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None = None,
-                           repo_root: str | None = None, task: str | None = None) -> str | None:
+                           repo_root: str | None = None, task: str | None = None, *,
+                           parent_id: str | None = None) -> str | None:
     """Use an explicit size pool when configured, otherwise the legacy reviewer.
 
     Existing configurations retain Sonnet-high and the optional learner. An
@@ -4972,7 +5012,7 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
 
         ws = db.get_workspace(worker.workspace_id) if db is not None and worker else None
         if ws is not None:
-            return _review_choice(db, ws, None, cfg)[0]
+            return _review_choice(db, ws, None, cfg, parent_id=parent_id)[0]
         size = review_scope.review_size(worker, db, repo_root or "", None, cfg)
         pool = review_scope.model_order(cfg, size)
         names, _ = review_scope.writer_model_last(existing_profiles(pool, repo_root), worker, repo_root or "", db=db)
@@ -5040,11 +5080,12 @@ def _review_worktree_present(ws: Workspace) -> None:
                          f"remove_workspace {ws.id} clears its record.")
 
 
-def _review_profile(db: DB, ws: Workspace, profile: str | None, cfg: RepoConfig) -> str:
+def _review_profile(db: DB, ws: Workspace, profile: str | None, cfg: RepoConfig, *,
+                    parent_id: str | None = None, launches: dict[str, ReviewLaunch] | None = None) -> str:
     """``_review_choice``'s profile. When it passed over a reviewer that can't
     run (a local model that doesn't fit in memory, say), the supervisor of
     ``ws``'s worker is told why, whichever path dispatches the review."""
-    name, note = _review_choice(db, ws, profile, cfg)
+    name, note = _review_choice(db, ws, profile, cfg, parent_id=parent_id, launches=launches)
     if note:
         log.warning("%s", note)
         worker = workspace_worker(db, ws)
@@ -5092,7 +5133,8 @@ def _sized_review_profile(pick: str, worker: Agent | None, repo_root: str) -> st
 
 
 def _review_choice(db: DB, ws: Workspace, profile: str | None,
-                   cfg: RepoConfig) -> tuple[str, str | None]:
+                   cfg: RepoConfig, *, parent_id: str | None = None,
+                   launches: dict[str, ReviewLaunch] | None = None) -> tuple[str, str | None]:
     """The reviewer profile to use, checked to be one that can run, rather than
     spawning a reviewer doomed to fail in a dead pane, and why any earlier
     candidate was passed over (None when the first could run). ``profile`` asked for by
@@ -5143,9 +5185,11 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
     if not pool:
         raise AgentError("No reviewer models configured for this task size")
     same_model = set()
+    launches = launches if launches is not None else {}
     # Keep the legacy selection and cascade order for inherited reviewer settings.
     if size_pool is not None:
-        pool, same_model = review_scope.writer_model_last(pool, worker, ws.repo_root, db=db, workspace=ws)
+        pool, same_model = review_scope.writer_model_last(pool, worker, ws.repo_root, db=db, workspace=ws,
+                                                          parent_id=parent_id, launches=launches)
     preferred = pool[0]
     errors: dict[str, AgentError] = {}
 
@@ -5153,7 +5197,7 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
         if name in errors:
             return str(errors[name])
         try:
-            _reviewer_can_run(name, ws, cfg)
+            _reviewer_can_run(name, ws, cfg, **({"launch": launches[name]} if name in launches else {}))
         except AgentError as e:
             errors[name] = e
             return str(e)
@@ -5178,7 +5222,7 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
                   if first is not None and found.pool.index(name) > 0 else None)
 
 
-def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig) -> None:
+def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig, *, launch: ReviewLaunch | None = None) -> None:
     """Raises ``AgentError`` if reviewer profile ``name`` doesn't exist, its
     provider can't run an agent here (with the profile's own environment),
     can't take work now (``provider_health``: limited, refused, ...) or
@@ -5203,7 +5247,8 @@ def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig) -> None:
 
     from brindle.autopilot import effective_profile_model
 
-    health = provider_health.check(chosen.provider, model=effective_profile_model(chosen, ws.repo_root) or None,
+    model = launch.model if launch else effective_profile_model(chosen, ws.repo_root) or None
+    health = provider_health.check(chosen.provider, model=model,
                                    profile=name,
                                    repo_root=ws.repo_root, env=chosen.env, installed=False)
     if not health.ok:
@@ -5215,7 +5260,8 @@ def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig) -> None:
                               "review", "starting", "", None, time.time())
             d = pol.check_launch(cfg, ws, candidate, _effective_window_env(candidate, ws))
         else:
-            d = pol.check_assign(cfg, ws.repo_root, name, "code review", "review")
+            d = pol.check_assign(cfg, ws.repo_root, name, "code review", "review",
+                                 **({"resolved": (chosen.provider, launch.model)} if launch else {}))
     except Exception:  # noqa: BLE001 - an unreadable policy doesn't stop a review
         if chosen.provider == "codex" and not chosen.model:
             raise AgentError(f"reviewer profile {name!r}: couldn't resolve its model policy in the launch context") from None
@@ -5269,12 +5315,15 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
         return request_review(db, caller, ws, profile, focus, cfg, second=second, slot=slot)
     _review_kill_switch(ws)
     slot = _review_claim_slot(profile, slot)
-    profile = _review_profile(db, ws, profile, cfg)
+    automatic = profile is None and "reviewer" in cfg.agent_models and not cfg.reviewer_models_inherited
+    profile = _review_profile(db, ws, profile, cfg, parent_id=caller.id if caller else None)
     argv = [*brindle_invocation(), "_review-after-checks", ws.id, "--review-slot", slot]
     if caller:
         argv += ["--caller", caller.id]
     if profile:
         argv += ["--profile", profile]
+    if automatic:
+        argv += ["--auto-profile"]
     if focus:
         argv += ["--focus", focus]
     if second:
@@ -5390,7 +5439,8 @@ def _review_request_run(workspace_id: str, profile: str, request_id: str | None)
 def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: str | None = None,
                         focus: str | None = None, cfg: RepoConfig | None = None,
                         request_id: str | None = None, second: bool = False,
-                        *, slot: str | None = None, report: float | None = None) -> Agent | None:
+                        *, slot: str | None = None, report: float | None = None,
+                        auto_profile: bool = False) -> Agent | None:
     """Run ``cfg.checks`` for ``ws`` (through ``gates.check_summary``: its
     lock and the by-sha cache, so a result a worker's report already warmed
     is instant), then start the reviewer with the results in its prompt. When
@@ -5413,7 +5463,8 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
 
     cfg = cfg or workspaces.config_for(db, ws)
     slot = pipeline._slot(_review_claim_slot(profile, slot), ws.repo_root)
-    profile = _review_profile(db, ws, profile, cfg)
+    if not auto_profile or profile is None:
+        profile = _review_profile(db, ws, profile, cfg, parent_id=caller_id)
     with _review_request_run(ws.id, profile, request_id), pipeline.review_run(ws.id):
         # ``report``: the report whose review queued this helper (start_review);
         # it acts for that report alone and retires once the branch leaves it.
@@ -5466,7 +5517,7 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
                 if since is not None and piped is not None and session_paused(db, piped):
                     return None   # its result is cached by commit: the sweep starts this review again after the resume
                 try:
-                    return request_review(db, caller, ws, profile, focus, cfg, check_summary=text,
+                    return request_review(db, caller, ws, None if auto_profile else profile, focus, cfg, check_summary=text,
                                           second=second, slot=slot, expected_sha=sha)
                 except ReviewHeadMoved:
                     continue
@@ -5595,7 +5646,8 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         if profile and any(_same_profile(profile, name, ws.repo_root)
                            for name in (review_scope.LIGHT_PROFILE, review_scope.CODEX_LIGHT_PROFILE)):
             profile = None
-    profile = _review_profile(db, ws, profile, cfg)
+    launches: dict[str, ReviewLaunch] = {}
+    profile = _review_profile(db, ws, profile, cfg, parent_id=caller.id if caller else None, launches=launches)
     if second and not slot:
         slot = profile
     sha = gates.head(ws)
@@ -5763,8 +5815,10 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         return holder
     reviewer = None
     try:
+        review_launch = {"review_launch": launches[profile]} if profile in launches else {}
         reviewer = spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
-                         mode="review", background_setup=True, review_sha=sha, agent_name="reviewer")
+                         mode="review", background_setup=True, review_sha=sha, agent_name="reviewer",
+                         **review_launch)
     finally:
         db.hold_review(ws.id, sha, slot, token, reviewer.id if reviewer else None)
     # Verdict slots remain primary/second even when an explicit profile has

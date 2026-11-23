@@ -5,10 +5,14 @@ from __future__ import annotations
 import re
 import subprocess
 from pathlib import PurePosixPath
+from typing import TYPE_CHECKING
 
 from brindle import check_scope, codemap, git, spawn
 from brindle.config import RepoConfig
 from brindle.db import Agent, DB, Workspace
+
+if TYPE_CHECKING:
+    from brindle.agents import ReviewLaunch
 
 
 LIGHT_PROFILE = "review.claude-sonnet.low"
@@ -45,7 +49,9 @@ def review_size(worker: Agent | None, db: DB | None, repo_root: str,
 
 
 def writer_model_last(names: list[str], worker: Agent | None, repo_root: str, *,
-                      db: DB | None = None, workspace: Workspace | None = None) -> tuple[list[str], set[str]]:
+                      db: DB | None = None, workspace: Workspace | None = None,
+                      parent_id: str | None = None,
+                      launches: dict[str, ReviewLaunch] | None = None) -> tuple[list[str], set[str]]:
     """Demote the writer's effective model, including aliases and effort variants.
 
     Other models on the same provider remain independent review candidates.
@@ -74,9 +80,10 @@ def writer_model_last(names: list[str], worker: Agent | None, repo_root: str, *,
                 candidate = load_profile(name, repo_root)
                 if candidate.provider != worker.provider:
                     continue
-                resolved = agents.routing_model(candidate, repo_root, workspace=workspace)
-                if resolved == candidate.model:
-                    resolved = effective_profile_model(candidate, repo_root)
+                launch = agents.resolve_review_launch(candidate, workspace, parent_id) if workspace else None
+                if launches is not None and launch is not None:
+                    launches[name] = launch
+                resolved = launch.model if launch else effective_profile_model(candidate, repo_root)
                 if resolved and model_catalog.normalize(resolved) == writer_model:
                     same.add(name)
             except (KeyError, ProfileError, agents.AgentError):

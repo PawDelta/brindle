@@ -3662,7 +3662,8 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
                             request_id: Annotated[Optional[str], typer.Option("--request-id")] = None,
                             second: Annotated[bool, typer.Option("--second-review")] = False,
                             slot: Annotated[Optional[str], typer.Option("--review-slot")] = None,
-                            report: Annotated[Optional[float], typer.Option("--report")] = None) -> None:
+                            report: Annotated[Optional[float], typer.Option("--report")] = None,
+                            auto_profile: Annotated[bool, typer.Option("--auto-profile")] = False) -> None:
     """Run a repo's checks, then start the reviewer with their results in its
     prompt (or, when a check fails, send the worker the failing output and
     start none). Started detached from start_review, so the review still starts
@@ -3680,7 +3681,8 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
             report = pipeline.review_claim(db, ws)
     try:
         agents.review_after_checks(db, caller, ws, profile, focus, workspaces.config_for(db, ws),
-                                   request_id=request_id, second=second, slot=slot, report=report)
+                                   request_id=request_id, second=second, slot=slot, report=report,
+                                   **({"auto_profile": True} if auto_profile else {}))
     except (agents.AgentError, ValueError) as e:
         if report is not None:
             pipeline.review_start_failed(db, ws, report, str(e))
