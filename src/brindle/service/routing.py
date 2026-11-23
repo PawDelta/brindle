@@ -19,8 +19,17 @@ def provider_name(provider: str | None) -> str | None:
     return team_policy.CLI_NAMES.get(provider, provider) if provider else None
 
 
+def legacy_medium_override(cfg: config.RepoConfig, name: str) -> list[str] | None:
+    """The explicit Medium order an older app's single role row represents."""
+    if name == "reviewer" and (cfg.review_profile or cfg.reviewer_models_inherited):
+        return None
+    return cfg.agent_models.get(name, {}).get("medium")
+
+
 def agent_model_orders(cfg: config.RepoConfig, name: str, legacy: RoutingModelOrderDTO | None
                        ) -> dict[str, RoutingModelOrderDTO]:
+    if name == "reviewer" and cfg.review_profile:
+        return {size: RoutingModelOrderDTO(model=cfg.review_profile, locked=True) for size in config.WEIGHTS}
     pools = cfg.agent_models.get(name)
     if pools is None and name == "supervisor" and legacy and (legacy.model or legacy.fallbacks):
         return {size: RoutingModelOrderDTO(model=legacy.model, fallbacks=legacy.fallbacks, locked=legacy.locked)

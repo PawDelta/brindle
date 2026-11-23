@@ -1047,6 +1047,56 @@ def test_agent_routing_overrides_merge_clear_and_enforce_policy(repo, db, monkey
     assert config.user_settings()["agent_models"] == before
 
 
+def test_legacy_reviewer_update_changes_the_medium_override(repo, db):
+    from brindle import agents, config
+
+    app = build_app(TOKEN)
+
+    def put(**changes):
+        return asyncio.run(_read_request(app, "/v1/routing", AUTH, method="PUT", payload={
+            "repo": str(repo), "scope": "repo", **changes,
+        }))
+
+    first = "review.claude-sonnet.high"
+    assert put(agents={"reviewer": {"models": {"medium": {"model": first}}}})[0] == 200
+    chosen, fallback = "review.gpt", "review.gemini"
+    assert put(kinds={"reviewer": {"model": chosen, "fallbacks": [fallback]}})[0] == 200
+    code, routing = _get("/v1/routing", AUTH, f"repo={repo}&learned=0")
+    assert code == 200, routing
+    for row in (routing["kinds"]["reviewer"], routing["agents"]["reviewer"]["models"]["medium"]):
+        assert (row["model"], row["fallbacks"]) == (chosen, [fallback])
+    cfg = config.load_repo_config(repo)
+    assert agents.default_review_profile(cfg, None) == chosen
+
+
+def test_reviewer_override_requires_removing_an_existing_pin(repo, db):
+    from brindle import agents, config
+
+    pin = "review.claude-sonnet.high"
+    chosen = "review.gpt"
+    config.set_repo(repo, "review_profile", pin)
+    config.set_repo(repo, "agent_models", {"reviewer": {"medium": ["review.gemini"]}})
+    app = build_app(TOKEN)
+
+    def put():
+        return asyncio.run(_read_request(app, "/v1/routing", AUTH, method="PUT", payload={
+            "repo": str(repo), "scope": "repo", "agents": {"reviewer": {"models": {"medium": {"model": chosen}}}},
+        }))
+
+    code, reply = put()
+    assert (code, reply["error"]["code"]) == (409, "conflict")
+    code, routing = _get("/v1/routing", AUTH, f"repo={repo}&learned=0")
+    assert code == 200, routing
+    cfg = config.load_repo_config(repo)
+    assert cfg.agent_models["reviewer"]["medium"] == ["review.gemini"]
+    assert routing["kinds"]["reviewer"]["model"] == agents.default_review_profile(cfg, None) == pin
+    assert routing["agents"]["reviewer"]["models"]["medium"]["model"] == pin
+
+    config.unset_repo(repo, "review_profile")
+    assert put()[0] == 200
+    assert agents.default_review_profile(config.load_repo_config(repo), None) == chosen
+
+
 def test_knowledge_doc_reads_the_source_file(seeded, db, tmp_path):
     secret = "AKIA" + "TESTKEYEXAMPLE00"
     filler = "Watch the error dashboard for five minutes. " * 70   # two sections too big to share a chunk

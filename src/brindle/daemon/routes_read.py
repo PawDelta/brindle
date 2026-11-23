@@ -744,7 +744,7 @@ def _routing(db: DB, request: Request, learn: bool) -> Any:
     from concurrent.futures import ThreadPoolExecutor
 
     from brindle import autopilot, providers
-    from brindle.service.routing import RoutingPolicy, agent_model_orders, provider_name
+    from brindle.service.routing import RoutingPolicy, agent_model_orders, legacy_medium_override, provider_name
 
     repo = _need_repo(request)
     user = request.query_params.get("scope") == "user"
@@ -814,9 +814,8 @@ def _routing(db: DB, request: Request, learn: bool) -> Any:
                                                       cfg, row.name, kinds.get(row.name)))
     # The older app has one slot per role. Medium is the representative size.
     for name in ("reviewer", "supervisor"):
-        if name in cfg.agent_models and not (name == "reviewer" and cfg.reviewer_models_inherited):
-            if name in agent_rows and (medium := agent_rows[name].models.get("medium")) is not None:
-                kinds[name] = kinds[name].model_copy(update=medium.to_json())
+        if name in agent_rows and legacy_medium_override(cfg, name) is not None:
+            kinds[name] = kinds[name].model_copy(update=agent_rows[name].models["medium"].to_json())
     return RoutingDTO(
         tiers=tiers,
         reviewer=RoutingSettingDTO(values=[cfg.reviewer], source=source("reviewer")),

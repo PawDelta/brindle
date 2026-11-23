@@ -1758,7 +1758,9 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     A profile the org's policy doesn't allow, or any change while the policy
     applies but can't be read, is refused (403)."""
     from brindle import config, profiles, providers
-    from brindle.service.routing import RoutingPolicy, merge_agent_model_changes, parse_agent_model_changes
+    from brindle.service.routing import (
+        RoutingPolicy, legacy_medium_override, merge_agent_model_changes, parse_agent_model_changes,
+    )
 
     repo = _get(body, "repo", required=True)
     scope = _get(body, "scope", required=True)
@@ -1773,7 +1775,7 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     overrides: dict[str, dict[str, str | None]] = {}    # kind -> effort / instructions (None clears)
     extra: dict[str, Any] = {}      # supervisor and reviewer settings the kinds ask for
     # A user-scope change builds on the person's own lists and library, never this repo's.
-    current = config.load_repo_config(repo, user_only=scope == "user").routing
+    cfg = config.load_repo_config(repo, user_only=scope == "user")
     for kind, spec in kinds.items():
         if kind not in config.ROUTING_KINDS or not isinstance(spec, dict):
             raise ServiceError("invalid", f"kind must be one of {', '.join(config.ROUTING_KINDS)}, not {kind!r}")
@@ -1798,7 +1800,7 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
         if fallbacks is not None and (not isinstance(fallbacks, list) or not all(isinstance(n, str) for n in fallbacks)):
             raise ServiceError("invalid", f"{kind}: fallbacks must be a list of profile names")
         if kind in config.WEIGHTS and (model is not None or fallbacks is not None):
-            old = current[kind]
+            old = cfg.routing[kind]
             names = [model if model is not None else old[0] if old else None,
                      *(fallbacks if fallbacks is not None else old[1:])]
             tiers = {**(tiers or {}), kind: [n for n in dict.fromkeys(names) if n]}
@@ -1815,6 +1817,15 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     by_name = {p.name: p for p in profiles.list_profiles(profile_root)}
     known = set(by_name)
     agent_changes = parse_agent_model_changes(_get(body, "agents", dict) or {}, known, profile_root)
+    if cfg.review_profile and any(order is not None for order in agent_changes.get("reviewer", {}).values()):
+        raise ServiceError("conflict", "Remove the review_profile pin before setting reviewer model overrides", 409)
+    for name, model in (("reviewer", reviewer), ("supervisor", extra.get("supervisor_profile"))):
+        old = legacy_medium_override(cfg, name)
+        fallbacks = extra.get(f"{name}_fallbacks")
+        if old is not None and (model is not None or fallbacks is not None):
+            primary = model if model is not None else old[0] if old else None
+            names = [primary, *(fallbacks if fallbacks is not None else old[1:])]
+            agent_changes.setdefault(name, {}).setdefault("medium", [n for n in dict.fromkeys(names) if n])
     named = [reviewer] if reviewer is not None else []
     for value in extra.values():     # supervisor and reviewer choices and fallbacks are profiles too
         named.extend(value if isinstance(value, list) else [value])
@@ -1877,7 +1888,7 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
                   "repo": functools.partial(config.update_repo, repo)}[scope]
         path = update("agent_models", lambda value: merge_agent_model_changes(value, agent_changes))
         updated.append("agent_models")
-    if reviewer is not None and kinds.get("reviewer", {}).get("model") and config.load_repo_config(repo).review_profile:
+    if reviewer is not None and kinds.get("reviewer", {}).get("model") and cfg.review_profile:
         write("review_profile", reviewer)   # it would win over `reviewer`, so the new choice must replace it
     if not updated:
         raise ServiceError("invalid", "give tiers, reviewer, exclude_providers, kinds or agents")
