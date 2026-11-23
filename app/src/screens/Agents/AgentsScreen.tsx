@@ -711,13 +711,14 @@ function AgentForm({ editing, created, loading, draft, setDraft, rules, taken, p
               <>
                 Works like a {worksLikeLabel(draft.worksLike)}, and its model{" "}
                 {mode === "follows" ? "follows the job size" : mode === "own" ? "is its own for every size" : `follows the job size, except ${ownSizes.map((s) => KIND_INFO[s].name).join(", ")}`}.{" "}
-                <button type="button" className={link} aria-expanded={change} onClick={() => setChange(!change)}>
+                {/* Its saved role decides which models it may keep: nothing to change until that's read. */}
+                <button type="button" className={`${link} disabled:opacity-[var(--dim)]`} aria-expanded={change && !loading} disabled={loading} onClick={() => setChange(!change)}>
                   Change
                 </button>
               </>
             )}
           </p>
-          {change && !pinned && (
+          {change && !pinned && !loading && (
             <div className="flex flex-col gap-3" data-testid="change">
               <div className="flex flex-wrap items-center gap-s1">
                 <span className="w-[110px] text-sm text-ink-2">Works like</span>
@@ -846,8 +847,12 @@ interface Need {
 }
 
 interface FormState {
+  /* This opening of the form: an answer to a request it made applies only while it is still the one open. */
+  id: number;
   /* The agent being edited, or null for a new one. */
   editing: string | null;
+  /* What stopped its last save. */
+  error?: string | null;
   draft: Draft;
   /* A new agent's profile is written (POST /profiles went through): saving again writes only its own models. */
   created?: boolean;
@@ -879,7 +884,9 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   const [probs, setProbs] = useState<{ size: Size; id: string } | null>(null);
   /* The form: a new agent (editing null) or the one being edited, and its answers. */
   const [form, setForm] = useState<FormState | null>(null);
-  const [formError, setFormError] = useState<string | null>(null);
+  const forms = useRef(0);
+  /* A change for the form opening `id`, dropped when another opening (or none) is up now. */
+  const updateForm = (id: number, change: (f: FormState) => FormState | null) => setForm((f) => (f?.id === id ? change(f) : f));
   /* A built-in agent whose own models are open under its row. */
   const [models, setModels] = useState<string | null>(null);
   const [fresh, setFresh] = useState<string | null>(null);
@@ -973,8 +980,7 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   };
 
   const startNew = () => {
-    setForm({ editing: null, draft: newDraft() });
-    setFormError(null);
+    setForm({ id: ++forms.current, editing: null, draft: newDraft() });
     setModels(null);
   };
   const startEdit = (a: AgentRow) => {
@@ -984,41 +990,42 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
       return;
     }
     setModels(null);
-    setFormError(null);
     if (form?.editing === a.name) return setForm(null);
     const fallback = roleOf(a.role);
+    const id = ++forms.current;
     setForm({
+      id,
       editing: a.name,
       loading: true,
       draft: { name: a.name, purpose: a.description, instructions: "", rules: a.rules, worksLike: fallback, own: ownOf(a) },
       base: { instructions: null, worksLike: fallback },
     });
-    // Its own instructions and what it works like, as saved; only this edit's answer is used.
+    // Its own instructions and what it works like, as saved; only this opening's answer is used.
     client.profile(a.name).then(
       (d) => {
         const like = (WORKS_LIKE as string[]).includes(d.extends?.[0] ?? "") ? (d.extends[0] as WorksLike) : fallback;
         const saved = typeof d.instructions === "string" ? d.instructions : null;
-        setForm((f) => (f?.editing === a.name && f.loading ? { ...f, loading: false, draft: { ...f.draft, instructions: saved ?? "", worksLike: like }, base: { instructions: saved, worksLike: like } } : f));
+        updateForm(id, (f) => ({ ...f, loading: false, draft: { ...f.draft, instructions: saved ?? "", worksLike: like }, base: { instructions: saved, worksLike: like } }));
       },
-      () => setForm((f) => (f?.editing === a.name && f.loading ? { ...f, loading: false } : f)),
+      () => updateForm(id, (f) => ({ ...f, loading: false })),
     );
   };
 
   const submit = async () => {
     if (!repo || !form) return;
-    const { draft, editing, base } = form;
+    const { id, draft, editing, base } = form;
     let created = !!form.created;
     const name = editing ?? cleanName(draft.name);
     const before = editing ? agents.find((a) => a.name === editing) : undefined;
     setBusy(true);
-    setFormError(null);
+    updateForm(id, (f) => ({ ...f, error: null }));
     try {
       if (!editing && !created) {
         // An agent is how to work: no provider, model or effort; its model follows the job size.
         await client.createProfile({ repo, name, description: draft.purpose.trim(), works_like: draft.worksLike, instructions: draft.instructions, rules: draft.rules });
-        // Written: from here a second Save writes only its own models, and the list shows it.
+        // Written: from here a second Save of this form writes only its own models, and the list shows it.
         created = true;
-        setForm((f) => (f && f.editing === null ? { ...f, created: true } : f));
+        updateForm(id, (f) => ({ ...f, created: true }));
       } else if (editing) {
         // Instructions go when they changed: "" clears saved ones. When they couldn't be read, only new text goes.
         const instructions = base?.instructions == null ? (draft.instructions.trim() ? draft.instructions : undefined) : draft.instructions !== base.instructions ? draft.instructions : undefined;
@@ -1033,10 +1040,10 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
       const changes = before?.pinned ? {} : ownChanges(before ? ownOf(before) : {}, draft.own);
       if (Object.keys(changes).length > 0) await client.putRouting({ repo, scope: "user", agents: { [name]: { models: changes } } });
       setFresh(name);
-      setForm(null);
+      updateForm(id, () => null);
       await load();
     } catch (e) {
-      setFormError(message(e));
+      updateForm(id, (f) => ({ ...f, error: message(e) }));
       // It was written before what failed: the list shows it now.
       if (created) void load();
     } finally {
@@ -1103,7 +1110,7 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
         taken={profiles.map((p) => p.name)}
         pinned={editing ? pinnedOf(editing) : null}
         busy={busy}
-        error={formError}
+        error={form.error ?? null}
         choicesFor={formChoices}
         info={info}
         missing={missing}

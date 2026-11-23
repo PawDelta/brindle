@@ -371,6 +371,88 @@ describe("agents tab", () => {
     expect(puts(daemon)).toEqual([]);
   });
 
+  it("agents: a create answered after its form was closed leaves the next new agent's form alone", async () => {
+    // The first create's POST is held; once it lands, its models write fails.
+    const held: Array<() => void> = [];
+    let failures = 1;
+    const slow = (d: FakeDaemon): typeof globalThis.fetch => (input, init) => {
+      const url = String(input);
+      if (init?.method === "POST" && url.endsWith("/profiles") && held.length === 0) return new Promise((resolve) => held.push(() => resolve(d.fetch(input, init))));
+      if (init?.method === "PUT" && url.includes("/routing") && failures-- > 0) {
+        return Promise.resolve(new Response(JSON.stringify({ error: { code: "unavailable", message: "the daemon is busy" } }), { status: 503, headers: { "content-type": "application/json" } }));
+      }
+      return d.fetch(input, init);
+    };
+    const { daemon } = setup({}, slow);
+    await screen.findByTestId("kind-medium");
+    const fill = (name: string) => {
+      fireEvent.click(screen.getByRole("button", { name: "New agent" }));
+      const form = screen.getByRole("region", { name: "New agent" });
+      fireEvent.change(within(form).getByLabelText("Name"), { target: { value: name } });
+      fireEvent.change(within(form).getByLabelText("What it's for"), { target: { value: `${name} work` } });
+      return form;
+    };
+    const first = fill("alpha");
+    fireEvent.click(within(first).getByRole("button", { name: "Change" }));
+    fireEvent.click(within(within(first).getByRole("group", { name: "Model" })).getByRole("button", { name: "Its own for a size…" }));
+    fireEvent.click(within(first).getByRole("button", { name: "alpha Light model" }));
+    fireEvent.click(option(within(first).getByRole("group", { name: "Choices for alpha Light" }), "developer-heavy")!);
+    fireEvent.click(within(first).getByRole("button", { name: "Create agent" }));
+    await waitFor(() => expect(held.length).toBe(1));
+    fireEvent.click(within(first).getByRole("button", { name: "Cancel" }));
+    const second = fill("beta");
+
+    held[0]();
+    await waitFor(() => expect(agent("alpha")).toBeTruthy());
+    // The second form is still a new agent of its own: nothing of the first one's answer reached it.
+    expect(within(second).queryByTestId("form-error")).toBeNull();
+    const create = within(second).getByRole("button", { name: "Create agent" }) as HTMLButtonElement;
+    await waitFor(() => expect(create.disabled).toBe(false));
+    fireEvent.click(create);
+    await waitFor(() => expect(agent("beta")).toBeTruthy());
+    expect(daemon.requests.filter((r) => r.method === "POST" && r.path === "/profiles").map((r) => (r.body as { name: string }).name)).toEqual(["alpha", "beta"]);
+  });
+
+  it("agents: an edit's saved role and instructions come from that opening's own read, and its models wait for it", async () => {
+    const tidy = rp("tidy-dev", "claude", null, "medium", { kind: "agent", builtin: false, description: "Tidies code" });
+    // Every read of the agent is answered as the daemon had it then, but held until released.
+    const held: Array<() => void> = [];
+    const hold = (d: FakeDaemon): typeof globalThis.fetch => (input, init) => {
+      if (init?.method || !String(input).includes("/profiles/tidy-dev")) return d.fetch(input, init);
+      const answer = d.fetch(input, init);
+      return new Promise((resolve) => held.push(() => resolve(answer)));
+    };
+    const { daemon } = setup(
+      {
+        routingProfiles: [...profiles, tidy],
+        profiles: [...described, { name: "tidy-dev", provider: "claude", model: null, description: "Tidies code" }],
+        profileDetails: { "tidy-dev": { extends: ["developer"], instructions: "Old words." } },
+      },
+      hold,
+    );
+    await screen.findByTestId("agent-tidy-dev");
+    const edit = () => fireEvent.click(within(agent("tidy-dev")).getByRole("button", { name: "Edit tidy-dev" }));
+    edit();
+    await waitFor(() => expect(held.length).toBe(1));
+    // Closed and opened again after the agent changed: a second read, answered with what's saved now.
+    edit();
+    daemon.data.profileDetails["tidy-dev"] = { extends: ["reviewer"], instructions: "Newer words." };
+    edit();
+    await waitFor(() => expect(held.length).toBe(2));
+    const form = within(agent("tidy-dev")).getByRole("region", { name: "Edit tidy-dev" });
+    // Until its read is in, nothing about its models can be changed.
+    expect((within(form).getByRole("button", { name: "Change" }) as HTMLButtonElement).disabled).toBe(true);
+
+    // The first opening's late answer is dropped; this opening's own fills the form.
+    held[0]();
+    await flush();
+    expect((within(form).getByLabelText("Instructions") as HTMLTextAreaElement).value).toBe("");
+    held[1]();
+    await waitFor(() => expect((within(form).getByLabelText("Instructions") as HTMLTextAreaElement).value).toBe("Newer words."));
+    expect(within(form).getByTestId("defaults").dataset.worksLike).toBe("reviewer");
+    expect((within(form).getByRole("button", { name: "Change" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("agents: clearing a size's Edit instructions sends null, the daemon refuses blank text, and a reload shows them empty", async () => {
     const { daemon, client, stop } = setup();
     const more = () => within(row("medium")).getByRole("button", { name: "Edit Medium" });
