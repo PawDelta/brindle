@@ -149,7 +149,7 @@ def test_default_reviewer_pick(db, repo, boss, monkeypatch, unavailable, expecte
     from brindle import policy
 
     # Keep same-model avoidance out of this test of the default and its fallbacks.
-    db.add_agent(Agent("writer", boss.id, "dev.claude-haiku", "claude", None,
+    db.add_agent(Agent("writer", boss.id, "dev.claude-opus", "claude", None,
                        "assign", "done", "@0", "done", time.time()))
     monkeypatch.setattr(agents, "unusable", lambda provider, env=None:
                         "not signed in" if unavailable == "codex" and provider == "codex" else None)
