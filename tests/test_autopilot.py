@@ -610,15 +610,18 @@ def test_passing_milestones_wait_for_the_completion_audit(db, root, repo, monkey
     assert autopilot.on_stop(db, agent, {}) is None   # the verdict wakes it up
 
     spawned = []
-    monkeypatch.setattr(agents, "spawn", lambda db_, ws_, profile, **kw: (
-        spawned.append(kw) or add_agent(db_, ws_, "audit1", mode="review", parent="boss")))
-    autopilot.start_audit(db, "boss", ws)
-    assert "Settings page" in spawned[0]["prompt"] and f"{start}.." in spawned[0]["prompt"]
+    monkeypatch.setattr(agents, "_launch", lambda db_, auditor, ws_, **kw: spawned.append(auditor))
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
+    cfg = RepoConfig(review_sizing=False, agent_models={"reviewer": {"medium": ["dev.claude-opus"]}})
+    auditor = autopilot.start_audit(db, "boss", ws, cfg=cfg)
+    assert auditor.profile == "dev.claude-opus"
+    assert db.get_agent(auditor.id).agent == "reviewer"
+    assert "Settings page" in spawned[0].task and f"{start}.." in spawned[0].task
     monkeypatch.setattr(agents, "is_alive", lambda *a, **k: True)
     assert autopilot.start_audit(db, "boss", ws) is None   # one auditor at a time
     assert len(spawned) == 1
     ap = db.get_autopilot("boss")
-    assert ap.auditor_id == "audit1" and ap.audit_sha == sh("git rev-parse HEAD", repo)
+    assert ap.auditor_id == auditor.id and ap.audit_sha == sh("git rev-parse HEAD", repo)
 
     goals = autopilot.session_goals_path(db, "boss")
     assert "status: passed" in goals.read_text()
