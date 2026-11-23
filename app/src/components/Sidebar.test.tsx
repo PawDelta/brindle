@@ -289,6 +289,11 @@ describe("Sidebar", () => {
     // Every row leads with its role (data-role), the model second; a sized worker keeps its job size in data-size and the title only.
     expect([role("w4").role, role("w4").size, role("w4").modelName]).toEqual(["developer", "medium", "GPT‑6.1 Sol"]);
     expect([role("w1").role, role("w1").size, role("w1").modelName]).toEqual(["developer", "light", "Claude Haiku"]);
+    // The label's leading text is the role: its first node carries the same text as data-role, so a size rendered first fails.
+    for (const id of ["w4", "w1"]) {
+      const el = within(agentRow(id)!).getByTestId("agent-role");
+      expect(el.firstChild?.textContent).toBe(el.dataset.role);
+    }
     expect([role("w2").size, role("w2").modelName]).toEqual(["heavy", "Claude"]);
     expect(agentRow("w4")!.title).toContain("job size: medium");
     expect(within(agentRow("w4")!).getByTestId("agent-role").textContent).not.toContain("developer-codex-sol");
