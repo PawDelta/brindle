@@ -8,7 +8,7 @@ from pathlib import PurePosixPath
 
 from brindle import check_scope, codemap, git, spawn
 from brindle.config import RepoConfig
-from brindle.db import Workspace
+from brindle.db import Agent, DB, Workspace
 
 
 LIGHT_PROFILE = "review.claude-sonnet.low"
@@ -17,6 +17,61 @@ DIFF_CHARS = 32000
 CALLER_CHARS = 6000
 MAX_SYMBOLS = 30
 GRAPH_SECONDS = 10
+
+
+def model_order(cfg: RepoConfig, size: str) -> list[str] | None:
+    """An explicit reviewer table follows shared sizes where it has no override.
+
+    Inherited orders retain legacy sizing and learning, including local overrides
+    of the cheap reviewer and explicitly configured reviewer fallbacks.
+    """
+    if "reviewer" not in cfg.agent_models or cfg.reviewer_models_inherited:
+        return None
+    return cfg.agent_models["reviewer"].get(size, cfg.routing.get(size, []))
+
+
+def review_size(worker: Agent | None, db: DB | None, repo_root: str,
+                ws: Workspace | None, cfg: RepoConfig) -> str:
+    """Use the writer's task size, with the existing cheap branch demotion."""
+    from brindle import learning
+    from brindle.config import normalize_weight
+
+    weight = worker.weight if worker else None
+    if not weight and worker and db is not None:
+        _, weight = learning._task_files(db, worker, repo_root)
+    if cfg.review_sizing and ws is not None and small_branch(ws, cfg):
+        return "light"
+    return normalize_weight(weight or "medium")
+
+
+def writer_model_last(names: list[str], worker: Agent | None, repo_root: str) -> tuple[list[str], set[str]]:
+    """Demote the writer's effective model, including aliases and effort variants.
+
+    Other models on the same provider remain independent review candidates.
+    Unknown profiles stay in the pool so normal validation reports their errors.
+    """
+    from brindle.autopilot import effective_profile_model
+    from brindle.profiles import ProfileError, compose, load_profile
+
+    names = list(dict.fromkeys(names))
+    if worker is None:
+        return names, set()
+    try:
+        writer = (compose(worker.agent, worker.profile, repo_root) if worker.agent
+                  else load_profile(worker.profile, repo_root))
+        model = effective_profile_model(writer, repo_root)
+    except (KeyError, ProfileError):
+        return names, set()
+    same = set()
+    if model:
+        for name in names:
+            try:
+                candidate = load_profile(name, repo_root)
+                if (candidate.provider, effective_profile_model(candidate, repo_root)) == (worker.provider, model):
+                    same.add(name)
+            except (KeyError, ProfileError):
+                continue
+    return [name for name in names if name not in same] + [name for name in names if name in same], same
 
 
 def docs_or_test(path: str) -> bool:

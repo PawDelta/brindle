@@ -261,6 +261,8 @@ class RepoConfig:
     routing: dict[str, list[str]] = field(default_factory=lambda: {k: list(v) for k, v in DEFAULT_ROUTING.items()})
     # Per agent and weight, an explicit model order over the shared routing table.
     agent_models: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    # Derived on load: keep legacy sizing/learning until the reviewer opts into a size table.
+    reviewer_models_inherited: bool = False
     fable_for_design_only: bool = True
     # Effective tier's origin for doctor and routing-skip diagnostics; not a setting.
     routing_sources: dict[str, str] = field(default_factory=lambda: {k: "DEFAULT_ROUTING" for k in WEIGHTS})
@@ -570,6 +572,8 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
             for agent, tiers in agent_models.items():
                 if not isinstance(agent, str) or not isinstance(tiers, dict):
                     continue
+                if not tiers:
+                    cfg.agent_models[current(agent)] = {}
                 for tier, names in tiers.items():
                     norm_tier = normalize_weight(tier)
                     if norm_tier in WEIGHTS and isinstance(names, list):
@@ -584,6 +588,17 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
 
     # The models picked on the picker's workers screen (the person's own profiles, for user_only).
     worker_models.apply(cfg, user, str(repo_root), user_library=user_only)
+    if "reviewer" not in cfg.agent_models:
+        from brindle.review_scope import CODEX_LIGHT_PROFILE, LIGHT_PROFILE
+
+        normal = list(dict.fromkeys([cfg.reviewer, *cfg.reviewer_fallbacks]))
+        light = [LIGHT_PROFILE, CODEX_LIGHT_PROFILE]
+        if not cfg.review_sizing or cfg.reviewer != "review.claude-sonnet.high":
+            light = normal
+        if cfg.review_profile:
+            normal = light = [cfg.review_profile]
+        cfg.agent_models["reviewer"] = {size: list(light if size == "light" else normal) for size in WEIGHTS}
+        cfg.reviewer_models_inherited = True
     for source in (shared, local):  # per weight, so a repo can override one and keep the rest
         second = source.get("second_review")
         if isinstance(second, dict):
