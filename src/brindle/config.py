@@ -522,7 +522,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
     from brindle.profiles import current_name
 
     def current(n: str) -> str:
-        return current_name(n, str(repo_root))
+        return current_name(n, None if user_only else str(repo_root))
 
     for key in ("default_agent", "reviewer", "review_profile"):
         if isinstance(getattr(cfg, key, None), str):
@@ -776,10 +776,14 @@ def _change_json(path: Path, change) -> None:
 def set_local(repo_root: str | Path, key: str, value: object) -> Path:
     """Set one key in ``.brindle/config.local.json`` (gitignored: this person's
     own settings; other keys are kept)."""
+    return update_local(repo_root, key, lambda _: value)
+
+
+def update_local(repo_root: str | Path, key: str, change) -> Path:
     base = config_root(repo_root) / CONFIG_DIR
     base.mkdir(parents=True, exist_ok=True)
     path = base / LOCAL_CONFIG_FILE
-    _change_json(path, lambda data: data.__setitem__(key, value))
+    _change_json(path, lambda data: data.__setitem__(key, change(data.get(key))))
     ignore = base / ".gitignore"
     if not ignore.exists():
         ignore.write_text(f"{LOCAL_CONFIG_FILE}\n", encoding="utf-8")
@@ -789,9 +793,13 @@ def set_local(repo_root: str | Path, key: str, value: object) -> Path:
 def set_repo(repo_root: str | Path, key: str, value: object) -> Path:
     """Set one key in the repo's shared ``.brindle/config.json`` (committed:
     everyone's settings; other keys are kept)."""
+    return update_repo(repo_root, key, lambda _: value)
+
+
+def update_repo(repo_root: str | Path, key: str, change) -> Path:
     path = scope_paths(repo_root)["repo"]
     path.parent.mkdir(parents=True, exist_ok=True)
-    _change_json(path, lambda data: data.__setitem__(key, value))
+    _change_json(path, lambda data: data.__setitem__(key, change(data.get(key))))
     return path
 
 

@@ -63,6 +63,7 @@ from brindle.service.dto import (
     ProfileDTO,
     ProviderConnectionDTO,
     RepoDTO,
+    RoutingAgentDTO,
     RoutingDTO,
     RoutingKindDTO,
     RoutingProfileDTO,
@@ -743,7 +744,7 @@ def _routing(db: DB, request: Request, learn: bool) -> Any:
     from concurrent.futures import ThreadPoolExecutor
 
     from brindle import autopilot, providers
-    from brindle.service.routing import RoutingPolicy, provider_name
+    from brindle.service.routing import RoutingPolicy, agent_model_orders, provider_name
 
     repo = _need_repo(request)
     user = request.query_params.get("scope") == "user"
@@ -778,16 +779,22 @@ def _routing(db: DB, request: Request, learn: bool) -> Any:
     else:
         with ThreadPoolExecutor(max_workers=max(1, len(probes))) as pool:
             signed = dict(zip(probes, pool.map(spawn.carry(probe), probes)))
-    rows = []
+    rows, agent_rows = [], {}
     builtin = profiles.builtin_names()
     for p in every:
         errors, warnings = profiles.lint_profile(p.name, lib)
+        try:
+            kind = profiles.kind_of(p.name, lib)
+        except (KeyError, profiles.ProfileError):
+            kind = "pinned"  # Unresolved inheritance still has a row for its lint errors.
+        role = profiles.base_role(p.name, lib)
         model = autopilot.effective_profile_model(p, lib) or None
         rows.append(RoutingProfileDTO(
             lint_errors=errors, lint_warnings=warnings,
+            kind=kind, description=p.description, rules=p.rules,
             name=p.name, provider=p.provider, provider_name=provider_name(p.provider),
             model=model, **model_names.describe(p, model), builtin=p.name in builtin,
-            role=profiles.base_role(p.name, lib), installed=here[p.name],
+            role=role, installed=here[p.name],
             signed_in=here[p.name] and signed[(p.provider, tuple(sorted(p.env.items())))],
             excluded=p.provider in cfg.exclude_providers, cost_tier=autopilot.cost_tier(p.name, cfg, lib),
             allowed=refusals[p.name] is None, refusal=refusals[p.name]))
@@ -800,11 +807,21 @@ def _routing(db: DB, request: Request, learn: bool) -> Any:
     # Every candidate's check reads the same stored keys: each from the store once.
     with keystore.reading():
         kinds = _routing_kinds(db, cfg, repo, learn=learn)
+    for row in rows:
+        if row.kind == "agent":
+            agent_rows[row.name] = RoutingAgentDTO(description=row.description, rules=row.rules, role=row.role,
+                                                  builtin=row.builtin, models=agent_model_orders(
+                                                      cfg, row.name, kinds.get(row.name)))
+    # The older app has one slot per role. Medium is the representative size.
+    for name in ("reviewer", "supervisor"):
+        if name in cfg.agent_models and not (name == "reviewer" and cfg.reviewer_models_inherited):
+            if name in agent_rows and (medium := agent_rows[name].models.get("medium")) is not None:
+                kinds[name] = kinds[name].model_copy(update=medium.to_json())
     return RoutingDTO(
         tiers=tiers,
         reviewer=RoutingSettingDTO(values=[cfg.reviewer], source=source("reviewer")),
         exclude_providers=RoutingSettingDTO(values=cfg.exclude_providers, source=source("exclude_providers")),
-        profiles=rows, policy=policy.to_dto(every), kinds=kinds).to_json()
+        profiles=rows, policy=policy.to_dto(every), kinds=kinds, agents=agent_rows).to_json()
 
 
 def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str, learn: bool = True) -> dict[str, RoutingKindDTO]:

@@ -1753,10 +1753,12 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     .brindle/config.json ("repo"). Tiers not given keep their value there.
     Each kind also takes ``effort`` and ``instructions`` (null clears), applied
     to whatever runs that kind at launch.
+    ``agents`` changes per-size model orders, with null removing a size override
+    in the selected scope.
     A profile the org's policy doesn't allow, or any change while the policy
     applies but can't be read, is refused (403)."""
     from brindle import config, profiles, providers
-    from brindle.service.routing import RoutingPolicy
+    from brindle.service.routing import RoutingPolicy, merge_agent_model_changes, parse_agent_model_changes
 
     repo = _get(body, "repo", required=True)
     scope = _get(body, "scope", required=True)
@@ -1812,6 +1814,7 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     profile_root = None if scope == "user" else repo
     by_name = {p.name: p for p in profiles.list_profiles(profile_root)}
     known = set(by_name)
+    agent_changes = parse_agent_model_changes(_get(body, "agents", dict) or {}, known, profile_root)
     named = [reviewer] if reviewer is not None else []
     for value in extra.values():     # supervisor and reviewer choices and fallbacks are profiles too
         named.extend(value if isinstance(value, list) else [value])
@@ -1821,6 +1824,9 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
         if not isinstance(names, list) or not names or not all(isinstance(n, str) for n in names):
             raise ServiceError("invalid", f"{tier} must be a non-empty list of profile names")
         named.extend(names)
+    for sizes in agent_changes.values():
+        for names in sizes.values():
+            named.extend(names or [])
     resolved = {name: profiles.current_name(name, profile_root) for name in named}
     if unknown := sorted(name for name, current in resolved.items() if current not in known):
         raise ServiceError("invalid", f"no such profile(s): {', '.join(unknown)}")
@@ -1866,47 +1872,95 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     for key, value in extra.items():
         path = write(key, value)
         updated.append(key)
+    if agent_changes:
+        update = {"user": config.update_user, "local": functools.partial(config.update_local, repo),
+                  "repo": functools.partial(config.update_repo, repo)}[scope]
+        path = update("agent_models", lambda value: merge_agent_model_changes(value, agent_changes))
+        updated.append("agent_models")
     if reviewer is not None and kinds.get("reviewer", {}).get("model") and config.load_repo_config(repo).review_profile:
         write("review_profile", reviewer)   # it would win over `reviewer`, so the new choice must replace it
     if not updated:
-        raise ServiceError("invalid", "give tiers, reviewer, exclude_providers or kinds")
+        raise ServiceError("invalid", "give tiers, reviewer, exclude_providers, kinds or agents")
     return {"updated": updated, "path": str(path)}
 
 
+def _works_like(body: Body) -> str | None:
+    role = _get(body, "works_like")
+    if role is not None and role not in ("developer", "qa", "reviewer"):
+        raise ServiceError("invalid", "works_like must be developer, qa or reviewer")
+    return role
+
+
+def _profile_rules(body: Body, repo: str) -> list[str] | None:
+    from brindle import profiles
+
+    rules = _get(body, "rules", list)
+    for pack in rules or []:
+        if not isinstance(pack, str):
+            raise ServiceError("invalid", "rules must be a list of rule pack names")
+        try:
+            profiles.load_rule_pack(pack, repo)
+        except (KeyError, profiles.ProfileError) as e:
+            raise ServiceError("invalid", f"rule {pack}: {e}") from e
+    return rules
+
+
 def create_profile(db: DB, params: dict, body: Body) -> Any:
-    """A custom agent in ~/.brindle/agents/<name>.md, written as
-    `brindle profile new` writes one: ``name``, ``description``, ``provider``
-    (signed in here), ``model`` (one the org's policy allows), ``effort``,
-    ``instructions`` and ``rules`` (known rule packs). An existing name is
-    refused (409)."""
-    from brindle import config, profiles, providers
-    from brindle.pro.team_policy import model_refusal
-    from brindle.service.routing import RoutingPolicy
+    """Create a personal profile, optionally pinning it to a provider and model."""
+    from brindle import config, profiles
 
     repo = _get(body, "repo", required=True)
     name = _get(body, "name", required=True)
-    provider = _get(body, "provider", required=True)
+    provider = _get(body, "provider")
     model, effort = _get(body, "model") or None, _get(body, "effort") or None
     description, instructions = _get(body, "description") or "", _get(body, "instructions") or ""
-    rules = _get(body, "rules", list) or []
-    if not profiles.PROFILE_NAME.match(name):
+    if not profiles.PROFILE_NAME.fullmatch(name):
         raise ServiceError("invalid", f"name {name!r}: use letters, digits, '-', '_' and '.'")
-    if not all(isinstance(r, str) for r in rules):
-        raise ServiceError("invalid", "rules must be a list of rule pack names")
     target = config.user_profiles_dir() / f"{name}.md"
-    if target.exists() or name in {p.name for p in profiles.list_profiles(repo)}:
+    if target.exists() or name in profiles.profile_names(repo):
         raise ServiceError("conflict", f"an agent named {name!r} already exists", 409)
+    rules = _profile_rules(body, repo) or []
+    extends = None
+    if provider is None and model is None:
+        if effort is not None:
+            raise ServiceError("invalid", "effort requires a provider or model")
+        extends = _works_like(body) or "developer"
+        provider = "claude"  # The parser's default when the file has only extends.
+    else:
+        provider = "claude" if provider is None else provider
+        _validate_profile_model(repo, name, provider, model, effort)
+        instructions = instructions or "Describe the role here."
+    text = profiles.profile_text(name, description, instructions, extends=extends, provider=provider,
+                                 model=model, effort=effort, rules=rules)
+    try:    # what will load is what was validated, whatever the values held
+        written = profiles._parse(text, name)
+    except profiles.ProfileError as e:
+        raise ServiceError("invalid", str(e)) from e
+    if (written.name, written.extends, written.provider, written.model, written.effort, written.rules) != (
+            name, extends, provider, model, effort, rules):
+        raise ServiceError("invalid", "a value can't be written to the agent file as given")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(target, "x", encoding="utf-8") as f:    # a second create of the name loses, not overwrites
+            f.write(text)
+    except FileExistsError as e:
+        raise ServiceError("conflict", f"an agent named {name!r} already exists", 409) from e
+    return {"name": name, "path": str(target)}
+
+
+def _validate_profile_model(repo: str, name: str, provider: str, model: str | None, effort: str | None) -> None:
+    from brindle import config, providers
+    from brindle.pro.team_policy import model_refusal
+    from brindle.service.routing import RoutingPolicy
+
     if provider not in providers.PROVIDERS:
         raise ServiceError("invalid", f"provider must be one of {', '.join(providers.PROVIDERS)}")
     if why := providers.unusable(provider):
         raise ServiceError("invalid", f"{provider} isn't connected: {why}")
     if effort is not None and effort not in config.EFFORTS:
         raise ServiceError("invalid", f"effort must be one of {', '.join(config.EFFORTS)}")
-    for pack in rules:
-        try:
-            profiles.load_rule_pack(pack, repo)
-        except (KeyError, profiles.ProfileError) as e:
-            raise ServiceError("invalid", f"rule {pack}: {e}") from e
+    if model is not None and not model.isprintable():
+        raise ServiceError("invalid", "model must be one line of plain text")
     access = RoutingPolicy.load(repo).access
     if access.org_id is not None or access.error:
         why = access.error or access.refusal(provider)
@@ -1915,23 +1969,41 @@ def create_profile(db: DB, params: dict, body: Body) -> Any:
                                 who=f"profile {name!r}")
         if why:
             raise ServiceError("forbidden", why, 403)
-    if model is not None and (not isinstance(model, str) or not model.isprintable()):
-        raise ServiceError("invalid", "model must be one line of plain text")
-    text = profiles.profile_text(name, description, instructions or "Describe the role here.",
-                                 provider=provider, model=model, effort=effort, rules=rules)
-    try:    # what will load is what was validated, whatever the values held
-        written = profiles._parse(text, name)
-    except profiles.ProfileError as e:
-        raise ServiceError("invalid", str(e)) from e
-    if (written.name, written.provider, written.model, written.effort, written.rules) != (
-            name, provider, model, effort, rules):
-        raise ServiceError("invalid", "a value can't be written to the agent file as given")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with open(target, "x", encoding="utf-8") as f:    # a second create of the name loses, not overwrites
-            f.write(text)
-    except FileExistsError as e:
-        raise ServiceError("conflict", f"an agent named {name!r} already exists", 409) from e
+
+
+_PROFILE_EDIT = threading.Lock()
+
+
+def put_profile(db: DB, params: dict, body: Body) -> Any:
+    """Edit the role, description, instructions or rules of a personal profile."""
+    from brindle import config, disk, profiles
+
+    repo = _get(body, "repo", required=True)
+    name = params["name"]
+    if not profiles.PROFILE_NAME.fullmatch(name):
+        raise ServiceError("invalid", f"invalid profile name {name!r}")
+    fields = {}
+    if role := _works_like(body):
+        fields["extends"] = role
+    if (description := _get(body, "description")) is not None:
+        fields["description"] = json.dumps(" ".join(description.split()), ensure_ascii=False)
+    if (rules := _profile_rules(body, repo)) is not None:
+        fields["rules"] = json.dumps(rules, ensure_ascii=False)
+    instructions = _get(body, "instructions")
+    if not fields and instructions is None:
+        raise ServiceError("invalid", "give works_like, description, instructions or rules")
+    target = config.user_profiles_dir() / f"{name}.md"
+    with _PROFILE_EDIT:
+        found = profiles._read_exact(name, None)
+        if found is None:
+            raise ServiceError("not_found", f"no agent named {name!r}", 404)
+        if found[1] != str(target) or name in profiles.builtin_names():
+            raise ServiceError("forbidden", f"agent {name!r} isn't a personal profile", 403)
+        try:
+            text = profiles.edit_profile_text(found[0], fields, instructions)
+        except profiles.ProfileError as e:
+            raise ServiceError("invalid", str(e)) from e
+        disk._replace(target, lambda out: out.write(text.encode("utf-8")), stat.S_IMODE(target.stat().st_mode))
     return {"name": name, "path": str(target)}
 
 
@@ -3418,6 +3490,7 @@ ROUTES = [
     Route("/v1/debug", _endpoint(put_debug), methods=["PUT"]),
     _post("/debug/log", post_debug_log),
     _post("/profiles", create_profile),
+    Route("/v1/profiles/{name}", _endpoint(put_profile), methods=["PUT"]),
     _post("/permissions", change_permissions),
     # The permission policy (brindle.permissions, brindle.permission_grants); agents never get here.
     Route("/v1/permissions", _endpoint(patch_permissions), methods=["PATCH"]),

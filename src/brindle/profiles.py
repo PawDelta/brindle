@@ -357,6 +357,7 @@ def _bool(value: str) -> bool:
 
 
 _BLOCK_ITEM = re.compile(r"^\s+-\s*(.*)$")
+_FRONTMATTER = re.compile(r"---[^\n]*\n(.*?)^---[ \t]*$(.*)", re.S | re.M)
 
 
 def _frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -368,7 +369,7 @@ def _frontmatter(text: str) -> tuple[dict[str, str], str]:
     if not text.startswith("---"):
         return meta, body
     # the closing fence is a line of its own: a value may contain "---"
-    m = re.match(r"---[^\n]*\n(.*?)^---[ \t]*$(.*)", text, re.S | re.M)
+    m = _FRONTMATTER.match(text)
     if m is None:
         raise ProfileError("frontmatter opened with '---' is never closed with another '---' line")
     header, body = m.groups()
@@ -1029,6 +1030,25 @@ def profile_text(name: str, description: str, prompt: str, *, extends: str | Non
     return PROFILE_TEMPLATE.format(
         name=name, description=" ".join(description.split()) or f"A {name} agent", head=head,
         rules=f"rules: {', '.join(rules)}\n" if rules else "", prompt=prompt)
+
+
+def edit_profile_text(text: str, fields: dict[str, str], prompt: str | None) -> str:
+    """Replace selected frontmatter fields, retaining the other lines as written."""
+    _, body = _frontmatter(text)  # report an unclosed header before editing
+    header = _FRONTMATTER.match(text) if text.startswith("---") else None
+    lines = []
+    replacing = False
+    for line in header[1].splitlines(keepends=True) if header else []:
+        if not line.strip() or line.lstrip().startswith("#"):
+            lines.append(line)
+            continue
+        if not line.startswith((" ", "\t")):
+            replacing = line.partition(":")[0].strip() in fields
+        if not replacing:
+            lines.append(line)
+    lines.extend(f"{key}: {value}\n" for key, value in fields.items())
+    tail = (body if header else f"\n{body}") if prompt is None else f"\n{prompt}\n"
+    return "---\n" + "".join(lines) + "---" + tail
 
 
 def _mechanical_lines(pack: RulePack) -> list[str]:

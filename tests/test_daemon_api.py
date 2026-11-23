@@ -64,16 +64,17 @@ def _get(path: str, headers: dict[str, str], query: str = "", peer_pid: int | No
     return asyncio.run(_read_request(build_app(TOKEN, port=8123), path, headers, query, peer_pid))
 
 
-async def _read_request(app, path, headers, query="", peer_pid=None):
+async def _read_request(app, path, headers, query="", peer_pid=None, *, method="GET", payload=None):
     sent: list[dict] = []
 
     async def receive():
-        return {"type": "http.request", "body": b"", "more_body": False}
+        return {"type": "http.request", "body": json.dumps(payload).encode() if payload is not None else b"",
+                "more_body": False}
 
     async def send(message):
         sent.append(message)
 
-    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET",
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": method,
              "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": query.encode(),
              "root_path": "", "server": ("127.0.0.1", 8123), "client": ("127.0.0.1", 50000),
              "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
@@ -974,6 +975,76 @@ def test_routing_user_view_runs_no_learner_and_no_sign_in_probe(seeded, monkeypa
     pro_reads.clear()
     assert _get("/v1/routing", AUTH, f"repo={repo}&scope=user&learned=0")[0] == 200
     assert len(pro_reads) <= 1       # at most one read; main's cross-process entitlement cache may serve it
+
+
+def test_model_less_agent_can_be_created_and_edited(repo, db):
+    from brindle import config, profiles
+
+    app = build_app(TOKEN)
+    path = "/v1/profiles"
+    rule = "style/minimal-diff"
+    code, reply = asyncio.run(_read_request(app, path, AUTH, method="POST", payload={
+        "repo": str(repo), "name": "proofreader", "description": "Proofread changes",
+        "instructions": "Check the spelling.", "rules": [rule],
+    }))
+    assert code == 200, reply
+    target = config.user_profiles_dir() / "proofreader.md"
+    assert target == Path(reply["path"])
+    assert "extends: developer" in target.read_text().splitlines()
+    assert not any(line.startswith("model:") for line in target.read_text().splitlines())
+
+    query = f"repo={repo}&scope=user&learned=0"
+    code, routing = _get("/v1/routing", AUTH, query)
+    assert code == 200, routing
+    agent = routing["agents"]["proofreader"]
+    assert (agent["kind"], agent["models"], agent["rules"], agent["description"]) == (
+        "agent", {}, [rule], "Proofread changes")
+    row = next(p for p in routing["profiles"] if p["name"] == "proofreader")
+    assert (row["kind"], row["description"], row["rules"]) == ("agent", agent["description"], [rule])
+
+    # The editor changes only the selected fields in an existing custom file.
+    target.write_text(target.read_text().replace("rules: ", "write_scope: docs/**\nrules: "))
+    code, reply = asyncio.run(_read_request(app, f"{path}/proofreader", AUTH, method="PUT", payload={
+        "repo": str(repo), "works_like": "qa", "instructions": "Read the diff.", "rules": [],
+    }))
+    assert code == 200, reply
+    edited = profiles._parse(target.read_text(), "proofreader")
+    assert (edited.extends, edited.description, edited.prompt, edited.rules, edited.write_scope) == (
+        "qa", "Proofread changes", "Read the diff.", [], ["docs/**"])
+
+
+def test_agent_routing_overrides_merge_clear_and_enforce_policy(repo, db, monkeypatch):
+    from brindle import config
+    from brindle.pro import managed_models, team_policy
+
+    app = build_app(TOKEN)
+    code, _ = asyncio.run(_read_request(app, "/v1/profiles", AUTH, method="POST", payload={
+        "repo": str(repo), "name": "proofreader", "works_like": "reviewer",
+    }))
+    assert code == 200
+
+    def put(agents):
+        return asyncio.run(_read_request(app, "/v1/routing", AUTH, method="PUT", payload={
+            "repo": str(repo), "scope": "user", "agents": agents,
+        }))
+
+    model = "review.claude-sonnet.high"
+    assert put({"proofreader": {"models": {"light": {"model": model}, "heavy": {"model": model}}}})[0] == 200
+    assert put({"proofreader": {"models": {"light": None}},
+                "reviewer": {"models": {"medium": {"model": model, "fallbacks": ["review.gpt"]}}}})[0] == 200
+    code, routing = _get("/v1/routing", AUTH, f"repo={repo}&scope=user&learned=0")
+    assert code == 200, routing
+    assert routing["agents"]["proofreader"]["models"] == {
+        "heavy": {"model": model, "fallbacks": [], "locked": True, "learned": None}}
+    assert routing["agents"]["proofreader"]["role"] == "reviewer"
+    reviewer = routing["agents"]["reviewer"]["models"]["medium"]
+    assert all(routing["kinds"]["reviewer"][field] == value for field, value in reviewer.items())
+    before = config.user_settings()["agent_models"]
+    monkeypatch.setattr(team_policy, "access", lambda repo: team_policy.Access(
+        org_id="acme", allowed_providers=("claude",)))
+    monkeypatch.setattr(managed_models, "current", lambda repo: None)
+    assert put({"proofreader": {"models": {"light": {"model": model, "fallbacks": ["review.gpt"]}}}})[0] == 403
+    assert config.user_settings()["agent_models"] == before
 
 
 def test_knowledge_doc_reads_the_source_file(seeded, db, tmp_path):
