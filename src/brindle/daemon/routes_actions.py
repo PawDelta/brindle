@@ -1806,7 +1806,6 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
                      *(fallbacks if fallbacks is not None else old[1:])]
             tiers = {**(tiers or {}), kind: [n for n in dict.fromkeys(names) if n]}
         elif kind == "reviewer":
-            reviewer = model if model is not None else reviewer
             if fallbacks is not None:
                 extra["reviewer_fallbacks"] = list(dict.fromkeys(fallbacks))
         elif kind == "supervisor":
@@ -1821,7 +1820,11 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     if cfg.review_profile and any(order is not None for order in agent_changes.get("reviewer", {}).values()):
         raise ServiceError("conflict", "Remove the review_profile pin before setting reviewer model overrides", 409)
     # The top-level reviewer field sets the default. The role row edits the active pin.
-    reviewer_model = kinds.get("reviewer", {}).get("model") if cfg.review_profile else reviewer
+    reviewer_model = kinds.get("reviewer", {}).get("model")
+    if not cfg.review_profile:
+        if reviewer_model is not None:
+            reviewer = reviewer_model
+        reviewer_model = reviewer
     legacy_edits = [(name, model, extra.get(f"{name}_fallbacks")) for name, model in (
         ("reviewer", reviewer_model), ("supervisor", extra.get("supervisor_profile")))]
     legacy_edits = [(name, model, fallbacks) for name, model, fallbacks in legacy_edits

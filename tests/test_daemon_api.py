@@ -1108,6 +1108,8 @@ def test_shared_legacy_reviewer_edit_uses_effective_pinned_fields(repo, db, pin_
 
     write_pin = config.set_repo if pin_scope == "repo" else config.set_local
     write_pin(repo, "review_profile", "review.claude-sonnet.high")
+    default = "review.gemini"
+    config.set_repo(repo, "reviewer", default)
     config.set_repo(repo, "reviewer_fallbacks", ["review.gemini"])
     if pin_scope == "repo":
         config.set_local(repo, "agent_models", {"reviewer": {"medium": ["reviewer"]}})
@@ -1119,6 +1121,7 @@ def test_shared_legacy_reviewer_edit_uses_effective_pinned_fields(repo, db, pin_
     }))
     assert code == 200, reply
     cfg = config.load_repo_config(repo)
+    assert cfg.reviewer == default
     assert local.read_text() == before
     assert (agents.default_review_profile(cfg, None), cfg.reviewer_fallbacks) == expected
     code, routing = _get("/v1/routing", AUTH, f"repo={repo}&learned=0")
