@@ -63,11 +63,13 @@ def record(db: DB, repo_root: str, decision: dict | None, *, task_id: str | None
     try:
         if not decision or not decision.get("profile"):
             return
+        worker = db.get_agent(agent_id) if agent_id else None
         db.add_routing_decision(
             repo_root, task_id=task_id, agent_id=agent_id, weight=decision.get("weight"),
             baseline_profile=decision.get("baseline") or decision["profile"],
             profile=decision["profile"], learned=bool(decision.get("learned")),
             prior=decision.get("prior") is True, demoted_from=decision.get("demoted_from"),
+            agent=worker.agent if worker and worker.agent else decision.get("agent"),
         )
     except Exception:
         log.exception("brindle: couldn't record the routing decision")
