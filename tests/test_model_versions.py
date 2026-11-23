@@ -5,6 +5,7 @@ import json
 import pytest
 
 from brindle import agents, autopilot, model_availability, provider_health, workspaces
+from brindle.config import RepoConfig
 from brindle.pro import team_policy
 from brindle.profiles import load_profile
 from test_launch_health import detached, flag, launches  # noqa: F401
@@ -63,3 +64,37 @@ def test_routing_launches_newest_allowed_version_in_same_line(
     assert flag(launches[-1], "--model") == expected
     assert expected in " ".join(why).lower().replace("‑", "-").replace(" ", "-")
     assert load_profile(profile, str(repo)).model == pinned
+
+
+def test_launch_refuses_a_pin_disallowed_after_the_catalog_changes(db, repo, routing, launches, detached, monkeypatch):
+    configure(repo, ["pinned"])
+    org = team_policy.OrgPolicy("example", 1, allowed_models=("gpt-6.2-sol",))
+    monkeypatch.setattr(team_policy.ProPolicy, "policy", lambda self: org)
+    monkeypatch.setattr("brindle.policy.plugin", lambda cfg, root: team_policy.ProPolicy(root))
+
+    def discover(request, limit):
+        model = "gpt-6.2-sol" if request.cwd == str(repo) else "gpt-6.1-sol"
+        return model_availability.Catalog(frozenset({model}), "codex")
+
+    monkeypatch.setattr(agents, "_model_checker", model_availability.ModelAvailabilityChecker(discover=discover, ttl=0))
+    profile, _ = autopilot.choose_profile(db, "", str(repo), weight="heavy")
+    assert profile == "pinned"
+    ws = workspaces.create(db, str(repo), "worker-branch").workspace
+    with pytest.raises(agents.AgentError, match="gpt-6.1-sol"):
+        agents.spawn(db, ws, profile, prompt="task", mode="assign", background_setup=True)
+    assert not launches
+
+
+def test_reviewer_order_demotes_the_writers_launched_model(db, repo, routing, launches, detached, monkeypatch):
+    configure(repo, ["pinned"])
+    profiles = repo / ".brindle" / "agents"
+    (profiles / "same-line.md").write_text("---\nextends: dev.gpt\nmodel: gpt-6.1-sol\n---\n")
+    (profiles / "other-line.md").write_text("---\nextends: dev.gpt\nmodel: gpt-6.2-astra\n---\n")
+    checker = model_availability.ModelAvailabilityChecker(
+        discover=lambda request, limit: model_availability.Catalog(frozenset({"gpt-6.2-sol", "gpt-6.2-astra"}), "codex"))
+    monkeypatch.setattr(agents, "_model_checker", checker)
+    agents.spawn(db, routing, "pinned", prompt="task", mode="assign", weight="heavy", background_setup=True)
+    assert flag(launches[-1], "--model") == "gpt-6.2-sol"
+    configure(repo, ["pinned"], pinned="gpt-6.1-terra")
+    cfg = RepoConfig(agent_models={"reviewer": {"heavy": ["same-line", "other-line"]}}, review_sizing=False)
+    assert agents._review_choice(db, routing, None, cfg) == ("other-line", None)

@@ -34,7 +34,9 @@ from brindle import spawn as processes   # this module's own spawn() starts an a
 from brindle.assembler import DECISIONS, DOCUMENT_CHUNKS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, GoalArchiveError, Review, Workspace, request_subagent
-from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
+from brindle.model_availability import (
+    ModelAvailabilityChecker, PROVISIONING_TIMEOUT, VERSION_DISCOVERY_PROVIDERS, provisioning_context,
+)
 from brindle.pro import route_health
 from brindle.redact import mask
 from brindle.profiles import load_profile, local_fallback, missing_add_dirs
@@ -1248,7 +1250,7 @@ def _with_newest_model(profile, ws: Workspace, *, agent: Agent | None = None, m=
     from brindle.pro import team_policy
 
     provider = agent.provider if agent else profile.provider
-    if provider != profile.provider or provider not in ("codex", "antigravity", "opencode") or not profile.model:
+    if provider != profile.provider or provider not in VERSION_DISCOVERY_PROVIDERS or not profile.model:
         return profile
     candidates = model_catalog.newer_versions(profile.model)
     if not candidates or preflight.turned_off(provider):
@@ -1279,16 +1281,31 @@ def _with_newest_model(profile, ws: Workspace, *, agent: Agent | None = None, m=
 
 
 def routing_model(profile, repo_root: str, *, cwd: str | None = None,
-                  env: dict[str, str] | None = None) -> str | None:
-    """The model a routing preview sees before the target workspace exists."""
-    ws = Workspace("preflight", repo_root, "preflight", "root", "", None,
-                   cwd or repo_root, None, "", 0.0)
+                  env: dict[str, str] | None = None, workspace: Workspace | None = None) -> str | None:
+    """Resolve a routing candidate in its workspace when one is known."""
+    ws = workspace or Workspace("preflight", repo_root, "preflight", "root", "", None,
+                                cwd or repo_root, None, "", 0.0)
     return _with_newest_model(profile, ws, effective=env).model
+
+
+def _check_launch_model(repo_root: str, provider: str, model: str | None) -> None:
+    """Recheck the model that will be passed to the version-aware CLI."""
+    if provider not in VERSION_DISCOVERY_PROVIDERS or not model:
+        return
+    from brindle.policy import Decision
+    from brindle.pro import team_policy
+
+    org = team_policy.ProPolicy(repo_root).policy()
+    if isinstance(org, Decision):
+        if not org.allowed:
+            raise AgentError(org.reason)
+    elif not team_policy.model_allowed(org.allowed_models, model):
+        raise AgentError(f"model {model!r} refused by org {org.org_id}'s model policy")
 
 
 def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = None,
                   profile=None, m=_UNREAD) -> str | None:
-    """Read-only provisioning/routing gate, using the worker's actual identity."""
+    """Read-only provisioning gate. A supplied profile already has its launch model."""
     from dataclasses import replace
     from brindle import guardrails, model_access
     from brindle.pro import managed_models
@@ -1296,6 +1313,7 @@ def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = Non
 
     if m is _UNREAD:
         m = managed(ws.repo_root)
+    resolve_version = profile is None
     if profile is None:
         profile = guardrails.effective(load_profile(profile_name, ws.repo_root))
         if profile_name == SUPERVISOR and agent is not None and agent.mode == "interactive":
@@ -1318,7 +1336,8 @@ def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = Non
     agent = agent or Agent("preflight", ws.id, profile_name, profile.provider, None,
                            "assign", "starting", "", None, time.time())
     effective = _effective_window_env(agent, ws, m)
-    profile = _with_newest_model(profile, ws, agent=agent, m=m, effective=effective)
+    if resolve_version:
+        profile = _with_newest_model(profile, ws, agent=agent, m=m, effective=effective)
     profile = replace(profile, provider=agent.provider)
     if profile.provider == "codex" and not profile.model:
         from brindle import policy
@@ -1792,6 +1811,7 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         m = _shared_managed(ws.repo_root)   # read once for this launch (per repo in a recovery)
         profile = _profile_for(db, agent, ws, m)
         _airgap_check(profile, ws.repo_root)
+        _check_launch_model(ws.repo_root, agent.provider, profile.model)
     provider = get_provider(agent.provider)
     if not model_checked:
         with _launch_step("model_check_s"):
@@ -1927,6 +1947,8 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     with _launch_step("window_s"):
         target = _open_window(db, agent, ws, f"{profile.name}-{agent.id[:4]}", argv, watch_pane,
                               **({"m": m} if m is not None else {}))
+        if agent.provider in VERSION_DISCOVERY_PROVIDERS:
+            db.record_agent_launch_model(agent.id, profile.model)
     if (spent := _window_seconds.get()) is not None:
         spent.append(time.monotonic() - opening)
     from brindle import launch_health
@@ -4953,7 +4975,7 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
             return _review_choice(db, ws, None, cfg)[0]
         size = review_scope.review_size(worker, db, repo_root or "", None, cfg)
         pool = review_scope.model_order(cfg, size)
-        names, _ = review_scope.writer_model_last(existing_profiles(pool, repo_root), worker, repo_root or "")
+        names, _ = review_scope.writer_model_last(existing_profiles(pool, repo_root), worker, repo_root or "", db=db)
         return names[0] if names else reviewer
     if reviewer != "review.claude-sonnet.high" or reviewer != cfg.reviewer:
         return reviewer
@@ -5123,7 +5145,7 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
     same_model = set()
     # Keep the legacy selection and cascade order for inherited reviewer settings.
     if size_pool is not None:
-        pool, same_model = review_scope.writer_model_last(pool, worker, ws.repo_root)
+        pool, same_model = review_scope.writer_model_last(pool, worker, ws.repo_root, db=db, workspace=ws)
     preferred = pool[0]
     errors: dict[str, AgentError] = {}
 

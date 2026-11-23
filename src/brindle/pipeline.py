@@ -991,7 +991,8 @@ def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
         scored.append(((rank_of.get(tier, 1), rate, 0 if name == default else 1), name, tier))
     if scored:
         scored.sort(key=lambda item: item[0])
-        order, same_model = review_scope.writer_model_last([item[1] for item in scored], worker, repo_root or "")
+        order, same_model = review_scope.writer_model_last([item[1] for item in scored], worker, repo_root or "",
+                                                           db=db, workspace=ws)
         best = order[0]
         _, _, tier = next(item for item in scored if item[1] == best)
         info = autopilot.model_cost_info(best, cfg, repo_root)
@@ -1168,7 +1169,8 @@ def _other_provider_reviewers(db: DB, cfg: RepoConfig, reviewer: Agent, ws: Work
         if configured is not None:
             pool = [n for n in configured if n not in taken]
             locked = size in cfg.agent_models["reviewer"] or bool(cfg.routing_locked.get(size))
-    pool, same_model = review_scope.writer_model_last(existing_profiles(pool, ws.repo_root), worker, ws.repo_root)
+    pool, same_model = review_scope.writer_model_last(existing_profiles(pool, ws.repo_root), worker, ws.repo_root,
+                                                      db=db, workspace=ws)
 
     def why_not(name: str) -> str | None:
         try:

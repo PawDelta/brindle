@@ -65,6 +65,7 @@ TIMEOUT = 5.0
 # and the discovery helper's bounded process-group cleanup.
 PROVISIONING_TIMEOUT = 1.0
 CACHE_TTL = 30.0
+VERSION_DISCOVERY_PROVIDERS = ("codex", "antigravity", "opencode")
 MAX_BYTES = 1024 * 1024
 MAX_PAGES = 10
 _MODEL_ID = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9._-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*"
@@ -159,7 +160,7 @@ class ModelAvailabilityChecker:
     def first_listed(self, profile: Profile, candidates: list[str], *, effective_env: Mapping[str, str],
                      cwd: str, account_identity: str | None, catalog_context: str) -> str | None:
         """Use explicit CLI catalog membership for an automatic version upgrade."""
-        if not candidates or profile.provider not in ("codex", "antigravity", "opencode"):
+        if not candidates or profile.provider not in VERSION_DISCOVERY_PROVIDERS:
             return None
         catalog = self._catalog(profile, effective_env, cwd, account_identity, catalog_context,
                                 PROVISIONING_TIMEOUT)
