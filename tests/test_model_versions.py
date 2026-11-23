@@ -265,32 +265,58 @@ def test_critical_pane_startup_failure_is_reported(db, repo, routing, detached, 
         assert db.agent_launch_model(agent_id) == "gpt-6.2-astra"
 
 
-def test_review_dispatch_surfaces_unconfirmed_gate_on_later_requests(db, repo, routing, detached, monkeypatch):
+@pytest.mark.parametrize("during_registration", [
+    False,
+    pytest.param(True, marks=pytest.mark.variant("competing dispatch must see startup before pane registration completes")),
+])
+def test_review_dispatch_surfaces_unconfirmed_gate_on_later_requests(
+        db, repo, routing, detached, monkeypatch, during_registration):
     from brindle import gates, login_shell_env
 
     configure(repo, ["pinned"], pinned="gpt-6.2-astra")
     opened = []
+    pane_gone = False
+    original = tmux.NewPane("%71")
+    original.launch = "123456abcdef"
 
     def new_window(*args, tag, **kwargs):
         opened.append(tag[1])
-        return "%waiting"
+        return "%72" if pane_gone else original
 
     def fail_signal(gate):
-        raise OSError("gate signal did not reach tmux")
+        if not pane_gone:
+            raise OSError("gate signal did not reach tmux")
+
+    def confirm_gone(pane, launch, server):
+        assert (pane, launch, server) == (original, original.launch, "review-server")
+        return pane_gone
+
+    update_agent = db.update_agent
+
+    def register(agent_id, **fields):
+        update_agent(agent_id, **fields)
+        if during_registration and fields.get("tmux_window") == original:
+            with pytest.raises(agents.AgentError):
+                agents.request_review(db, None, routing, "pinned")
 
     monkeypatch.setattr(login_shell_env, "asks_daemon", lambda: True)
     monkeypatch.setattr(login_shell_env, "shim", lambda agent_id, argv: argv)
     monkeypatch.setattr(tmux, "ensure_session", lambda *a, **kw: None)
     monkeypatch.setattr(tmux, "new_window", new_window)
     monkeypatch.setattr(tmux, "open_gate", fail_signal)
-    monkeypatch.setattr(agents, "alive_or_starting", lambda agent: agent.tmux_window == "%waiting")
+    monkeypatch.setattr(tmux, "current_server", lambda: "review-server")
+    monkeypatch.setattr(tmux, "launch_pane_gone", confirm_gone)
+    monkeypatch.setattr(tmux, "apply_theme", lambda *a: None)
+    monkeypatch.setattr(tmux, "mark_launched", lambda *a: None)
+    monkeypatch.setattr(agents, "alive_or_starting", lambda agent: agent.tmux_window == original and not pane_gone)
     monkeypatch.setattr(agents, "_hidden_brindle_tools", lambda keep: [])
+    monkeypatch.setattr(db, "update_agent", register)
 
     with pytest.raises(agents.AgentError):
         agents.request_review(db, None, routing, "pinned")
 
     [agent_id] = opened
-    assert db.get_agent(agent_id).tmux_window == "%waiting"
+    assert db.get_agent(agent_id).tmux_window == original
     assert db.agent_launch_model(agent_id) == "gpt-6.2-astra"
     assert db.review_claim(routing.id, gates.head(routing), "pinned")[0] == agent_id
 
@@ -301,3 +327,8 @@ def test_review_dispatch_surfaces_unconfirmed_gate_on_later_requests(db, repo, r
     with pytest.raises(agents.AgentError):
         agents.request_review(db, None, routing, "review.gpt", slot="pinned")
     assert opened == [agent_id] and not detached
+    if not during_registration:
+        pane_gone = True
+        replacement = agents.request_review(db, None, routing, "pinned")
+        assert replacement.id != agent_id and replacement.review_sha == gates.head(routing)
+        assert db.review_claim(routing.id, replacement.review_sha, "pinned")[0] == replacement.id

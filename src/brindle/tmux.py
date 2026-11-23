@@ -581,6 +581,26 @@ def discard_gated_launch(pane: str) -> bool:
     return f"{pane}\t1" not in remaining.stdout.splitlines()
 
 
+def launch_pane_gone(pane: str, launch: str, server: str | None) -> bool:
+    """Confirm that the given launch has no live pane on its recorded server."""
+    if not re.fullmatch(r"%\d+", pane) or (launch and not re.fullmatch(r"[0-9a-f]{12}", launch)):
+        return False
+    match = f"#{{m:*{AGENT_TAG} * {launch} *,#{{pane_start_command}}}}" if launch else "1"
+    try:
+        panes = _tmux("list-panes", "-a", "-F", "#{pane_id}\t#{pane_dead}\t" + match, server=server)
+    except TmuxError as exc:
+        message = str(exc)
+        missing = "no server running" in message or "No such file or directory" in message
+        return missing and abandoned(server or DEFAULT_SOCKET)
+    except OSError:
+        return False
+    for line in panes.stdout.splitlines():
+        target, *state = line.split("\t")
+        if target == pane:
+            return state in (["1", "1"], ["0", "0"], ["1", "0"])
+    return True
+
+
 def windows(session: str) -> list[str]:
     proc = _tmux("list-windows", "-t", f"={session}", "-F", "#{window_name}", check=False)
     return proc.stdout.split() if proc.returncode == 0 else []

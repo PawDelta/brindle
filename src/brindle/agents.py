@@ -187,12 +187,17 @@ class LaunchTaken(AgentError):
 class LaunchPaneUnconfirmed(AgentError):
     """Startup failed and the new pane may still exist."""
 
-    def __init__(self, stage: str, agent_id: str, pane: str):
+    def __init__(self, stage: str, agent_id: str, pane: str, server: str | None):
         self.agent_id = agent_id
         super().__init__(f"Could not complete {stage} for agent {agent_id}. Pane {pane} may still exist.")
+        self.review_startup = _review_startup_record(pane, server, failure=str(self))
 
 
 _REVIEW_STARTUP_FAILURE = "review-startup-failure"
+
+
+def _review_startup_record(pane: str, server: str | None, *, failure: str | None = None) -> str:
+    return json.dumps({"pane": pane, "server": server, "launch": getattr(pane, "launch", ""), "failure": failure})
 
 
 class StrayPane(AgentError):
@@ -1107,7 +1112,10 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     size = _resume_window_size.get()
     tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws), **({"size": size} if size else {}))
     target = None
+    server = tmux.current_server()
     previous_window, previous_server = agent.tmux_window, agent.tmux_server
+    review = agent.mode == "review"
+    previous_startup = db.mark(agent.id, _REVIEW_STARTUP_FAILURE) if review else None
     stage = "pane registration"
     try:
         env, credentials, allow, deny, org_env = _window_environment(agent, ws, m)
@@ -1123,11 +1131,12 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
                                      **({"enforce": True} if enforce else {}))
             if agent.provider in VERSION_DISCOVERY_PROVIDERS:
                 agent._opening_pane = target
+            if review:
+                db.set_mark(agent.id, _REVIEW_STARTUP_FAILURE, _review_startup_record(target, server))
             _record_env_drops(agent, ws, env, credentials, allow, deny, agent_env, enforce)
         agent.__dict__.pop("_pane_environment", None)
         # The pane id only means anything on the server that issued it (a
         # resumed agent may come back on a different one), so record both.
-        server = tmux.current_server()
         with delivery_lock(agent.id):   # no flush reads the pane, or types, while it changes
             db.update_agent(agent.id, tmux_window=target, tmux_server=server)
             agent.tmux_window, agent.tmux_server = target, server
@@ -1149,8 +1158,6 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
             except Exception:
                 pass
         if gate:
-            if agent.mode == "review":
-                db.set_mark(agent.id, _REVIEW_STARTUP_FAILURE, f"Startup gate for pane {target} is unconfirmed.")
             stage = "startup gate release"
             tmux.open_gate(gate)
     except Exception:
@@ -1158,21 +1165,22 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
             raise
         if gate and stage == "pane registration" and tmux.discard_gated_launch(target):
             agent.__dict__.pop("_opening_pane", None)
+            if review:
+                db.set_mark(agent.id, _REVIEW_STARTUP_FAILURE, previous_startup)
             if agent.tmux_window == target:
                 db.update_agent(agent.id, tmux_window=previous_window, tmux_server=previous_server)
                 agent.tmux_window, agent.tmux_server = previous_window, previous_server
             raise
-        error = LaunchPaneUnconfirmed(stage, agent.id, target)
-        if agent.mode == "review":
+        error = LaunchPaneUnconfirmed(stage, agent.id, target, server)
+        if review:
             try:
-                db.set_mark(agent.id, _REVIEW_STARTUP_FAILURE, str(error))
+                db.set_mark(agent.id, _REVIEW_STARTUP_FAILURE, error.review_startup)
             except Exception:
                 log.warning("Could not record the startup failure for reviewer %s", agent.id)
         raise error from None
-    if agent.mode == "review":
+    if review:
         try:
-            if db.mark(agent.id, _REVIEW_STARTUP_FAILURE) is not None:
-                db.set_mark(agent.id, _REVIEW_STARTUP_FAILURE, None)
+            db.set_mark(agent.id, _REVIEW_STARTUP_FAILURE, None)
         except Exception:
             log.warning("Could not clear the startup failure for reviewer %s", agent.id)
     try:
@@ -5319,9 +5327,26 @@ def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig, *, launch: Revi
         raise AgentError(f"reviewer profile {name!r} refused by policy: {d.reason}")
 
 
-def _check_review_startup(db: DB, reviewer: Agent) -> None:
-    if failure := db.mark(reviewer.id, _REVIEW_STARTUP_FAILURE):
-        raise AgentError(f"Reviewer startup is unconfirmed. {failure}")
+def _review_startup_ready(db: DB, reviewer: Agent) -> bool:
+    """Report pending or failed startup, and retire a failed pane once it is confirmed gone."""
+    if db.mark(reviewer.id, _REVIEW_STARTUP_FAILURE) is None:
+        return True
+    with review_dispatch_lock(reviewer.workspace_id):
+        saved = db.mark(reviewer.id, _REVIEW_STARTUP_FAILURE)
+        if saved is None:
+            return True
+        try:
+            startup = json.loads(saved)
+        except ValueError:  # An older startup mark only recorded the failure text.
+            startup = {"pane": reviewer.tmux_window, "server": server_of(reviewer), "launch": "", "failure": saved}
+        if not tmux.launch_pane_gone(startup["pane"], startup["launch"], startup["server"]):
+            if failure := startup["failure"]:
+                raise AgentError(f"Reviewer startup is unconfirmed. {failure}")
+            raise AgentError(f"Reviewer {reviewer.id} is still starting in pane {startup['pane']}.")
+        failure = startup["failure"] or "Reviewer pane disappeared during startup."
+        db.update_agent(reviewer.id, status="failed", unreported_noted=1, failed_why="launch: " + failure)
+        db.set_mark(reviewer.id, _REVIEW_STARTUP_FAILURE, None)
+        return False
 
 
 def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None, *,
@@ -5333,8 +5358,8 @@ def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None, 
         if a.mode == "review" and a.result is None and a.review_sha == sha \
                 and (slot is None or db.review_slot(a.id) == slot) \
                 and (profile is None or a.profile == profile):
-            _check_review_startup(db, a)
-            if not a.unreported_noted and alive_or_starting(a) and not launch_health.has_mcp_failure(db, a, ws):
+            if (_review_startup_ready(db, a) and not a.unreported_noted and alive_or_starting(a)
+                    and not launch_health.has_mcp_failure(db, a, ws)):
                 return a
     return None
 
@@ -5726,7 +5751,8 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
             continue
         matching = db.review_slot(old.id) == slot if automatic else _same_profile(old.profile, profile, ws.repo_root)
         if old.review_sha == sha and matching:
-            _check_review_startup(db, old)
+            if not _review_startup_ready(db, old):
+                continue
             if launch_health.has_mcp_failure(db, old, ws):
                 failed = old
                 continue
@@ -5894,7 +5920,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     except LaunchPaneUnconfirmed as exc:
         reviewer_id = exc.agent_id
         if db.mark(reviewer_id, _REVIEW_STARTUP_FAILURE) is None:
-            db.set_mark(reviewer_id, _REVIEW_STARTUP_FAILURE, str(exc))
+            db.set_mark(reviewer_id, _REVIEW_STARTUP_FAILURE, exc.review_startup)
         raise
     finally:
         db.hold_review(ws.id, sha, slot, token, reviewer_id)
@@ -5933,8 +5959,7 @@ def _live_claim(db: DB, held: tuple) -> Agent | str | None:
     agent_id, claimed_at = held
     holder = db.get_agent(agent_id) if agent_id else None
     if holder is not None and holder.result is None:
-        _check_review_startup(db, holder)
-        if not holder.unreported_noted and alive_or_starting(holder):
+        if _review_startup_ready(db, holder) and not holder.unreported_noted and alive_or_starting(holder):
             return holder
     if agent_id is None and time.time() - claimed_at < LAUNCH_GRACE:
         return "starting"
