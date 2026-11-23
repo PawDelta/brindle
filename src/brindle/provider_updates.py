@@ -48,19 +48,22 @@ def setting(*, refresh: bool = False) -> dict:
         ent = license.current(refresh=False)
     except license.LicenseError:
         ent = None
-    policy = {}
+    org = DEFAULT_POLICY
     if ent and ent.org_id and can_govern(ent):
-        if refresh:
-            from brindle.pro import analysis_docs
+        try:
+            if refresh:
+                from brindle.pro import analysis_docs
 
-            client, store = analysis_docs._session()
-            policy = analysis_policy.fetch(ent.org_id, client, store)
-            current = license.current(refresh=False)
-            if (current.org_id, current.sub) != (ent.org_id, ent.sub):
-                raise ValueError("The active organization changed")
-        else:
-            policy = analysis_policy.load_cached(ent.org_id)
-    org = org_setting(policy)
+                client, store = analysis_docs._session()
+                policy = analysis_policy.fetch(ent.org_id, client, store)
+                current = license.current(refresh=False)
+                if (current.org_id, current.sub) != (ent.org_id, ent.sub):
+                    return setting()
+            else:
+                policy = analysis_policy.load_cached(ent.org_id)
+            org = org_setting(policy)
+        except Exception:  # Account policy is optional for the member setting.
+            log.debug("Couldn't read the organization provider update policy")
     local = config.user_settings().get(SETTING)
     if not org["locked"] and local in MODES:
         return {"mode": local, "locked": False}
@@ -68,10 +71,7 @@ def setting(*, refresh: bool = False) -> dict:
 
 
 def setting_fields(*, refresh: bool = False) -> dict:
-    try:
-        effective = setting(refresh=refresh)
-    except (OSError, ValueError, auth.AuthError):
-        effective = {"mode": "off", "locked": True}
+    effective = setting(refresh=refresh)
     return {SETTING: effective["mode"], f"{SETTING}_locked": effective["locked"]}
 
 
@@ -186,7 +186,6 @@ def sweep(db: DB, *, clock=time.time, refresh_policy: bool = False) -> None:
     if not due and not ready:
         return
     # Read live org policy before checking releases or acting on a deferred update.
-    # An unavailable or malformed policy leaves work pending.
     if not refresh_policy and setting(refresh=True)["mode"] == "off":
         return
     checked = [p for p in due if _check_release(db, p, now)]

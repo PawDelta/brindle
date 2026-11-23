@@ -7,7 +7,7 @@ from brindle import agents, config, provider_updates as updates, providers_insta
 from brindle.daemon import org_settings
 from brindle.db import Agent, Workspace
 from brindle.model_availability import Catalog, ModelAvailabilityChecker, provisioning_context
-from brindle.pro import analysis_policy, auth, license
+from brindle.pro import analysis_docs, analysis_policy, auth, license
 from brindle.profiles import Profile
 from brindle.service import inbox
 from test_provider_install import _send
@@ -204,3 +204,19 @@ def test_failed_staged_install_preserves_old_version_and_one_notice(db, machine,
     [notice] = updates.inbox_items(db)
     assert notice.action is None
     assert not list((config.brindle_home() / "provider-clis" / "codex").iterdir())
+
+
+def test_refused_org_policy_leaves_updates_unlocked(db, machine, monkeypatch):
+    ent = SimpleNamespace(org_id="org_test", sub="person", plan="enterprise",
+                          features=["analysis_docs_enterprise"])
+    monkeypatch.setattr(license, "current", lambda **kwargs: ent)
+    monkeypatch.setattr(analysis_docs, "_session", lambda: (object(), object()))
+    monkeypatch.setattr(auth, "authed", lambda *args: (403, {"error": "forbidden"}))
+
+    assert updates.setting(refresh=True) == {"mode": "automatic", "locked": False}
+    status, settings = _send("PATCH", "/v1/user-settings", {updates.SETTING: "ask"})
+    assert status == 200
+    assert settings[updates.SETTING] == "ask" and not settings["provider_cli_updates_locked"]
+    machine.sweep()
+    assert machine.installed() == "0.170.0"
+    assert len(updates.inbox_items(db)) == 1
