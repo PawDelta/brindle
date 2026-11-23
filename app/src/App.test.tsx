@@ -1178,7 +1178,7 @@ describe("App", () => {
     expect(bar().textContent).not.toContain("paused");
     expect(within(bar()).queryByRole("button", { name: "Continue" })).toBeNull();
     await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("new1"));
-    expect(surfaceTitle()).toBe("Claude Code · supervisor");
+    expect(surfaceTitle()).toBe("supervisor · Claude Code");
     expect(screen.queryByTestId("state-card")).toBeNull();
     expect(within(bar()).getByRole("button", { name: "Pause" })).toBeTruthy();
     // Nothing was paused for it either.
