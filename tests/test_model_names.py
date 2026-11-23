@@ -99,6 +99,7 @@ def test_gemini_worker_launch_selects_the_catalog_model(monkeypatch):
     pytest.param("developer", "claude", "claude-opus-5-5", "Claude Opus 5.5", marks=pytest.mark.variant(
         "Claude must prefer a configured model alias to its catalog default")),
 ])
+@pytest.mark.variant("each row is a provider whose unpinned profile must show the concrete model it launches, never the bare family")
 def test_unpinned_profile_shows_the_launched_model(db, repo, monkeypatch, codex_default_model, launches, detached,
                                                   profile, provider, model, display):
     from types import SimpleNamespace

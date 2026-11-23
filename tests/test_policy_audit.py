@@ -152,6 +152,7 @@ def test_unpinned_codex_policy_checks_the_launch_context(db, repo, tmp_path, mon
     assert agents.model_problem(profile.name, ws, agent=worker, profile=profile, m=None) is None
 
 
+@pytest.mark.variant("a reviewer resolved to a concrete Codex model must still fit under the worker cap")
 def test_resolved_codex_reviewer_can_run_under_the_worker_cap(db, repo, monkeypatch, org_policy):
     ws = workspaces.adopt_root(db, str(repo))
     caller = Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "idle", "", None, 1)

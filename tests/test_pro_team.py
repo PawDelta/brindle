@@ -127,6 +127,7 @@ def test_undeclared_model_is_denied_when_a_list_is_set(team):
     pytest.param("antigravity", ("claude-sonnet-5-5",), "developer", marks=pytest.mark.variant(
         "an unknown default must be refused while the next allowed profile can run")),
 ])
+@pytest.mark.variant("each row is an allowlist case: allowed, refused, or unknown default")
 def test_unpinned_model_policy_and_launch(db, repo, team, monkeypatch, launches, detached,
                                          provider, allowed, expected):
     from types import SimpleNamespace
