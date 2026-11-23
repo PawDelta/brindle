@@ -716,6 +716,9 @@ def get_debug(db: DB, request: Request) -> Any:
 
 
 @_json
+@profiles.reading()
+@agents.reading_launch_environment()
+@license.reading()
 def get_routing(db: DB, request: Request) -> Any:
     """Each tier's profiles (and the model and agent each runs), the reviewer
     and the excluded providers, with the scope each comes from, every profile
@@ -729,11 +732,10 @@ def get_routing(db: DB, request: Request) -> Any:
     ``signed_in`` as an earlier probe found it, else as can't-be-told,
     true)."""
     from brindle import providers
-    from brindle.pro import license
 
     if request.query_params.get("learned") != "0":
         return _routing(db, request, learn=True)
-    with providers.no_sign_in_probes(), license.reading():
+    with providers.no_sign_in_probes():
         return _routing(db, request, learn=False)
 
 
@@ -864,6 +866,9 @@ def get_storage(db: DB, request: Request) -> Any:
 
 
 @_json
+@profiles.reading()
+@agents.reading_launch_environment()
+@license.reading()
 def get_doctor(db: DB, request: Request) -> Any:
     return [dataclasses.asdict(c) for c in doctor.checks(_repo(request), db=db)]
 

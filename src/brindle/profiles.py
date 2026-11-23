@@ -32,7 +32,10 @@ from __future__ import annotations
 import json
 import logging
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
+from functools import wraps
 from importlib import resources
 from pathlib import Path
 
@@ -41,6 +44,38 @@ from brindle.config import CONFIG_DIR, brindle_home, user_profiles_dir
 
 
 log = logging.getLogger(__name__)
+
+_request_reads: ContextVar[dict | None] = ContextVar("profile_request_reads", default=None)
+
+
+@contextmanager
+def reading():
+    """Share profile text and resolution within a read, never across requests.
+
+    Routing and diagnostics visit the same profiles through config, policy,
+    lint and display helpers. Reuse the files and profiles already read;
+    the next read sees edits to profiles, connections and org settings.
+    """
+    token = _request_reads.set({})
+    try:
+        yield
+    finally:
+        _request_reads.reset(token)
+
+
+def _request_cached(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        memo = _request_reads.get()
+        if memo is None:
+            return fn(*args, **kwargs)
+        key = fn, args, tuple(sorted(kwargs.items()))
+        if key not in memo:
+            memo[key] = fn(*args, **kwargs)
+        return memo[key]
+
+    return wrapped
+
 
 _BUILTIN_PACKAGES = ("brindle.builtin_agents", "brindle.builtin_rules")
 # The built-in profiles and rule packs as freeze_builtins() read them, by
@@ -561,6 +596,7 @@ def _read(name: str, repo_root: str | None) -> tuple[str, str] | None:
     return found
 
 
+@_request_cached
 def _read_exact(name: str, repo_root: str | None) -> tuple[str, str] | None:
     """The text of ``<name>.md`` and where it came from, by lookup order:
     the repo, the user, the org's library, the built-ins. A pinned org
@@ -676,6 +712,7 @@ def _resolve(name: str, repo_root: str | None, chain: tuple[str, ...] = ()) -> t
     return merged, "\n\n".join(p for p in (parent_body.strip(), body.strip()) if p)
 
 
+@_request_cached
 def _load(name: str, repo_root: str | None) -> Profile:
     if name in model_names.ALIASES and _read_exact(name, repo_root) is None:
         name = model_names.ALIASES[name]     # an old built-in id: load the renamed profile
@@ -689,6 +726,7 @@ def _load(name: str, repo_root: str | None) -> Profile:
     return connections.apply(profile, repo_root)
 
 
+@_request_cached
 def load_profile(name: str, repo_root: str | None = None) -> Profile:
     """The profile in ``<name>.md``, with its ``extends`` parent folded in.
     An old built-in id loads its renamed profile, and that is the ``name``
