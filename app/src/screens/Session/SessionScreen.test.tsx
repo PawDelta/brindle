@@ -221,6 +221,30 @@ const surface = () => screen.getByTestId("provider-surface");
 const title = () => screen.getByTestId("surface-title").textContent;
 
 describe("SessionScreen", () => {
+  it("labels the session header with the agent role and model display", async () => {
+    const reviewer = {
+      ...worker.agents![0],
+      id: "review-agent",
+      profile: "review.gpt",
+      provider: "codex",
+      role: "reviewer",
+      model_display: "GPT‑6.1 Sol",
+      status: "idle",
+    };
+    mount({ sup1: live, "review-agent": live }, {
+      workspaces: [root, { ...worker, agents: [reviewer] }],
+    }, undefined, "sup1", ["sup1", "review-agent"]);
+
+    pick("review-agent");
+    await waitFor(() => expect(shownAgent()).toBe("review-agent"));
+    const title = screen.getByTestId("surface-title").firstElementChild as HTMLElement;
+    expect(title.dataset.role).toBe("reviewer");
+    expect(title.dataset.modelDisplay).toBe("GPT‑6.1 Sol");
+    expect(title.textContent).not.toContain("review.gpt");
+    expect(screen.getByTestId("agent-id").textContent).toBe("review-agent");
+    expect(screen.getByTestId("session-status").dataset.state).toBe("idle");
+  });
+
   it.each(["rewound", "dismissed"])("drops a %s selection from the surface and agent menu without a stopped badge or worker tab", async (reason) => {
     const past = { ...worker.agents![0], status: reason === "rewound" ? "rewound" : "exited", dismissed_at: reason === "dismissed" ? 1 : null };
     mount({ sup1: live }, { workspaces: [root, { ...worker, agents: [past] }] });
@@ -377,12 +401,12 @@ describe("SessionScreen", () => {
     expect(diffReads).toBe(stoppedReads);
   });
 
-  it("shows the selected agent's pane, bare, named by provider and agent, through a tmux client on its window, and types into it as is", async () => {
+  it("shows the selected agent's pane, bare, named by role and model, through a tmux client on its window, and types into it as is", async () => {
     const child = { ...worker.agents![0], id: "c1", parent_id: "w1", provider: "codex", window: windowOf("c1") };
     const panes = { sup1: live, w1: { ...live, screen: "worker" }, c1: { ...live, screen: "reviewer" } };
     const { daemon, term } = mount(panes, { workspaces: [{ ...root, agents: [{ ...root.agents![0], status: "starting" }] }, { ...worker, agents: [...worker.agents!, child] }], inbox: [permissionInTerminal, permission] }, undefined, "sup1", ["sup1", "w1", "c1"]);
     await waitFor(() => expect(shownAgent()).toBe("sup1"));
-    expect(title()).toBe("Claude Code · supervisor");
+    expect(title()).toBe("supervisor · Claude Code");
     // The provider session alone fills the view: no panel beside it.
     expect(screen.queryByRole("complementary")).toBeNull();
 
@@ -414,7 +438,7 @@ describe("SessionScreen", () => {
     pick("w1");
     await waitFor(() => expect(term().written).toBe("\x1b[?1049h\x1b[H\x1b[2Jworker\x1b[2;3H"));
     expect(shownAgent()).toBe("w1");
-    expect(title()).toBe("Claude Code · ls");
+    expect(title()).toBe("developer · Claude Code");
     expect(view.closed).toBe(true);
     expect(daemon.viewers("w1")).toHaveLength(1);
     for (const id of ["c1", "sup1", "w1"] as const) {
@@ -424,7 +448,7 @@ describe("SessionScreen", () => {
       const open = daemon.views.filter((v) => !v.closed);
       expect(open).toHaveLength(1);
       expect(open[0]).toMatchObject({ pane: id, at: { server: "brindle", target: windowOf(id) } });
-      if (id === "c1") expect(title()).toBe("Codex · claude");
+      if (id === "c1") expect(title()).toBe("developer · Codex");
     }
   });
 
