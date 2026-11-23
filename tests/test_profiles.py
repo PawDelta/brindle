@@ -87,6 +87,7 @@ def test_default_agent_composition_preserves_the_existing_profile(agent, model):
     assert compose(agent, model) == load_profile(model)
 
 
+@pytest.mark.variant("a custom agent must never widen a provider's allowed tools")
 def test_custom_agent_cannot_widen_the_provider_tools(tmp_path, monkeypatch):
     library = tmp_path / ".brindle" / "agents"
     library.mkdir(parents=True)

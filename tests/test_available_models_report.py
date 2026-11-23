@@ -63,6 +63,7 @@ def test_org_entitlement_reports_only_listed_model_ids(report_client, backend, m
     }
 
 
+@pytest.mark.variant("a member without an org must never send a model report")
 def test_personal_entitlement_omits_model_report(report_client, backend, monkeypatch):
     client, queries = report_client
     monkeypatch.setattr(doctor, "signed_in_providers", lambda: ["codex"])
@@ -82,6 +83,7 @@ def test_personal_entitlement_omits_model_report(report_client, backend, monkeyp
     pytest.param(False, True, marks=pytest.mark.variant(
         "an empty Ollama catalog cannot clear a previous Codex report after a failed Codex probe")),
 ])
+@pytest.mark.variant("an empty catalog must clear the org's report while an unreadable one must keep it")
 def test_empty_catalog_clears_but_unreadable_catalog_preserves_report(
     report_client, backend, monkeypatch, available, ollama,
 ):
@@ -138,6 +140,7 @@ def test_successful_provider_update_refreshes_model_report(report_client, backen
     pytest.param(True, marks=pytest.mark.variant(
         "an account switch before the lock must not send the new credentials to the previous issuer")),
 ])
+@pytest.mark.variant("a CLI update must refresh the report from the sign-in read under the lock, not a stale one")
 def test_provider_update_refreshes_the_signin_loaded_under_the_lock(
     report_client, backend, monkeypatch, issuer_changed,
 ):

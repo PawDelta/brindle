@@ -95,6 +95,7 @@ def test_learner_chooses_among_the_reviewers_that_can_run(env, db):
     (True, False, "partial", "dev.claude-sonnet"),
     (True, False, "recorded", "dev.claude-sonnet"),
 ])
+@pytest.mark.variant("each row is a distinct job size and pool where the writer's own model must go last")
 def test_review_size_pool_avoids_writers_model_when_possible(env, db, tmp_path, monkeypatch,
                                                            alternative, small, models, expected):
     ws = Workspace("ws1", str(tmp_path), "feat", "branch", "feat", "main", str(tmp_path), None, "", 0)
@@ -139,6 +140,7 @@ def test_review_size_pool_avoids_writers_model_when_possible(env, db, tmp_path, 
                                            db=db, ws=ws, worker=writer)[0] == expected
 
 
+@pytest.mark.variant("a reviewer on a coding model must launch with reviewer instructions, never developer ones")
 def test_request_review_launches_developer_model_with_reviewer_role(env, db, worker_ws, monkeypatch):
     launched = []
 

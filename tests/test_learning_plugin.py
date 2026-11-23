@@ -81,6 +81,7 @@ def test_outcomes_reach_the_cloud_learner(db, ws, monkeypatch):
     ("dev.gpt", "reviewer", "review.gpt"),
     ("dev.claude-opus", "reviewer", "dev.claude-opus"),
 ])
+@pytest.mark.variant("each row is a distinct agent and model pairing the learner must record correctly")
 def test_composed_agent_recording(db, ws, monkeypatch, model, agent, expected):
     p = Recorder()
     install(monkeypatch, p)
