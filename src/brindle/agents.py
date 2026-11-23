@@ -380,6 +380,33 @@ def managed(repo_root: str):
 
 _UNREAD = object()   # a ``managed`` argument not passed: read the org's settings now
 
+_reading_environment: ContextVar[dict | None] = ContextVar("reading_launch_environment", default=None)
+
+
+@contextmanager
+def reading_launch_environment():
+    """Read provider/model readiness without preparing a worker's git identity.
+
+    Settings diagnostics and routing inspect the launch credentials, but do
+    not need the author/committer fallback that runs git for every profile.
+    Candidates in the same tmux session also share its inherited environment
+    for this read; a later request or real launch reads it again.
+    """
+    token = _reading_environment.set({})
+    try:
+        yield
+    finally:
+        _reading_environment.reset(token)
+
+
+def _inherited_environment(session: str) -> dict[str, str]:
+    memo = _reading_environment.get()
+    if memo is None:
+        return tmux.inherited_env(session)
+    if session not in memo:
+        memo[session] = tmux.inherited_env(session)
+    return dict(memo[session])
+
 
 _KEYCHAIN_HELPER_PLATFORM = sys.platform == "darwin"     # where git's default credential helper can raise a dialog
 
@@ -1110,8 +1137,9 @@ def _record_env_drops(agent: Agent, ws: Workspace, env, credentials, allow, deny
 def _window_environment(agent: Agent, ws: Workspace, m=_UNREAD):
     if m is _UNREAD:
         m = managed(ws.repo_root)
+    cache_key = m, _reading_environment.get() is not None
     cached = getattr(agent, "_pane_environment", None)
-    if cached is not None and cached[0] == m:
+    if cached is not None and cached[0] == cache_key:
         return cached[1]
     # A profile's env_allow (brindle Pro guardrails): the pane starts with
     # only those variables, brindle's own and the provider's sign-in.
@@ -1119,7 +1147,8 @@ def _window_environment(agent: Agent, ws: Workspace, m=_UNREAD):
     allow = guarded.env_allow if guarded is not None else None
     # An org's deny_personal_keys (Enterprise): the person's own keys never
     # reach the pane, kept or not.
-    env = agent_env(ws, agent.id, agent, m)
+    env = (agent_env(ws, agent.id, agent, m, identity=False) if _reading_environment.get() is not None
+           else agent_env(ws, agent.id, agent, m))
     credentials = secrets.agent_credentials(agent.provider, agent.profile, ws.repo_root)
     # Keys stored with `brindle keys` reach this window's env only (never the
     # tmux server's), unless the environment already has the name or an org's
@@ -1153,7 +1182,7 @@ def _window_environment(agent: Agent, ws: Workspace, m=_UNREAD):
     from brindle import login_shell_env
 
     if network := login_shell_env.for_launch(agent.provider, env):
-        inherited = tmux.inherited_env(ws.tmux_session)
+        inherited = _inherited_environment(ws.tmux_session)
         env = {**{k: v for k, v in network.items() if not inherited.get(k)}, **env}
     credentials = credentials | login_shell_env.kept(agent.provider)
     # The pane keeps its provider's credentials and, for Claude Code, its TLS
@@ -1162,14 +1191,14 @@ def _window_environment(agent: Agent, ws: Workspace, m=_UNREAD):
     result = env, secrets.pane_keep(agent.provider, credentials), allow, deny, org_env
     # Resolve stored/org keys once for this launch: catalog, health identity
     # and pane must use the same key helper result, without repeated delays.
-    agent._pane_environment = m, result
+    agent._pane_environment = cache_key, result
     return result
 
 
 def _effective_window_env(agent: Agent, ws: Workspace, m=_UNREAD) -> dict[str, str]:
     env, keep, allow, deny, org_env = _window_environment(agent, ws, m)
     agent_env, enforce = _agent_env_policy(ws)
-    inherited = tmux.inherited_env(ws.tmux_session)
+    inherited = _inherited_environment(ws.tmux_session)
     with secrets.org_key(org_env):
         env = {**env, **secrets.proxy_exempt(env)}
         unset = secrets.pane_unset({*inherited, *env}, keep=secrets.launch_keep(keep, env), allow=allow,
