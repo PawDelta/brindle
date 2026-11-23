@@ -356,7 +356,7 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
       >
         <Dot tone={tone} className={stage ? `st-${STAGE_CLASS[stage]}` : ""} />
         <span className="min-w-0 flex-1 truncate text-xs text-ink">
-          <span className="text-ink-3" data-testid="agent-role" data-size={size ? a.weight! : undefined} data-model-name={model || undefined}>
+          <span className="text-ink-3" data-testid="agent-role" data-role={role} data-size={size ? a.weight! : undefined} data-model-name={model || undefined}>
             {role}
             {model && <span className="text-ink-3">{` · ${model}`}</span>}
           </span>
