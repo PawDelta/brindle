@@ -659,33 +659,41 @@ def refresh(client: Client, store, seen: dict | None = None, *, now: float | Non
     read before deciding to refresh: if another process rotated them since,
     its result is used instead of spending a refresh token again."""
     with refresh_lock():
-        t = time.time() if now is None else now
         cur = store.load() or {}
         if not cur.get("refresh_token"):
             raise AuthError("not logged in to brindle Pro", code="invalid_grant", revoked=True)
         elsewhere = seen is not None and cur.get("refresh_token") != seen.get("refresh_token")
         if elsewhere:
+            t = time.time() if now is None else now
             ent = _usable_entitlement(cur, client.base, t)
             if ent is not None:
                 license.clear_cache()
                 return ent
-        fresh_access = bool(cur.get("access_token")) and \
-            float(cur.get("access_expires_at") or 0) > t + ACCESS_SLACK
-        rotated = False
-        if not fresh_access or (force and not elsewhere):
-            cur, rotated = _rotate(client, store, cur, t, adopt=True), True
-        org = cur.get("org_id")
-        got = _fetch_entitlement(client, cur["access_token"], now, org)
-        if got == 401 and not rotated:
-            cur = _rotate(client, store, cur, time.time() if now is None else now, adopt=True)
-            got = _fetch_entitlement(client, cur["access_token"], now, org)
-        if got == 401:
-            raise AuthError("backend refused a fresh access token", code="invalid_token")
-        if license.paid(cur.get("entitlement")) and not license.paid(got[0]):
-            cur["subscription_ended"] = True     # told once, by license.take_ended_notice
-        cur["entitlement"] = got[0]
-        store.save(cur)
+        ent = _refresh_locked(client, store, cur, now, force=force and not elsewhere, adopt=True)
     license.clear_cache()
+    return ent
+
+
+def _refresh_locked(client: Client, store, cur: dict, now: float | None, *,
+                    force: bool = False, adopt: bool = False) -> license.Entitlement:
+    """Fetch and save an entitlement for the credentials selected under the refresh lock."""
+    t = time.time() if now is None else now
+    fresh_access = bool(cur.get("access_token")) and \
+        float(cur.get("access_expires_at") or 0) > t + ACCESS_SLACK
+    rotated = force or not fresh_access
+    if rotated:
+        cur = _rotate(client, store, cur, t, adopt=adopt)
+    org = cur.get("org_id")
+    got = _fetch_entitlement(client, cur["access_token"], now, org)
+    if got == 401 and not rotated:
+        cur = _rotate(client, store, cur, time.time() if now is None else now, adopt=adopt)
+        got = _fetch_entitlement(client, cur["access_token"], now, org)
+    if got == 401:
+        raise AuthError("backend refused a fresh access token", code="invalid_token")
+    if license.paid(cur.get("entitlement")) and not license.paid(got[0]):
+        cur["subscription_ended"] = True     # told once, by license.take_ended_notice
+    cur["entitlement"] = got[0]
+    store.save(cur)
     return got[1]
 
 
@@ -719,9 +727,14 @@ def refresh_after_provider_update() -> None:
         return
     try:
         store = credentials.default_store()
-        record = store.load() or {}
-        if record.get("org_id") and record.get("refresh_token"):
-            refresh(Client(record.get("base_url")), store, record)
+        with refresh_lock():
+            record = store.load() or {}
+            if not record.get("org_id") or not record.get("refresh_token"):
+                return
+            client = Client(record.get("base_url"))
+            # Keep the fetch bound to this issuer if an older client writes outside the lock.
+            _refresh_locked(client, store, record, None)
+        license.clear_cache()
     except Exception:  # noqa: BLE001 - an optional report must not fail an install
         log.debug("couldn't refresh the entitlement after the provider update")
 

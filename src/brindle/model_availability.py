@@ -194,8 +194,8 @@ class ModelAvailabilityChecker:
 def reportable_models(signed_in: list[str]) -> dict[str, list[str]] | None:
     """A machine-level snapshot for an org entitlement refresh.
 
-    None leaves the previous report alone when no catalog could be read.
-    An empty snapshot means a catalog answered successfully with no models.
+    None leaves the previous report alone when the result is inconclusive.
+    An empty snapshot requires a complete, empty answer from every probe.
     """
     from brindle import provider_homes, providers, providers_install
 
@@ -210,18 +210,19 @@ def reportable_models(signed_in: list[str]) -> dict[str, list[str]] | None:
     # The static Claude catalog has no current-model marker, and discovery
     # cannot determine the account's models.
     report = {}
-    empty_catalog = False
+    empty_snapshot = bool(requests)
     for name, request in requests.items():
         try:
             catalog = _isolated_discovery(request, PROVISIONING_TIMEOUT)
         except Exception:  # A provider's catalog must never break entitlement refresh.
+            empty_snapshot = False
             continue
         ids = sorted(model for model in catalog.models if len(model) <= 128 and _MODEL_ID.fullmatch(model))
         if ids:
             report[name] = ids[:64]
-        if catalog.complete and not catalog.models:
-            empty_catalog = True
-    return report if report or empty_catalog else None
+        if not catalog.complete or catalog.models:
+            empty_snapshot = False
+    return report if report or empty_snapshot else None
 
 
 def provisioning_context(provider: str, cwd: str, env: Mapping[str, str]) -> str:

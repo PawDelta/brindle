@@ -2,6 +2,7 @@
 
 import json
 import time
+from contextlib import contextmanager
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
@@ -75,15 +76,22 @@ def test_personal_entitlement_omits_model_report(report_client, backend, monkeyp
     assert queries == [{"providers": ["codex"]}]
 
 
-@pytest.mark.parametrize("available", [True, False])
+@pytest.mark.parametrize("available,ollama", [
+    (True, False),
+    (False, False),
+    pytest.param(False, True, marks=pytest.mark.variant(
+        "an empty Ollama catalog cannot clear a previous Codex report after a failed Codex probe")),
+])
 def test_empty_catalog_clears_but_unreadable_catalog_preserves_report(
-    report_client, backend, monkeypatch, available,
+    report_client, backend, monkeypatch, available, ollama,
 ):
     client, queries = report_client
     monkeypatch.setattr(doctor, "signed_in_providers", lambda: ["codex"])
-    monkeypatch.setattr(providers, "which_cli", lambda name: None)
+    monkeypatch.setattr(providers, "which_cli", lambda name: "/bin/ollama" if ollama and name == "ollama" else None)
 
     def discover(request, budget):
+        if request.provider == "native":
+            return ma.Catalog(frozenset(), "ollama", authoritative=True)
         if not available:
             raise OSError("discovery failed")
         return ma.Catalog(frozenset(), "codex")
@@ -123,3 +131,48 @@ def test_successful_provider_update_refreshes_model_report(report_client, backen
 
     [query] = queries
     assert json.loads(query["available_models"][0]) == {"codex": ["gpt-new"]}
+
+
+@pytest.mark.parametrize("issuer_changed", [
+    False,
+    pytest.param(True, marks=pytest.mark.variant(
+        "an account switch before the lock must not send the new credentials to the previous issuer")),
+])
+def test_provider_update_refreshes_the_signin_loaded_under_the_lock(
+    report_client, backend, monkeypatch, issuer_changed,
+):
+    client, queries = report_client
+    store = credentials.default_store()
+    now = time.time()
+    old = auth._token_set(backend.issue(), now)
+    old_issuer = "https://previous.example.test/api/brindle/v1" if issuer_changed else client.base
+    store.save({**old, "org_id": "old_org" if issuer_changed else ORG, "base_url": old_issuer})
+    issued = backend.issue()
+    _, body = backend._entitlement({}, {"Authorization": "Bearer " + issued["access_token"]})
+    new = {**auth._token_set(issued, now), "org_id": ORG, "base_url": client.base,
+           "entitlement": body["entitlement"]}
+    lock = auth.refresh_lock
+
+    @contextmanager
+    def after_other_refresh():
+        store.save(new)
+        with lock():
+            yield
+
+    def previous_issuer_request(*args, **kwargs):
+        pytest.fail("provider update sent an entitlement request to the previous issuer")
+
+    previous_client = SimpleNamespace(base=old_issuer, get=previous_issuer_request)
+    monkeypatch.setattr(auth, "refresh_lock", after_other_refresh)
+    monkeypatch.setattr(auth, "Client", lambda base: client if base == client.base else previous_client)
+    monkeypatch.setattr(doctor, "signed_in_providers", lambda: ["codex"])
+    monkeypatch.setattr(providers, "which_cli", lambda name: None)
+    monkeypatch.setattr(ma, "_isolated_discovery",
+                        lambda request, budget: ma.Catalog(frozenset({"gpt-new"}), "codex"))
+
+    auth.refresh_after_provider_update()
+
+    [query] = queries
+    assert query["org_id"] == [ORG]
+    assert json.loads(query["available_models"][0]) == {"codex": ["gpt-new"]}
+    assert store.load()["refresh_token"] == new["refresh_token"]
