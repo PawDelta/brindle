@@ -595,13 +595,15 @@ const worksLikeLabel = (w: WorksLike) => agentLabel(w);
 /* The add-an-agent form (and the same form to edit one of the person's
    own): one column, Name, What it's for, Instructions, Rules, then the two
    defaults behind Change. Soft-filled inputs on the page ground. */
-function AgentForm({ editing, created, loading, draft, setDraft, rules, taken, pinned, busy, error, choicesFor, info, missing, onSave, onCancel, onNavigate }: {
+function AgentForm({ editing, created, loading, roleUnknown, draft, setDraft, rules, taken, pinned, busy, error, choicesFor, info, missing, onSave, onCancel, onNavigate }: {
   /* The agent being edited, or null for a new one. */
   editing: AgentRow | null;
   /* A new agent whose profile is written but whose own models aren't yet: Save retries only those. */
   created: boolean;
   /* Its saved instructions and role are being read: the form waits for them. */
   loading: boolean;
+  /* The read failed: its saved role isn't known, so its role and models can't be changed here. */
+  roleUnknown: boolean;
   draft: Draft;
   setDraft(d: Draft): void;
   rules: RulePackInfo[];
@@ -707,6 +709,10 @@ function AgentForm({ editing, created, loading, draft, setDraft, rules, taken, p
           <p className="text-[13px] text-ink-2" data-testid="defaults" data-works-like={draft.worksLike} data-model-mode={pinned ? "own" : mode}>
             {pinned ? (
               <>Runs its own model, {pinned.display}, whatever the job size.</>
+            ) : roleUnknown ? (
+              <span data-testid="role-unknown">
+                Its model {mode === "follows" ? "follows the job size" : `follows the job size, except ${ownSizes.map((s) => KIND_INFO[s].name).join(", ")}`}. What it works like couldn't be read, so its role and models can't be changed here now.
+              </span>
             ) : (
               <>
                 Works like a {worksLikeLabel(draft.worksLike)}, and its model{" "}
@@ -718,7 +724,7 @@ function AgentForm({ editing, created, loading, draft, setDraft, rules, taken, p
               </>
             )}
           </p>
-          {change && !pinned && !loading && (
+          {change && !pinned && !loading && !roleUnknown && (
             <div className="flex flex-col gap-3" data-testid="change">
               <div className="flex flex-wrap items-center gap-s1">
                 <span className="w-[110px] text-sm text-ink-2">Works like</span>
@@ -858,6 +864,8 @@ interface FormState {
   created?: boolean;
   /* Reading an edited agent's saved instructions and role. */
   loading?: boolean;
+  /* That read failed: its role and models stay as saved. */
+  roleUnknown?: boolean;
   /* What was saved, to send only what changed: instructions null when they couldn't be read. */
   base?: { instructions: string | null; worksLike: WorksLike };
 }
@@ -1007,7 +1015,8 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
         const saved = typeof d.instructions === "string" ? d.instructions : null;
         updateForm(id, (f) => ({ ...f, loading: false, draft: { ...f.draft, instructions: saved ?? "", worksLike: like }, base: { instructions: saved, worksLike: like } }));
       },
-      () => updateForm(id, (f) => ({ ...f, loading: false })),
+      // Not read: what it works like stays unknown, so its role and models aren't offered (only new instructions go).
+      () => updateForm(id, (f) => ({ ...f, loading: false, roleUnknown: true })),
     );
   };
 
@@ -1104,6 +1113,7 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
         editing={editing}
         created={!!form.created}
         loading={!!form.loading}
+        roleUnknown={!!form.roleUnknown}
         draft={form.draft}
         setDraft={(draft) => setForm((f) => f && { ...f, draft })}
         rules={rules}

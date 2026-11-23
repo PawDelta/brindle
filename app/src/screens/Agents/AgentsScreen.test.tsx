@@ -417,9 +417,12 @@ describe("agents tab", () => {
     const tidy = rp("tidy-dev", "claude", null, "medium", { kind: "agent", builtin: false, description: "Tidies code" });
     // Every read of the agent is answered as the daemon had it then, but held until released.
     const held: Array<() => void> = [];
+    let broken = false;
     const hold = (d: FakeDaemon): typeof globalThis.fetch => (input, init) => {
       if (init?.method || !String(input).includes("/profiles/tidy-dev")) return d.fetch(input, init);
-      const answer = d.fetch(input, init);
+      const answer = broken
+        ? Promise.resolve(new Response(JSON.stringify({ error: { code: "unavailable", message: "the daemon is busy" } }), { status: 503, headers: { "content-type": "application/json" } }))
+        : d.fetch(input, init);
       return new Promise((resolve) => held.push(() => resolve(answer)));
     };
     const { daemon } = setup(
@@ -451,6 +454,20 @@ describe("agents tab", () => {
     await waitFor(() => expect((within(form).getByLabelText("Instructions") as HTMLTextAreaElement).value).toBe("Newer words."));
     expect(within(form).getByTestId("defaults").dataset.worksLike).toBe("reviewer");
     expect((within(form).getByRole("button", { name: "Change" }) as HTMLButtonElement).disabled).toBe(false);
+
+    // A read that fails leaves its role unknown: its role and models stay closed, and saving sends neither.
+    edit();
+    broken = true;
+    edit();
+    await waitFor(() => expect(held.length).toBe(3));
+    held[2]();
+    const again = within(agent("tidy-dev")).getByRole("region", { name: "Edit tidy-dev" });
+    await waitFor(() => expect(within(again).queryByTestId("role-unknown")).toBeTruthy());
+    expect(within(again).queryByRole("button", { name: "Change" })).toBeNull();
+    fireEvent.click(within(again).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(daemon.requests.some((r) => r.method === "PUT" && r.path === "/profiles/tidy-dev")).toBe(true));
+    expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/profiles/tidy-dev")?.body).toEqual({ repo: REPO, description: "Tidies code", rules: [] });
+    expect(puts(daemon)).toEqual([]);
   });
 
   it("agents: clearing a size's Edit instructions sends null, the daemon refuses blank text, and a reload shows them empty", async () => {
