@@ -209,6 +209,8 @@ def record_payload(key: OrgKey, identity: str, task: TaskInfo, outcome: Outcome,
     ``signals`` is the level the server said it takes: ``SIGNAL_KEYS`` go
     from ``SIGNALS_VERSION``, an "interrupted" event and ``STOP_KEYS`` from
     ``STOP_SIGNALS`` (below it an "interrupted" event is sent as nothing)."""
+    # TaskInfo.agent stays local until the server advertises support for it.
+    # Build an explicit payload: older servers reject unknown keys.
     level = int(signals)
     if outcome.event == "interrupted" and level < STOP_SIGNALS:
         return None
