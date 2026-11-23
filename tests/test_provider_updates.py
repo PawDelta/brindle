@@ -207,16 +207,70 @@ def test_failed_staged_install_preserves_old_version_and_one_notice(db, machine,
 
 
 def test_refused_org_policy_leaves_updates_unlocked(db, machine, monkeypatch):
-    ent = SimpleNamespace(org_id="org_test", sub="person", plan="enterprise",
+    ent = SimpleNamespace(org_id="org_refused", sub="person", plan="enterprise",
                           features=["analysis_docs_enterprise"])
     monkeypatch.setattr(license, "current", lambda **kwargs: ent)
     monkeypatch.setattr(analysis_docs, "_session", lambda: (object(), object()))
     monkeypatch.setattr(auth, "authed", lambda *args: (403, {"error": "forbidden"}))
 
-    assert updates.setting(refresh=True) == {"mode": "automatic", "locked": False}
-    status, settings = _send("PATCH", "/v1/user-settings", {updates.SETTING: "ask"})
-    assert status == 200
-    assert settings[updates.SETTING] == "ask" and not settings["provider_cli_updates_locked"]
+    policy = {
+        "switches": {}, "groups": {}, updates.SETTING: {"mode": "automatic", "locked": True},
+    }
+    analysis_policy.save_cached(ent.org_id, policy)
+    config.set_user(updates.SETTING, "ask")
     machine.sweep()
     assert machine.installed() == "0.170.0"
-    assert len(updates.inbox_items(db)) == 1
+    [item] = updates.inbox_items(db)
+    assert item.action is not None
+    status, settings = _send("GET", "/v1/user-settings")
+    assert status == 200
+    assert settings[updates.SETTING] == "ask" and not settings["provider_cli_updates_locked"]
+
+    assert _send("PATCH", "/v1/user-settings", {updates.SETTING: "off"})[0] == 200
+    config.forget_user(updates.SETTING)
+    assert updates.setting() == {"mode": "automatic", "locked": False}
+    assert analysis_policy.load_cached(ent.org_id) == policy
+
+    monkeypatch.setattr(auth, "authed", lambda *args: (200, policy))
+    assert updates.setting(refresh=True)["locked"]
+    assert _send("GET", "/v1/user-settings")[1]["provider_cli_updates_locked"]
+
+
+@pytest.mark.parametrize("mode", [
+    "automatic",
+    pytest.param("ask", marks=pytest.mark.variant("a renewed offer needs a fresh Inbox approval")),
+])
+def test_same_failed_release_waits_for_live_worker_after_next_check(db, machine, monkeypatch, tmp_path, mode):
+    config.set_user(updates.SETTING, mode)
+    installer = installs._run_installer
+
+    def unavailable(*args, **kwargs):
+        raise installs.InstallError("download unavailable")
+
+    monkeypatch.setattr(installs, "_run_installer", unavailable)
+    machine.sweep()
+    if mode == "ask":
+        [original] = updates.inbox_items(db)
+        assert _send("POST", original.action.path)[0] == 200
+        machine.sweep()
+    [failure] = updates.inbox_items(db)
+    assert failure.action is None
+    monkeypatch.setattr(installs, "_run_installer", installer)
+
+    path = str(tmp_path)
+    ws = Workspace("ws", path, "main", "main", "main", "main", path, 9000, "session", machine.now)
+    db.add_workspace(ws)
+    db.add_agent(Agent("worker", ws.id, "developer", "codex", None, "assign", "idle", "@1", None, machine.now))
+    live = True
+    monkeypatch.setattr(tmux, "window_alive", lambda *args, **kwargs: live)
+    machine.now += updates.DAY
+    machine.sweep()
+    assert machine.installed() == "0.170.0"
+    if mode == "ask":
+        [renewed] = updates.inbox_items(db)
+        assert renewed.action is not None
+        assert _send("POST", original.action.path)[0] == 409
+        assert _send("POST", renewed.action.path)[0] == 200
+    live = False
+    machine.sweep()
+    assert machine.installed() == "0.171.0"

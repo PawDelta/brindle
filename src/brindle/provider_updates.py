@@ -50,20 +50,20 @@ def setting(*, refresh: bool = False) -> dict:
         ent = None
     org = DEFAULT_POLICY
     if ent and ent.org_id and can_govern(ent):
-        try:
-            if refresh:
-                from brindle.pro import analysis_docs
+        if refresh:
+            from brindle.pro import analysis_docs
 
+            try:
                 client, store = analysis_docs._session()
-                policy = analysis_policy.fetch(ent.org_id, client, store)
-                current = license.current(refresh=False)
-                if (current.org_id, current.sub) != (ent.org_id, ent.sub):
-                    return setting()
-            else:
-                policy = analysis_policy.load_cached(ent.org_id)
-            org = org_setting(policy)
-        except Exception:  # Account policy is optional for the member setting.
-            log.debug("Couldn't read the organization provider update policy")
+                analysis_policy.fetch(ent.org_id, client, store)
+            except Exception:  # Account policy is optional for the member setting.
+                analysis_policy.provider_updates_read_failed(ent.org_id, ent.sub)
+                log.debug("Couldn't read the organization provider update policy")
+            return setting()  # use the same cache as Settings, for the current identity
+        try:
+            org = org_setting(analysis_policy.load_provider_updates_cached(ent.org_id, ent.sub))
+        except Exception:
+            log.debug("Couldn't read the cached organization provider update policy")
     local = config.user_settings().get(SETTING)
     if not org["locked"] and local in MODES:
         return {"mode": local, "locked": False}
@@ -126,25 +126,28 @@ def _check_release(db: DB, provider: str, now: float) -> bool:
             return False
         if _newer(latest, installed):
             target = latest
-    if db.conn.execute(
-        "UPDATE provider_updates SET target=?, state='pending' "
-        "WHERE provider=? AND target IS NOT ?", (target, provider, target),
-    ).rowcount:
+    with db.tx() as c:
+        changed = c.execute(
+            "UPDATE provider_updates SET target=?, state='pending' "
+            "WHERE provider=? AND (target IS NOT ? OR (target IS NOT NULL AND state='failed'))",
+            (target, provider, target),
+        ).rowcount
+        if changed and target is not None:
+            c.execute("INSERT INTO inbox_occurrences (source, generation) VALUES (?,1) "
+                      "ON CONFLICT(source) DO UPDATE SET generation=generation+1", (f"provider-update:{provider}",))
+    if changed:
         bus.publish(db, "inbox.changed", provider=provider)
     return target is not None
 
 
-def _install_ready(db: DB, provider: str, *, checked_today: bool) -> bool:
+def _install_ready(db: DB, provider: str, mode: str) -> bool:
     if installs.running(provider) or _live(db, provider):
         return False
     # Re-read under the same gate as launches and all other update attempts.
     row = _state(db, provider)
-    mode = setting()["mode"]
-    if row is None or row["target"] is None or mode == "off":
+    if row is None or row["target"] is None or row["state"] == "failed" or mode == "off":
         return False
     if mode == "ask" and row["state"] != "approved":
-        return False
-    if row["state"] == "failed" and not checked_today:
         return False
     path = _path(provider)
     if path is None:
@@ -186,13 +189,15 @@ def sweep(db: DB, *, clock=time.time, refresh_policy: bool = False) -> None:
     if not due and not ready:
         return
     # Read live org policy before checking releases or acting on a deferred update.
-    if not refresh_policy and setting(refresh=True)["mode"] == "off":
-        return
+    if not refresh_policy:
+        mode = setting(refresh=True)["mode"]
+        if mode == "off":
+            return
     checked = [p for p in due if _check_release(db, p, now)]
     for provider in dict.fromkeys(checked + ready):
         try:
             with installs.update_gate(provider, updating=True):
-                updated = _install_ready(db, provider, checked_today=provider in checked)
+                updated = _install_ready(db, provider, mode)
         except BlockingIOError:
             continue
         if updated:
@@ -200,7 +205,10 @@ def sweep(db: DB, *, clock=time.time, refresh_policy: bool = False) -> None:
 
 
 def inbox_items(db: DB) -> list[InboxItemDTO]:
-    rows = list(db.conn.execute("SELECT * FROM provider_updates WHERE target IS NOT NULL"))
+    rows = list(db.conn.execute(
+        "SELECT u.*, COALESCE(o.generation, 0) AS generation FROM provider_updates u "
+        "LEFT JOIN inbox_occurrences o ON o.source='provider-update:' || u.provider WHERE u.target IS NOT NULL",
+    ))
     if not rows or airgap.enabled():
         return []
     mode = setting_fields()[SETTING]
@@ -214,7 +222,7 @@ def inbox_items(db: DB) -> list[InboxItemDTO]:
                                     reason=f"{installs.NAMES[provider]} update failed",
                                     detail=f"brindle kept the previous version. The update to {target} did not complete."))
         elif mode == "ask" and state == "pending":
-            request = f"{provider}:{target}"
+            request = f"{provider}:{target}:{row['generation']}"
             out.append(InboxItemDTO(kind="provider_update", request_id=request,
                                     reason=f"{installs.NAMES[provider]} update available", detail=target,
                                     action=InboxActionDTO(method="POST", path=f"/v1/inbox/{request}/provider-update"),
@@ -223,12 +231,14 @@ def inbox_items(db: DB) -> list[InboxItemDTO]:
 
 
 def approve(db: DB, request: str) -> dict:
-    provider, _, target = request.partition(":")
+    provider, _, version = request.partition(":")
+    target, _, generation = version.partition(":")
     if provider not in installs.UPDATE_PROVIDERS or airgap.enabled() or setting_fields()[SETTING] != "ask":
         raise ServiceError("conflict", "This update is no longer awaiting approval.", 409)
     if not db.conn.execute(
-        "UPDATE provider_updates SET state='approved' WHERE provider=? AND target=? AND state='pending'",
-        (provider, target),
+        "UPDATE provider_updates SET state='approved' WHERE provider=? AND target=? AND state='pending' "
+        "AND CAST(COALESCE((SELECT generation FROM inbox_occurrences WHERE source=?), 0) AS TEXT)=?",
+        (provider, target, f"provider-update:{provider}", generation),
     ).rowcount:
         raise ServiceError("conflict", "This update is no longer awaiting approval.", 409)
     bus.publish(db, "inbox.changed", provider=provider)
