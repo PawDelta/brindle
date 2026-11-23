@@ -8,11 +8,7 @@ from brindle.service.errors import ServiceError
 def read(repo=None):
     ent = _docs_entitlement(repo)
     request = provider_updates.start_policy_request()
-    try:
-        policy = docs_org_api("GET", "policy", repo=repo, admin=True, org_id=ent.org_id)
-    except ServiceError:
-        provider_updates.record_org_policy(ent, request, None)
-        raise
+    policy = docs_org_api("GET", "policy", repo=repo, admin=True, org_id=ent.org_id)
     analysis_policy.save_cached(ent.org_id, policy)
     provider_updates.record_org_policy(ent, request, policy)
     return {"org_id": ent.org_id, "actor_sub": ent.sub, "policy": policy,

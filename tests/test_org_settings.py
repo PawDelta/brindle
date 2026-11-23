@@ -3,6 +3,7 @@ from copy import deepcopy
 
 import pytest
 
+from brindle import provider_updates
 from brindle.pro import analysis_policy, auth, license
 from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401
 from test_daemon_actions import _send
@@ -93,3 +94,16 @@ def test_org_edit_refuses_unauthorised_or_outdated_form(library, case, expected)
         assert code == 200 and saved["policy"]["groups"]["g"]["switches"]["assist"] == "enforced_on"
         assert not saved["policy"]["switches"]
         assert not library.changes[0].get("switches")
+
+
+def test_member_denied_organization_settings_keeps_provider_update_lock(library):
+    library.docs_policy["provider_cli_updates"] = {"mode": "off", "locked": True}
+    login(library, team_claims(plan="enterprise", role="member", features=[
+        "analysis_docs", "analysis_docs_team", "analysis_docs_enterprise"]))
+    license.clear_cache()
+
+    assert provider_updates.setting(refresh=True)["locked"]
+    assert _send("GET", "/v1/org-settings")[0] == 403
+    status, personal = _send("GET", "/v1/user-settings")
+    assert status == 200
+    assert personal["provider_cli_updates"] == "off" and personal["provider_cli_updates_locked"]
