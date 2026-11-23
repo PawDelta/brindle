@@ -443,7 +443,7 @@ createRoot(document.getElementById("root")!).render(
 const OPENS: Record<string, string> = {
   "settings-key": "API keys (optional, for advanced setups)",
   "settings-signin": "Sign in to Codex",
-  "agents-make": 'css:button[aria-label="Medium runs on"]',
+  "agents-make": "New agent",
   "knowledge-record": "Record a decision",
   "new-composer": "Options ▾",
   "new-first-clone": "Clone a repository…",
@@ -519,7 +519,6 @@ const THEN: Record<string, () => void> = {
   "settings-key": () => press('css:button[aria-label="Set GEMINI_API_KEY"]'),
   // The Inbox with the comment thread open: read it and reply without leaving.
   "inbox-thread": () => document.querySelector<HTMLElement>('[data-testid="inbox-row"][data-kind="shared_doc_comment"] [data-testid="row-summary"]')?.click(),
-  "agents-make": () => [...document.querySelectorAll("button")].find((b) => b.textContent?.startsWith("+ Make a custom agent"))?.click(),
   // The settings page scrolled to its foot: the engine's health list.
   "settings-health": () => document.getElementById("engine")?.scrollIntoView({ block: "end" }),
   // The PR diff in its Split layout.
