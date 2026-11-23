@@ -229,6 +229,7 @@ def test_assign_reply_names_the_pick_and_stores_the_weight(db, repo, boss, monke
     pytest.param("", True, "dev.claude-opus", marks=pytest.mark.variant(
         "an unnamed weighted task is done by the repo's default agent, with its own order")),
 ])
+@pytest.mark.variant("an agent task must take its model from the job-size table or its override and record the agent")
 def test_assign_routes_an_agent_by_size(db, repo, boss, monkeypatch, launches, detached, named, override, expected):
     from brindle import cascade
 
@@ -258,6 +259,7 @@ def test_assign_routes_an_agent_by_size(db, repo, boss, monkeypatch, launches, d
     pytest.param("dev.claude-haiku", marks=pytest.mark.variant(
         "a named model with a weight still runs that exact model")),
 ])
+@pytest.mark.variant("naming a model or a pinned profile must bypass agent routing and run exactly as named")
 def test_a_pinned_profile_or_model_runs_as_itself(db, repo, boss, requested):
     path = repo / ".brindle" / "agents" / "custom-opus.md"
     path.parent.mkdir(parents=True, exist_ok=True)

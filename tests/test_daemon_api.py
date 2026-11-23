@@ -1047,6 +1047,7 @@ def test_agent_routing_overrides_merge_clear_and_enforce_policy(repo, db, monkey
     assert config.user_settings()["agent_models"] == before
 
 
+@pytest.mark.variant("editing the legacy reviewer setting must keep driving the Medium review order after A1")
 def test_legacy_reviewer_update_changes_the_medium_override(repo, db):
     from brindle import agents, config
 
@@ -1103,6 +1104,7 @@ def test_shared_legacy_reviewer_edit_cannot_copy_or_hide_behind_a_local_order(re
     pytest.param("local", {"fallbacks": ["review.gpt"]}, ("review.claude-sonnet.high", ["review.gpt"]),
                  marks=pytest.mark.variant("a local pin controls only the primary, not shared fallbacks")),
 ])
+@pytest.mark.variant("a shared legacy reviewer edit must use the effective pinned model, not the raw profile")
 def test_shared_legacy_reviewer_edit_uses_effective_pinned_fields(repo, db, pin_scope, edit, expected):
     from brindle import agents, config
 

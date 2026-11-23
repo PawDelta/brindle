@@ -24,6 +24,7 @@ def test_every_builtin_profile_has_a_display_name():
         assert shown["effort"] == p.effort, name
 
 
+@pytest.mark.variant("a model added to the catalog must reach pricing, display and worker tiers from that one edit")
 def test_catalog_models_reach_pricing_display_and_worker_tiers():
     from brindle import model_catalog, pricing, worker_models
 
@@ -67,6 +68,7 @@ def test_gpt_worker_routes_upgrade_in_place():
     pytest.param("gpt-6.2-unlisted", "codex", "GPT", "GPT‑6.2 Unlisted", marks=pytest.mark.variant(
         "a new GPT-6.2 suffix must retain the dotted version and never inherit another model's price")),
 ])
+@pytest.mark.variant("an uncatalogued future version must keep its family and version with unknown cost")
 def test_uncatalogued_model_keeps_its_family_version_and_unknown_cost(repo, model, provider, family, display):
     from brindle import autopilot, pricing
     from test_pricing import profile
@@ -98,6 +100,7 @@ def test_full_claude_ids_resolve_to_their_model():
     assert model_names.model_name("claude-sonnet-5-5[1m]", "claude") == model_names.MODELS["sonnet"]
 
 
+@pytest.mark.variant("an effort-suffixed id must price as its base model and report the effort")
 def test_discovered_effort_variant_uses_canonical_price_and_reports_effort():
     from brindle import pricing, worker_models
     from brindle.usage import Usage, usage_cost
