@@ -157,7 +157,13 @@ def test_org_lock_overrides_member_and_refuses_personal_edit(db, machine, monkey
 
     monkeypatch.setattr(org_settings, "docs_org_api", policy)
     monkeypatch.setattr(analysis_policy, "fetch", lambda *args: served)
-    config.set_user(updates.SETTING, "automatic")
+    analysis_policy.save_cached(ent.org_id, served)
+    status, settings = _send("GET", "/v1/user-settings")
+    assert status == 200
+    assert settings[updates.SETTING] == "automatic" and not settings["provider_cli_updates_locked"]
+
+    config.set_user(updates.SETTING, "ask")
+    assert _send("GET", "/v1/user-settings")[1][updates.SETTING] == "ask"
     status, _ = _send("PUT", "/v1/org-settings", {
         "org_id": ent.org_id, "actor_sub": ent.sub, "name": updates.SETTING,
         "previous": {"mode": "automatic", "locked": False}, "value": {"mode": "off", "locked": True},
