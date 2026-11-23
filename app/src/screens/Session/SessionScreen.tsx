@@ -20,6 +20,7 @@ import { LoadingButton } from "../../components/LoadingButton";
 import { button, main, mono } from "../../components/ui";
 import type { SheetRef } from "../../routes";
 import { CLI_INK, agentName, cliStatus, isPaused, liveWorkers, needsYou, providerName } from "../../store/overview";
+import { roleOf } from "../../components/Sidebar";
 import { OpenSessionContext, PanesReadyContext, panesReadyFor } from "../../store/panes";
 import { SessionsContext } from "../../store/sessions";
 import type { AppStore } from "../../store/store";
@@ -463,7 +464,6 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, restarting
   /* The changes are showing in the chat's place: the way back. */
   onChat?(): void;
 }) {
-  const workspaces = useAppState((s) => s.workspaces);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
   // The last agent shown: the ⋯ menu stays mounted on it when the tree empties under a running action.
@@ -486,16 +486,17 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, restarting
   const resuming = sessionStatus === "resuming";
   const status = resuming ? { glyph: "◌", label: restarting ? "Restarting…" : "Resuming", style: "dim" as const, needs: false }
     : node ? cliStatus(node.agent, node.workspace, alive) : { glyph: "‖", label: sessionStatus ?? "paused", style: "dim" as const, needs: false };
-  const named = useContext(SessionsContext)?.find(root)?.name;
-  const who = node ? (node.agent.id === root ? (named || "supervisor") : agentName(workspaces, node.agent.id)) : named || "supervisor";
-  const provider = node ? providerName(node.agent.provider) : "Session";
+  const role = node ? roleOf(node.agent, root) : "Session";
+  const model = node?.agent.model_display ?? "";
   const ago = node ? since(node.agent.status_since) : null;
   // The bar's own notice is the pause's; a continue's shows on the surface's card, where it was asked for.
   return (
     <header className="flex flex-wrap items-center gap-x-s2 gap-y-1 border-b border-line px-s2 py-1" data-testid="session-bar">
       <div className="flex min-w-0 items-center gap-s1">
         <span className="truncate text-sm font-semibold" data-testid="surface-title">
-          {provider} · {who}
+          <span data-role={node ? role : undefined} data-model-display={node?.agent.model_display ?? undefined}>
+            {node ? `${role} · ${model || providerName(node.agent.provider)}` : "Session"}
+          </span>
         </span>
         {/* No agent shown (a paused root is in no snapshot): the session's own id, so each one still reads as itself. */}
         <span className={`${mono} hidden text-xs text-ink-3 sm:inline`} data-testid={node ? "agent-id" : "session-id"} title={node?.workspace.branch}>
