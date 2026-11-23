@@ -153,10 +153,9 @@ def _profile_fields(profile: str | None, repo_root: str, *,
                 from brindle.providers import codex_default_model
 
                 model = codex_default_model(cwd or repo_root, env=env)
-            elif p.provider == "antigravity":
-                model = "gemini-2.5-pro"
-            elif p.provider == "claude":
-                model = "claude-sonnet-4-6"
+            # Other unpinned CLIs choose their own account/config default.
+            # Without evidence of that selection, keep it unknown so an org
+            # allowlist cannot authorize a model the worker may never run.
         return p.provider, model
     except Exception:
         return None, None

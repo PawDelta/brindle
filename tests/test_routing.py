@@ -191,6 +191,8 @@ def test_an_exhausted_cascade_refuses_and_says_why(db, repo, boss, monkeypatch, 
 
 
 def test_assign_reply_names_the_pick_and_stores_the_weight(db, repo, boss, monkeypatch):
+    from brindle.model_names import model_name
+
     monkeypatch.setattr(agents, "spawn", fake_spawn)
     monkeypatch.setattr(quota, "headroom",
                         lambda provider, cfg=None, repo_root=None: 7.0 if provider == "codex" else 100.0)
@@ -200,7 +202,7 @@ def test_assign_reply_names_the_pick_and_stores_the_weight(db, repo, boss, monke
     route = next(line for line in out.splitlines() if "→" in line)
     job, worker = route.split("→", 1)
     assert "Medium" in job and "job" in job
-    assert "Claude Sonnet (" in worker and "dev.claude-sonnet" in worker
+    assert model_name("sonnet").display in worker and "dev.claude-sonnet" in worker
     assert "developer-" not in out
     assert "Codex at 93%, skipped dev.gpt" in out
     [t] = db.list_tasks(str(repo), state="started")
@@ -214,7 +216,7 @@ def test_assign_reply_names_the_pick_and_stores_the_weight(db, repo, boss, monke
         agent_profile="developer-sonnet", task="do B", branch="feat-b"))
     [pending] = db.list_tasks(str(repo), state="pending")
     assert pending.id in queued and pending.agent_id is None
-    assert "dev.claude-sonnet" in queued and "Claude Sonnet (" in queued
+    assert "dev.claude-sonnet" in queued and model_name("sonnet").display in queued
     assert "developer-sonnet" not in queued
 
 
