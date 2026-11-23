@@ -145,18 +145,19 @@ def test_ranked_worker_fallback(db, repo, boss, monkeypatch, weight, blocked, ex
         "a default profile overridden to signed-out Codex must use the available baseline fallback")),
 ])
 def test_default_reviewer_pick(db, repo, boss, monkeypatch, unavailable, expected):
-    from brindle import policy, providers
+    from brindle import policy
 
-    db.add_agent(Agent("writer", boss.id, "dev.claude-sonnet", "claude", None,
+    # Keep same-model avoidance out of this test of the default and its fallbacks.
+    db.add_agent(Agent("writer", boss.id, "dev.claude-haiku", "claude", None,
                        "assign", "done", "@0", "done", time.time()))
+    monkeypatch.setattr(agents, "unusable", lambda provider, env=None:
+                        "not signed in" if unavailable == "codex" and provider == "codex" else None)
     monkeypatch.setattr(policy, "check_assign", lambda cfg, root, name, *args:
                         policy.Decision(allowed=not (unavailable == "policy" and name == "review.claude-sonnet.high")))
     if unavailable == "codex":
         path = repo / ".brindle" / "agents" / "review.claude-sonnet.high.md"
         path.parent.mkdir(exist_ok=True)
         path.write_text("---\nextends: reviewer\nprovider: codex\n---\n")
-        monkeypatch.setattr(providers, "signed_out", lambda provider, env=None:
-                            "not signed in" if provider == "codex" else None)
     chosen, note = agents._review_choice(db, boss, None, RepoConfig(review_sizing=False))
     assert chosen == expected
     assert (note is not None) == (unavailable is not None)
