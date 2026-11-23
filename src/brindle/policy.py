@@ -121,7 +121,8 @@ def _decide(what: str, cfg: RepoConfig, repo_root: str, ask) -> Decision:
 
 def _profile_fields(profile: str | None, repo_root: str, *,
                     user_library: bool = False, cwd: str | None = None,
-                    env: dict[str, str] | None = None) -> tuple[str | None, str | None]:
+                    env: dict[str, str] | None = None,
+                    resolve_version: bool = False) -> tuple[str | None, str | None]:
     """(provider, model) of ``profile``, best effort. ``user_library``: the
     person's profile of that name, never the repo's own (the company route
     is still the repo's)."""
@@ -132,6 +133,10 @@ def _profile_fields(profile: str | None, repo_root: str, *,
 
         p = load_profile(profile, None if user_library else repo_root)
         model = p.model
+        if model and resolve_version:
+            from brindle.agents import routing_model
+
+            model = routing_model(p, repo_root, cwd=cwd, env=env)
         if p.provider == "claude":
             from brindle import company_login
 
@@ -165,16 +170,18 @@ def check_assign(cfg: RepoConfig, repo_root: str, profile: str, task: str, mode:
                  files: list[str] | None = None, weight: str | None = None,
                  branch: str | None = None, actor: Agent | None = None,
                  running_workers: int | None = None, cwd: str | None = None,
-                 env: dict[str, str] | None = None) -> Decision:
+                 env: dict[str, str] | None = None,
+                 resolved: tuple[str, str] | None = None) -> Decision:
     """The plugin's decision on starting ``task`` with ``profile`` (allow
     without a plugin). In air-gap mode (``brindle.airgap``) only a local
     profile gets as far as the plugin. A denial is audited."""
     d = assign_decision(cfg, repo_root, profile, task, mode, files=files, weight=weight, branch=branch,
-                        actor=actor, running_workers=running_workers, cwd=cwd, env=env)
+                        actor=actor, running_workers=running_workers, cwd=cwd, env=env,
+                        **({"resolved": resolved} if resolved is not None else {}))
     if not d.allowed:              # an air-gap refusal is audited like any other denial
         from brindle import events
 
-        provider, model = _profile_fields(profile, repo_root, cwd=cwd, env=env)
+        provider, model = resolved or _profile_fields(profile, repo_root, cwd=cwd, env=env, resolve_version=True)
         events.emit_denial(cfg, repo_root, "assign", d.reason, branch=branch, profile=profile,
                            provider=provider, model=model, actor=actor.id if actor else "user")
     return d
@@ -184,13 +191,14 @@ def assign_decision(cfg: RepoConfig, repo_root: str, profile: str, task: str, mo
                     files: list[str] | None = None, weight: str | None = None,
                     branch: str | None = None, actor: Agent | None = None,
                     running_workers: int | None = None, cwd: str | None = None,
-                    env: dict[str, str] | None = None) -> Decision:
+                    env: dict[str, str] | None = None,
+                    resolved: tuple[str, str] | None = None) -> Decision:
     """``check_assign``'s decision without auditing it: routing asks it of
     each candidate it weighs (brindle.cascade), and only the delegation that
     actually starts (or is refused) is audited."""
     from brindle import airgap
 
-    provider, model = _profile_fields(profile, repo_root, cwd=cwd, env=env)
+    provider, model = resolved or _profile_fields(profile, repo_root, cwd=cwd, env=env, resolve_version=True)
     info = AssignInfo(
         repo_root=repo_root, task=task, files=tuple(files or ()), weight=weight,
         profile=profile, provider=provider, model=model, mode=mode, branch=branch,

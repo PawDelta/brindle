@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shlex
@@ -18,6 +19,8 @@ from pathlib import Path
 from typing import Callable, Iterable, Iterator
 
 from brindle import __version__, spawn
+
+log = logging.getLogger(__name__)
 
 
 class TmuxError(RuntimeError):
@@ -479,12 +482,15 @@ def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[
     )
     target = NewPane(proc.stdout.strip())
     target.launch = launch
-    if tag and tag[0] == AGENT_TAG:
-        _set_for_launch(target, launch, *tag)
-    elif tag:
+    if tag and tag[0] != AGENT_TAG:
         set_pane_tag(target, *tag)
-    # Keep the agent's pane around after it exits so its output can be read.
-    _tmux("set-option", "-p", "-t", target, "remain-on-exit", "on", check=False)
+    try:
+        if tag and tag[0] == AGENT_TAG:
+            _set_for_launch(target, launch, *tag)
+        # Keep the agent's pane around after it exits so its output can be read.
+        _tmux("set-option", "-p", "-t", target, "remain-on-exit", "on", check=False)
+    except (OSError, TmuxError):
+        log.warning("Could not finish setting options on pane %s", target)
     return target
 
 
@@ -553,11 +559,43 @@ def gated(command: list[str]) -> tuple[list[str], str]:
     tmux remembers a signal sent before the wait, so the order never hangs."""
     channel = f"brindle-layout-{uuid.uuid4().hex}"
     wait = shlex.join([shutil.which(_bin()) or _bin(), *_base()[1:], "wait-for"])
-    return ["/bin/sh", "-c", f'{wait} "$0" 2>/dev/null; exec "$@"', channel, *command], channel
+    return ["/bin/sh", "-c", f'{wait} "$0" 2>/dev/null && exec "$@"', channel, *command], channel
 
 
 def open_gate(channel: str) -> None:
-    _tmux("wait-for", "-S", channel, check=False)
+    _tmux("wait-for", "-S", channel)
+
+
+def discard_gated_launch(pane: str) -> bool:
+    """Remove the unopened launch only while its pane still belongs to it and has no attached client."""
+    launch = getattr(pane, "launch", "")
+    if not re.fullmatch(r"[0-9a-f]{12}", launch) or not re.fullmatch(r"%\d+", pane):
+        return False
+    owned = f"#{{m:*{AGENT_TAG} * {launch} *,#{{pane_start_command}}}}"
+    unattended = f"#{{&&:{owned},#{{==:#{{session_attached}},0}}}}"
+    try:
+        _tmux("if-shell", "-F", "-t", pane, unattended, f"kill-pane -t {pane}")
+        remaining = _tmux("list-panes", "-a", "-F", "#{pane_id}\t" + owned)
+    except (OSError, TmuxError):
+        return False
+    return f"{pane}\t1" not in remaining.stdout.splitlines()
+
+
+def launch_pane_gone(pane: str, launch: str, server: str | None) -> bool:
+    """Confirm that the given launch has no live pane on its recorded server."""
+    if not re.fullmatch(r"%\d+", pane) or (launch and not re.fullmatch(r"[0-9a-f]{12}", launch)):
+        return False
+    match = f"#{{m:*{AGENT_TAG} * {launch} *,#{{pane_start_command}}}}" if launch else "1"
+    try:
+        panes = _tmux("list-panes", "-a", "-F", "#{pane_id}\t#{pane_dead}\t" + match, server=server)
+    except (OSError, TmuxError):
+        # A live server can lose its socket and keep running the pane.
+        return False
+    for line in panes.stdout.splitlines():
+        target, *state = line.split("\t")
+        if target == pane:
+            return state in (["1", "1"], ["0", "0"], ["1", "0"])
+    return True
 
 
 def windows(session: str) -> list[str]:

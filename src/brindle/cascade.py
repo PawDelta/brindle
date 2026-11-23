@@ -316,9 +316,9 @@ def worker_pool(cfg, repo_root: str, tier: str, ceiling: str | None = None) -> l
         heavier = [t for t in TIERS[i + 1:top + 1]]
         lighter = list(reversed(TIERS[:i]))
         names = own + [n for t in heavier + lighter for n in autopilot.tier_order(cfg, t)] + list(DEVELOPERS)
-    from brindle.profiles import current_name
+    from brindle.profiles import current_name, existing_profiles
 
-    names = list(dict.fromkeys(current_name(n, repo_root) for n in names))
+    names = existing_profiles(dict.fromkeys(current_name(n, repo_root) for n in names), repo_root)
     if ceiling in rank:
         names = [n for n in names if rank.get(_weight(autopilot.profile_weight(n, cfg, repo_root)), 3)
                  <= rank[ceiling]]
@@ -338,11 +338,11 @@ def agent_pool(cfg, repo_root: str, agent: str | None, tier: str, ceiling: str |
     if not names:
         return None
     from brindle import autopilot
-    from brindle.profiles import current_name
+    from brindle.profiles import current_name, existing_profiles
 
     rank = {t: i for i, t in enumerate(TIERS)}
     ceiling = ceiling or (cfg.max_weight if cfg.max_weight in rank else None)
-    names = list(dict.fromkeys(current_name(n, repo_root) for n in names))
+    names = existing_profiles(dict.fromkeys(current_name(n, repo_root) for n in names), repo_root)
     if ceiling in rank:
         names = [n for n in names if rank.get(_weight(autopilot.profile_weight(n, cfg, repo_root)), 3)
                  <= rank[ceiling]]

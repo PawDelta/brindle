@@ -193,7 +193,7 @@ def _review_lock_returns_busy_without_starting_work(db, world, monkeypatch, chec
 
     started = []
     monkeypatch.setattr(config, "load_repo_config", lambda *a, **k: config.RepoConfig(checks=checks))
-    monkeypatch.setattr(agents, "_review_profile", lambda *a: "reviewer")
+    monkeypatch.setattr(agents, "_review_profile", lambda *a, **kw: "reviewer")
     monkeypatch.setattr(agents, "_request_review", lambda *a: started.append("reviewer"))
     monkeypatch.setattr(agents, "_detach", lambda *a: started.append("checks"))
     monkeypatch.setattr(routes_actions, "REVIEW_LOCK_WAIT", 0.05, raising=False)

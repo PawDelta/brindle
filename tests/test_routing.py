@@ -76,12 +76,12 @@ def install(monkeypatch, plugin):
     (["missing-worker", "developer"], "developer"),
     pytest.param(["missing-worker"], "dev.gpt", marks=pytest.mark.variant("failure path: an entirely missing routing tier cascades to the next heavier tier and remains a doctor warning")),
 ])
-def test_unknown_routing_profiles_are_skipped_and_reported(db, repo, boss, names, expected):
+def test_unknown_routing_profiles_are_skipped_and_diagnosed_by_doctor(db, repo, boss, names, expected):
     path = user_config_path()
     path.write_text(json.dumps({"routing": {"light": names}}))
     why = []
     assert choose(db, repo, weight="light", why=why) == (expected, False)
-    assert f"no profile missing-worker in {path}, skipped missing-worker" in why[0]
+    assert "missing-worker" not in why[0]
     if len(names) == 1:
         assert "every light candidate was out" in why[0]
     [check] = [c for c in doctor.routing_checks(load_repo_config(repo), str(repo))
@@ -164,11 +164,16 @@ def test_default_reviewer_pick(db, repo, boss, monkeypatch, unavailable, expecte
     assert (note is not None) == (unavailable is not None)
 
 
-@pytest.mark.variant("nondefault learner choice: weighted routing must select the eligible profile chosen by the learner")
-def test_learning_plugin_reorders_the_remaining_candidates(db, repo, boss, monkeypatch):
-    install(monkeypatch, Picker(prefer="dev.claude-sonnet"))
-    config(repo, learning="cloud")
-    assert choose(db, repo, weight="medium") == ("dev.claude-sonnet", True)
+@pytest.mark.parametrize("weight", [
+    pytest.param("medium", marks=pytest.mark.variant("weighted routing uses the eligible profile picked by the learner")),
+    pytest.param(None, marks=pytest.mark.variant("without a weight, explicit learner candidates can contain stale ids")),
+])
+def test_learning_plugin_reorders_the_remaining_candidates(db, repo, boss, monkeypatch, weight):
+    picker = Picker(prefer="dev.claude-sonnet")
+    install(monkeypatch, picker)
+    config(repo, learning="cloud", learning_candidates=["retired-worker", "dev.claude-sonnet"])
+    assert choose(db, repo, weight=weight) == ("dev.claude-sonnet", True)
+    assert all("retired-worker" not in candidates for _, candidates in picker.asked)
 
 
 @pytest.mark.parametrize("pinned", [
@@ -241,10 +246,12 @@ def test_assign_routes_an_agent_by_size(db, repo, boss, monkeypatch, launches, d
     install(monkeypatch, plugin)
     config(repo, pipeline=False, learning="cloud", default_agent="qa" if not named else "developer",
            routing={"light": ["dev.claude-haiku", "dev.claude-sonnet", "dev.gpt"]},
-           **({"agent_models": {"qa": {"light": ["dev.claude-haiku", "dev.claude-opus"]}}} if override else {}))
+           **({"agent_models": {"qa": {"light": ["retired-worker", "dev.claude-haiku", "dev.claude-opus"]}}}
+              if override else {}))
     out = asyncio.run(mcp_server.assign(agent_profile=named, task="cover the parser", branch="feat-qa",
                                         weight="light"))
     assert "Started worker" in out
+    assert "retired-worker" not in out
     [t] = db.list_tasks(str(repo), state="started")
     worker = db.get_agent(t.agent_id)
     assert (t.profile, worker.profile, worker.agent) == (expected, expected, "qa")

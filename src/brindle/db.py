@@ -108,6 +108,10 @@ CREATE TABLE IF NOT EXISTS agent_roles (
     agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
     agent TEXT
 );
+CREATE TABLE IF NOT EXISTS agent_launch_models (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    model TEXT
+);
 -- The goal milestone a queued task's worker is assigned to (assign/handoff's milestone); a table of its
 -- own so no released table gains a column.
 CREATE TABLE IF NOT EXISTS task_milestones (
@@ -2569,6 +2573,18 @@ class DB:
 
 
     # -- agents ------------------------------------------------------------
+
+    def record_agent_launch_model(self, agent_id: str, model: str | None) -> None:
+        with self.tx() as c:
+            if model is not None:
+                c.execute("INSERT OR REPLACE INTO agent_launch_models (agent_id, model) VALUES (?,?)",
+                          (agent_id, model))
+            else:
+                c.execute("DELETE FROM agent_launch_models WHERE agent_id=?", (agent_id,))
+
+    def agent_launch_model(self, agent_id: str) -> str | None:
+        row = self.conn.execute("SELECT model FROM agent_launch_models WHERE agent_id=?", (agent_id,)).fetchone()
+        return row["model"] if row else None
 
     def set_agent_milestone(self, agent_id: str, title: str) -> None:
         with self.tx() as c:

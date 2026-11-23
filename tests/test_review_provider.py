@@ -61,15 +61,17 @@ class FakeLearner:
         return self.pick or default
 
 
-def test_request_review_raises_clearly_for_an_unknown_configured_review_profile(db, worker_ws):
-    with pytest.raises(agents.AgentError, match="bogus-profile"):
-        agents.request_review(db, None, worker_ws, cfg=RepoConfig(review_profile="bogus-profile"))
+@pytest.mark.variant("stale legacy reviewer settings must leave the configured reviewer fallback reachable")
+def test_review_routing_silently_skips_unknown_configured_profiles(db, worker_ws, env):
+    cfg = RepoConfig(review_profile="retired-pin", reviewer="retired-reviewer",
+                     reviewer_fallbacks=["reviewer"], review_sizing=False)
+    assert agents._review_choice(db, worker_ws, None, cfg) == ("reviewer", None)
 
 
 def test_without_a_learner_it_is_the_baseline_and_nothing_is_probed(env, db):
     env["codex"] = True
     assert agents.default_review_profile(RepoConfig(), worker(), db, "/repo") == "review.claude-sonnet.high"
-    assert agents.default_review_profile(RepoConfig(reviewer="rev"), worker(), db, "/repo") == "rev"
+    assert agents.default_review_profile(RepoConfig(reviewer="reviewer"), worker(), db, "/repo") == "reviewer"
     assert agents.default_review_profile(RepoConfig(), worker()) == "review.claude-sonnet.high"  # no db: same
     assert env["probes"] == 0
 
@@ -119,10 +121,10 @@ def test_review_size_pool_avoids_writers_model_when_possible(env, db, tmp_path, 
     monkeypatch.setattr(git, "out", lambda *a: f"{1 if small else 500}\t0\tsrc/main.py\0")
     can_run = agents._reviewer_can_run
 
-    def available(name, workspace, config):
+    def available(name, workspace, config, **kwargs):
         if not alternative and name != "dev.claude-opus":
             raise agents.AgentError("model unavailable")
-        can_run(name, workspace, config)
+        can_run(name, workspace, config, **kwargs)
 
     monkeypatch.setattr(agents, "_reviewer_can_run", available)
     chosen, why = agents._review_choice(db, ws, None, cfg)

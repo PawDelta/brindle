@@ -45,7 +45,7 @@ def test_dead_reviewer_restarts_once_then_needs_the_person(db, repo, monkeypatch
     monkeypatch.setattr(agents, "command_running", lambda *a: False)
     monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
     monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
-    monkeypatch.setattr(agents, "_review_profile", lambda *a: "reviewer")
+    monkeypatch.setattr(agents, "_review_profile", lambda *a, **kw: "reviewer")
     monkeypatch.setattr(agents, "close_later", lambda *a: None)
     secret = "sk-abcdefghijklmnop123456789"
     monkeypatch.setattr(launch_health, "capture", lambda a: f"startup\nError: reviewer process crashed {secret}\n\n")
@@ -343,7 +343,7 @@ def test_fallback_reviewer_reuses_cached_checks_and_partial_findings(db, repo, t
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
     monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
-    monkeypatch.setattr(agents, "_review_profile", lambda db_, ws_, prof, cfg: prof or "reviewer")
+    monkeypatch.setattr(agents, "_review_profile", lambda db_, ws_, prof, cfg, **kw: prof or "reviewer")
     monkeypatch.setattr(autopilot, "_unavailable", lambda *a, **k: None)
     spawned = []
     # The fallback goes through start_review, like every reviewer: with checks

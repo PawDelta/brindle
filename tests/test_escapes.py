@@ -210,7 +210,7 @@ def test_either_reviewer_asking_for_changes_blocks_the_merge(db, repo, piped, mo
         return db_.get_agent(spawned[-1])
 
     monkeypatch.setattr(agents, "spawn", fake_spawn)
-    monkeypatch.setattr(agents, "_review_profile", lambda db_, ws_, profile, cfg: profile or "reviewer")
+    monkeypatch.setattr(agents, "_review_profile", lambda db_, ws_, profile, cfg, **kw: profile or "reviewer")
     monkeypatch.setattr(agents, "_review_kill_switch", lambda ws_: None)
     boss, cfg = db.get_agent("boss"), config.load_repo_config(repo)
     rejected_profile = "review.gpt" if rejected_second else "reviewer"
@@ -281,7 +281,7 @@ def test_both_reviewers_start_even_with_checks(db, repo, piped, monkeypatch):
     monkeypatch.setattr(agents, "spawn", fake_spawn)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
     monkeypatch.setattr(agents, "_detach", detached.append)
-    monkeypatch.setattr(agents, "_review_profile", lambda db_, ws_, profile, cfg: profile or "reviewer")
+    monkeypatch.setattr(agents, "_review_profile", lambda db_, ws_, profile, cfg, **kw: profile or "reviewer")
     monkeypatch.setattr(agents, "_review_kill_switch", lambda ws_: None)
     cfg = config.load_repo_config(repo)
     cited = [(analysis_brief.DOC_ITEM, "review-doc", "4")]

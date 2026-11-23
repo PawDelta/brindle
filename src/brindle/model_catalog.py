@@ -219,3 +219,38 @@ ALIASES = {alias: key for key, model in CATALOG.items() for alias in model.alias
 
 def lookup(model: str | None) -> Model | None:
     return CATALOG.get(normalize(model)) if model else None
+
+
+_VERSION = re.compile(r"(?<=-)v?(\d{1,4}(?:[.-]\d{1,4})*)(?=-|$)")
+
+
+def _versioned_line(model: str) -> tuple[tuple[str, str, str], tuple[int, ...]] | None:
+    match = _VERSION.search(model)
+    if match is None:
+        return None
+    entry = CATALOG.get(model)
+    identity = entry.name if entry else inferred_name(model)
+    line = model[:match.start()].rstrip("-") + model[match.end():]
+    parts = [int(part) for part in re.split(r"[.-]", match[1])]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return (identity.maker, identity.family, line), tuple(parts)
+
+
+def newer_versions(model: str) -> list[str]:
+    """Known higher versions of an explicit pin in descending version order."""
+    key, effort = split_effort(model)
+    current = _versioned_line(ALIASES.get(key, key))
+    if current is None or not _VERSION.search(key):
+        return []
+    line, version = current
+    newer = []
+    for name in CATALOG:
+        candidate = _versioned_line(name)
+        if candidate is not None and candidate[0] == line and candidate[1] > version:
+            newer.append((candidate[1], name))
+    prefix = _PREFIXES.match(model.strip().lower())
+    return [
+        (prefix[0] if prefix else "") + name + (f"-{effort}" if effort else "")
+        for _, name in sorted(newer, reverse=True)
+    ]

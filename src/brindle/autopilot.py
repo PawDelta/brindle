@@ -1012,12 +1012,14 @@ def eligible(cfg: RepoConfig, repo_root: str, weight: str, gate=None, *, ceiling
     repo's ``max_weight``), those it can run now, why each other was
     skipped, and which a budget (``gate``) ruled out. Read-only: routing and
     the goal preview both judge candidates by it."""
+    from brindle.profiles import existing_profiles
+
     skipped: list[str] = []
     remaining: list[str] = []
     over: dict[str, str] = {}
     weight_order = {"light": 0, "medium": 1, "heavy": 2, "advanced": 3, "reasoning": 3, "complex": 3}
     effective_ceiling = ceiling or (cfg.max_weight if (cfg.max_weight and cfg.max_weight in weight_order) else None)
-    order = tier_order(cfg, weight)
+    order = existing_profiles(tier_order(cfg, weight), repo_root)
     if effective_ceiling:
         order = [n for n in order if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[effective_ceiling]]
     for name in order:
@@ -1189,15 +1191,23 @@ def effective_profile_model(p, repo_root: str | None = None) -> str:
 def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
     """Format the worker's display name, effort, id and cost tier."""
     try:
+        from brindle import agents, model_catalog, pricing
         from brindle.model_names import describe
         from brindle.profiles import load_profile
         p = load_profile(name, repo_root)
         eff = effective_profile_model(p, repo_root)
+        resolved = agents.routing_model(p, repo_root) if repo_root else p.model
+        if resolved != p.model:
+            eff = resolved
         named = describe(p, eff)
         worker = named["display"]
         if named["effort"]:
             worker += f" ({named['effort']})"
-        tier = cost_tier(name, cfg, repo_root)
+        if resolved != p.model:
+            worker += f" [{resolved}]"
+        price = (pricing.FREE if pricing.is_local(p.base_url) else
+                 pricing.price_for(eff, pricing.repo_overrides(repo_root)))
+        tier = model_catalog.cost_tier(price)
         label = {"high": "most expensive tier", "low": "lowest cost tier"}.get(tier, "medium cost tier")
         return f"{worker} · {p.name} · {label}"
     except Exception:
@@ -1318,6 +1328,8 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     by size like any other (the agent's own ``agent_models`` order first) and
     ``decision["agent"]`` names who, for the launch to join to the pick.
     Naming a model or a pinned profile runs that profile, as before."""
+    from brindle.profiles import existing_profiles
+
     cfg = load_repo_config(repo_root)
     who = routed_agent(agent, repo_root) if agent else None
     if requested and weight and (named := routed_agent(requested.strip(), repo_root)):
@@ -1353,9 +1365,9 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
         elif pending and pending.profile:
             m_profile = pending.profile.strip()
             if ceiling and weight_order[profile_weight(m_profile, cfg, repo_root)] > weight_order[ceiling]:
-                candidates = cfg.routing.get(ceiling, [cfg.default_agent])
-                name = candidates[0] if candidates else cfg.default_agent
-                if why is not None:
+                candidates = existing_profiles([*cfg.routing.get(ceiling, []), cfg.default_agent], repo_root)
+                name = next(iter(candidates), "")
+                if name and why is not None:
                     why.append(f"Milestone worker {m_profile} capped to {model_cost_info(name, cfg, repo_root)} by max_weight {ceiling}")
             else:
                 name = m_profile
@@ -1417,40 +1429,43 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             name = learning.choose(db, cfg, repo_root, task, files, weight=weight,
                                    default=cfg.default_agent, **options) or ""
             learned = bool(name)
-            name = name or cfg.default_agent
-            if not cfg.routing_allows(name, design_heavy):
+            name = next(iter(existing_profiles([name, cfg.default_agent, *cfg.learning_candidates], repo_root)), "")
+            if not name or not cfg.routing_allows(name, design_heavy):
+                fallback_tier = "advanced" if name else "medium"
                 name, learned, note = _route_by_weight(
-                    db, cfg, repo_root, ceiling or weight or "advanced", task, files, routed,
+                    db, cfg, repo_root, ceiling or fallback_tier, task, files, routed,
                     ceiling=ceiling, **options)
                 if not name:
-                    raise AutopilotError("no available agent for a task without design-heavy routing")
+                    raise AutopilotError(f"no available agent profile: {note}")
                 if why is not None:
                     why.append(note)
             if ceiling and weight_order[profile_weight(name, cfg, repo_root)] > weight_order[ceiling]:
-                candidates = cfg.routing.get(ceiling, [cfg.default_agent])
-                orig_name = name
-                name = candidates[0] if candidates else cfg.default_agent
-                if why is not None:
-                    why.append(f"fallback profile {orig_name} capped to {name} by max_weight {ceiling}")
+                candidates = existing_profiles([*cfg.routing.get(ceiling, []), cfg.default_agent], repo_root)
+                if candidates:
+                    if why is not None:
+                        info = model_cost_info(candidates[0], cfg, repo_root)
+                        why.append(f"fallback profile {name} capped to {info} by max_weight {ceiling}")
+                    name = candidates[0]
             routed.setdefault("baseline", cfg.default_agent)
         routed["prior"] = learned and learning.used_prior(cfg, repo_root)
     if ceiling and weight_order[profile_weight(name, cfg, repo_root)] > weight_order[ceiling]:
         permissible = [
-            n for n in cfg.routing.get(ceiling, [])
+            n for n in existing_profiles(cfg.routing.get(ceiling, []), repo_root)
             if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]
         ]
         if not permissible:
             for tier in ("medium", "light"):
                 if weight_order[tier] <= weight_order[ceiling]:
                     permissible.extend([
-                        n for n in cfg.routing.get(tier, [])
+                        n for n in existing_profiles(cfg.routing.get(tier, []), repo_root)
                         if weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]
                     ])
         if permissible:
             orig_name = name
             name = permissible[0]
             if why is not None:
-                why.append(f"profile {orig_name} capped to {name} by max_weight {ceiling}")
+                info = model_cost_info(name, cfg, repo_root)
+                why.append(f"profile {orig_name} capped to {info} by max_weight {ceiling}")
         else:
             raise AutopilotError(f"no permissible agent profile under max_weight {ceiling!r}")
     try:
@@ -1472,7 +1487,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
         if replacement is None:
             raise AutopilotError(f"{problem}; no available fallback for {name}")
         if why is not None:
-            why.append(f"{problem}; using {replacement} instead of {name}")
+            why.append(f"{problem}; using {model_cost_info(replacement, cfg, repo_root)} instead of {name}")
         name, learned = replacement, False
     if decision is not None:
         decision.update(profile=name, learned=learned, weight=weight, agent=who,
