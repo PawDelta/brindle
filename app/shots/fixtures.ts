@@ -17,9 +17,12 @@ const SCRATCH = `${BRINDLE_HOME}/scratch/notes-20261020-091200`;
 
 /* An agent, in the tmux window the engine names for it (where the app's tmux client attaches). */
 const agent = (a: Partial<AgentDTO> & Pick<AgentDTO, "id" | "status" | "mode">): AgentDTO => ({
-  profile: "developer-sonnet",
+  profile: "dev.claude-sonnet",
   provider: "claude",
-  model: "claude-sonnet-4",
+  model: "claude-sonnet-5-5",
+  role: "developer",
+  model_display: "Claude Sonnet",
+  weight: "medium",
   subagents: [],
   window: `brindle:${a.id}`,
   tmux_server: "brindle",
@@ -102,7 +105,7 @@ const workspaces: WorkspaceDTO[] = [
     dirty: 0,
     agents: [
       agent({ id: "c58d1e77", status: "idle", mode: "worker", parent_id: "sup-42", status_since: now - 1900, reported: true, tokens: "31k" }),
-      agent({ id: "d02f44a1", status: "idle", mode: "worker", parent_id: "c58d1e77", status_since: now - 300, provider: "codex", profile: "reviewer-codex" }),
+      agent({ id: "d02f44a1", status: "idle", mode: "worker", parent_id: "c58d1e77", status_since: now - 300, provider: "codex", profile: "review.gpt", role: "reviewer", model_display: "GPT‑6.1 Sol", weight: null }),
     ],
     review: null,
     review_state: "pending",
