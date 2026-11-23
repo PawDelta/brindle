@@ -3005,7 +3005,7 @@ def test_supervisor_and_reviewer_choices_and_ordered_fallbacks_are_used(db, repo
     monkeypatch.setattr(svc, "preflight", lambda *a, **kw: [])
     monkeypatch.setattr(svc, "cull_detached", lambda root: None)
     monkeypatch.setattr("brindle.policy.check_assign",
-                        lambda cfg, root, name, *a: SimpleNamespace(allowed=name != "reviewer-codex", reason="no"))
+                        lambda cfg, root, name, *a, **kw: SimpleNamespace(allowed=name != "reviewer-codex", reason="no"))
 
     def unusable(dead):
         monkeypatch.setattr(providers, "unusable", lambda p, env=None: "down" if p in dead else None)
@@ -3023,7 +3023,7 @@ def test_supervisor_and_reviewer_choices_and_ordered_fallbacks_are_used(db, repo
     assert (launched[-1].provider, agents._profile_for(db, launched[-1], world).model) == (
         "antigravity", load_profile("developer-gemini", str(repo)).model)
     svc.start(db, str(repo), provider="claude", autopilot=False)       # asked for by name: kept
-    assert agents._profile_for(db, launched[-1], world).model == load_profile("supervisor", str(repo)).model
+    assert launched[-1].provider == agents._profile_for(db, launched[-1], world).provider == "claude"
 
     # A review walks the pick and then the fallbacks: an unavailable provider and a policy denial are skipped.
     unusable([])
