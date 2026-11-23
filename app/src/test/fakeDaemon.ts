@@ -2286,10 +2286,13 @@ export class FakeDaemon {
         ? { name, provider, model: null, kind: "agent", builtin: false, role, description: text, rules: packs, cost_tier: "medium", installed: true, signed_in: true, lint_errors, lint_warnings: [] }
         : { name, provider, model: model as string, kind: "pinned", builtin: false, role, description: text, rules: packs, cost_tier: like?.cost_tier ?? "medium", installed: same.some((p) => p.installed), signed_in: same.some((p) => p.signed_in), lint_errors, lint_warnings: [] },
     ];
+    const own = typeof instructions === "string" ? instructions.trim() : "";
     d.profileDetails[name] = {
       source: file,
+      extends: agent ? [typeof works_like === "string" ? works_like : "developer"] : [],
       rules: packs.map((r) => d.rulePacks.find((x) => x.name === r) ?? { name: r, description: "", source: "missing" }),
-      prompt: typeof instructions === "string" ? instructions : "",
+      prompt: own,
+      instructions: own,
       lint: { errors: lint_errors, warnings: [] },
     };
     return json({ name, path: file }, 201);
@@ -2315,7 +2318,15 @@ export class FakeDaemon {
       i === at ? { ...x, ...(text !== undefined ? { description: text } : {}), ...(packs ? { rules: packs } : {}), ...(works_like != null ? { role: works_like === "reviewer" ? "reviewer" : "developer" } : {}) } : x,
     );
     if (text !== undefined) d.profiles = d.profiles.map((x) => (x.name === name ? { ...x, description: text } : x));
-    if (typeof instructions === "string" && d.profileDetails[name]) d.profileDetails[name] = { ...d.profileDetails[name], prompt: instructions };
+    // The file's body is replaced ("" clears it); what it extends follows works_like.
+    if (typeof instructions === "string" || works_like != null) {
+      const was = d.profileDetails[name] ?? {};
+      d.profileDetails[name] = {
+        ...was,
+        ...(typeof instructions === "string" ? { prompt: instructions.trim(), instructions: instructions.trim() } : {}),
+        ...(works_like != null ? { extends: [works_like as string] } : {}),
+      };
+    }
     return json({ name, path: `/home/u/.brindle/agents/${name}.md` });
   }
 
@@ -3066,7 +3077,7 @@ export class FakeDaemon {
       const p = d.profiles.find((x) => x.name === name);
       if (!p) return error("not_found", `no profile ${name}`, 404);
       const extra = d.profileDetails[name] ?? {};
-      return json({ ...p, source: `built-in profile ${name}`, extends: [], rules: [], prompt: "", lint: { errors: [], warnings: [] }, ...extra });
+      return json({ ...p, source: `built-in profile ${name}`, extends: [], rules: [], prompt: "", instructions: "", lint: { errors: [], warnings: [] }, ...extra });
     }
     if ((m = path.match(/^\/agents\/([^/]+)\/transcript$/))) {
       return json({ messages: [], cursor: "0:0", reset: false });

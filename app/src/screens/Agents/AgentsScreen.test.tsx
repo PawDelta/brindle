@@ -303,6 +303,74 @@ describe("agents tab", () => {
     expect(option(within(row("medium")).getByRole("group", { name: "Choices for Medium" }), "careful-dev")).toBeNull();
   });
 
+  it("agents: a new agent's own model leaves out refused fallbacks, and when that write fails the agent stays made and Save retries only the models", async () => {
+    // The org refuses Codex's small model (quick-fix, in the shared Light order); the first models write fails anyway.
+    let failures = 1;
+    const flaky = (d: FakeDaemon): typeof globalThis.fetch => (input, init) =>
+      init?.method === "PUT" && String(input).includes("/routing") && failures-- > 0
+        ? Promise.resolve(new Response(JSON.stringify({ error: { code: "unavailable", message: "the daemon is busy" } }), { status: 503, headers: { "content-type": "application/json" } }))
+        : d.fetch(input, init);
+    const { daemon } = setup({ routingPolicy: { org_id: "acme", allowed_models: ["haiku-5.5", "sonnet-5.5", "opus-5.5", "fable-5.1", "gpt-5.5"] } }, flaky);
+    await screen.findByTestId("kind-medium");
+    fireEvent.click(screen.getByRole("button", { name: "New agent" }));
+    const form = screen.getByRole("region", { name: "New agent" });
+    fireEvent.change(within(form).getByLabelText("Name"), { target: { value: "careful-dev" } });
+    fireEvent.change(within(form).getByLabelText("What it's for"), { target: { value: "Careful features" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Change" }));
+    fireEvent.click(within(within(form).getByRole("group", { name: "Model" })).getByRole("button", { name: "Its own for a size…" }));
+    fireEvent.click(within(form).getByRole("button", { name: "careful-dev Light model" }));
+    fireEvent.click(option(within(form).getByRole("group", { name: "Choices for careful-dev Light" }), "developer-heavy")!);
+    fireEvent.click(within(form).getByRole("button", { name: "Create agent" }));
+
+    // Made, but its models weren't saved: it's listed, and the form stays to retry only that.
+    await waitFor(() => expect(agent("careful-dev").dataset.modelMode).toBe("follows"));
+    expect(within(form).getByTestId("form-error")).toBeTruthy();
+    fireEvent.click(within(form).getByRole("button", { name: "Save its models" }));
+    await waitFor(() => expect(agent("careful-dev").dataset.modelMode).toBe("except"));
+    expect(daemon.requests.filter((r) => r.method === "POST" && r.path === "/profiles")).toHaveLength(1);
+    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", agents: { "careful-dev": { models: { light: { model: "developer-heavy", fallbacks: ["developer-light", "developer"] } } } } });
+    expect(screen.queryByRole("region", { name: "New agent" })).toBeNull();
+  });
+
+  it("agents: editing one of your agents shows its saved instructions and role, clears them on purpose, and a new role re-checks its own models", async () => {
+    const tidy = rp("tidy-dev", "claude", null, "medium", { kind: "agent", builtin: false, description: "Tidies code" });
+    const { daemon } = setup({
+      routingProfiles: [...profiles, tidy],
+      profiles: [...described, { name: "tidy-dev", provider: "claude", model: null, description: "Tidies code" }],
+      // GET /profiles/{name}: the resolved prompt carries what it extends; `instructions` is its own text.
+      profileDetails: { "tidy-dev": { extends: ["qa", "developer"], prompt: "Implement the task you are given.\n\nKeep diffs small.", instructions: "Keep diffs small." } },
+    });
+    await screen.findByTestId("agent-tidy-dev");
+    fireEvent.click(within(agent("tidy-dev")).getByRole("button", { name: "Edit tidy-dev" }));
+    const form = within(agent("tidy-dev")).getByRole("region", { name: "Edit tidy-dev" });
+    const box = within(form).getByLabelText("Instructions") as HTMLTextAreaElement;
+    await waitFor(() => expect(box.value).toBe("Keep diffs small."));
+    expect(within(form).getByTestId("defaults").dataset.worksLike).toBe("qa");
+
+    // Its own Light model, as a developer would run…
+    fireEvent.click(within(form).getByRole("button", { name: "Change" }));
+    fireEvent.click(within(within(form).getByRole("group", { name: "Model" })).getByRole("button", { name: "Its own for a size…" }));
+    fireEvent.click(within(form).getByRole("button", { name: "tidy-dev Light model" }));
+    fireEvent.click(option(within(form).getByRole("group", { name: "Choices for tidy-dev Light" }), "developer-heavy")!);
+    expect(within(form).getByTestId("defaults").dataset.modelMode).toBe("except");
+    // …goes when it works like a Reviewer, whose models are the reviewers'.
+    fireEvent.click(within(within(form).getByRole("group", { name: "Works like" })).getByRole("button", { name: "Reviewer" }));
+    expect(within(form).getByTestId("defaults").dataset.modelMode).toBe("follows");
+    fireEvent.click(within(form).getByRole("button", { name: "tidy-dev Light model" }));
+    const light = within(form).getByRole("group", { name: "Choices for tidy-dev Light" });
+    expect(option(light, "reviewer-codex")).toBeTruthy();
+    expect(option(light, "developer-heavy")).toBeNull();
+
+    // Emptied on purpose: sent as "", so the saved instructions are cleared.
+    fireEvent.change(box, { target: { value: "" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(agent("tidy-dev")).queryByRole("region", { name: "Edit tidy-dev" })).toBeNull());
+    expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/profiles/tidy-dev")?.body).toEqual({
+      repo: REPO, description: "Tidies code", rules: [], instructions: "", works_like: "reviewer",
+    });
+    expect(puts(daemon)).toEqual([]);
+  });
+
   it("agents: clearing a size's Edit instructions sends null, the daemon refuses blank text, and a reload shows them empty", async () => {
     const { daemon, client, stop } = setup();
     const more = () => within(row("medium")).getByRole("button", { name: "Edit Medium" });

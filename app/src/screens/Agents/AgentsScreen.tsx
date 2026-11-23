@@ -595,9 +595,13 @@ const worksLikeLabel = (w: WorksLike) => agentLabel(w);
 /* The add-an-agent form (and the same form to edit one of the person's
    own): one column, Name, What it's for, Instructions, Rules, then the two
    defaults behind Change. Soft-filled inputs on the page ground. */
-function AgentForm({ editing, draft, setDraft, rules, taken, pinned, busy, error, choicesFor, info, missing, onSave, onCancel, onNavigate }: {
+function AgentForm({ editing, created, loading, draft, setDraft, rules, taken, pinned, busy, error, choicesFor, info, missing, onSave, onCancel, onNavigate }: {
   /* The agent being edited, or null for a new one. */
   editing: AgentRow | null;
+  /* A new agent whose profile is written but whose own models aren't yet: Save retries only those. */
+  created: boolean;
+  /* Its saved instructions and role are being read: the form waits for them. */
+  loading: boolean;
   draft: Draft;
   setDraft(d: Draft): void;
   rules: RulePackInfo[];
@@ -606,7 +610,8 @@ function AgentForm({ editing, draft, setDraft, rules, taken, pinned, busy, error
   pinned: Choice | null;
   busy: boolean;
   error: string | null;
-  choicesFor(size: Size): Choice[];
+  /* The models an agent that works like this may keep as its own for a size. */
+  choicesFor(worksLike: WorksLike, size: Size): Choice[];
   info(id: string): Choice;
   missing: string[];
   onSave(): void;
@@ -617,7 +622,16 @@ function AgentForm({ editing, draft, setDraft, rules, taken, pinned, busy, error
   const ownSizes = SIZES.filter((s) => draft.own[s]);
   const [change, setChange] = useState(false);
   const [ownModel, setOwnModel] = useState(ownSizes.length > 0);
-  const problem = editing ? (draft.purpose.trim() ? null : "Say what it's for.") : draftProblem(draft, taken);
+  const problem = editing || created ? (draft.purpose.trim() ? null : "Say what it's for.") : draftProblem(draft, taken);
+  /* A new role keeps only the own models that role may run. */
+  const pickRole = (worksLike: WorksLike) => {
+    const own: Partial<Record<Size, string>> = {};
+    for (const s of SIZES) {
+      const id = draft.own[s];
+      if (id && choicesFor(worksLike, s).some((c) => c.id === id && c.ok)) own[s] = id;
+    }
+    set({ worksLike, own });
+  };
   const mode = ownSizes.length === 0 ? "follows" : ownSizes.length === SIZES.length ? "own" : "except";
   const first = useRef<HTMLInputElement>(null);
   useEffect(() => first.current?.focus(), []);
@@ -635,8 +649,8 @@ function AgentForm({ editing, draft, setDraft, rules, taken, pinned, busy, error
             className={`${softField} ${mono}`}
             value={draft.name}
             placeholder="frontend-developer"
-            readOnly={!!editing}
-            aria-readonly={!!editing || undefined}
+            readOnly={!!editing || created}
+            aria-readonly={!!editing || created || undefined}
             onChange={(e) => set({ name: e.target.value })}
           />
         </label>
@@ -652,7 +666,9 @@ function AgentForm({ editing, draft, setDraft, rules, taken, pinned, busy, error
           <textarea
             className={`${softField} min-h-[92px] resize-y`}
             value={draft.instructions}
-            placeholder={editing ? "Leave empty to keep its instructions as they are." : "How it should work, in your words. For example: use the app's tokens, and render the screen before you report."}
+            readOnly={loading}
+            aria-busy={loading || undefined}
+            placeholder={loading ? "Reading its instructions…" : "How it should work, in your words. For example: use the app's tokens, and render the screen before you report."}
             onChange={(e) => set({ instructions: e.target.value })}
           />
         </label>
@@ -705,7 +721,7 @@ function AgentForm({ editing, draft, setDraft, rules, taken, pinned, busy, error
             <div className="flex flex-col gap-3" data-testid="change">
               <div className="flex flex-wrap items-center gap-s1">
                 <span className="w-[110px] text-sm text-ink-2">Works like</span>
-                <Seg name="Works like" options={WORKS_LIKE} value={draft.worksLike} labelOf={worksLikeLabel} onPick={(worksLike) => set({ worksLike })} />
+                <Seg name="Works like" options={WORKS_LIKE} value={draft.worksLike} labelOf={worksLikeLabel} disabled={loading} onPick={pickRole} />
                 <span className="text-xs text-ink-3">Its tools and what it may do.</span>
               </div>
               <div className="flex flex-wrap items-center gap-s1">
@@ -726,7 +742,7 @@ function AgentForm({ editing, draft, setDraft, rules, taken, pinned, busy, error
                   <SizeModels
                     who={cleanName(draft.name) || "It"}
                     own={draft.own}
-                    choicesFor={choicesFor}
+                    choicesFor={(s) => choicesFor(draft.worksLike, s)}
                     info={info}
                     missing={missing}
                     busy={busy}
@@ -743,8 +759,8 @@ function AgentForm({ editing, draft, setDraft, rules, taken, pinned, busy, error
             </div>
           )}
           {error && (
-            <p role="alert" className={alert}>
-              Could not {editing ? "save" : "create"} it: {withLinks(error)}
+            <p role="alert" className={alert} data-testid="form-error">
+              {created ? "It's created, but its own models couldn't be saved" : `Could not ${editing ? "save" : "create"} it`}: {withLinks(error)}
             </p>
           )}
           <div className="flex flex-wrap items-center justify-end gap-s1">
@@ -756,8 +772,8 @@ function AgentForm({ editing, draft, setDraft, rules, taken, pinned, busy, error
             <button type="button" className={quiet} onClick={onCancel}>
               Cancel
             </button>
-            <button type="button" className={main} disabled={!!problem || busy} onClick={onSave}>
-              {busy ? (editing ? "Saving…" : "Creating…") : editing ? "Save" : "Create agent"}
+            <button type="button" className={main} disabled={!!problem || busy || loading} onClick={onSave}>
+              {busy ? (editing || created ? "Saving…" : "Creating…") : editing ? "Save" : created ? "Save its models" : "Create agent"}
             </button>
           </div>
         </div>
@@ -829,6 +845,20 @@ interface Need {
   action: ReactNode;
 }
 
+interface FormState {
+  /* The agent being edited, or null for a new one. */
+  editing: string | null;
+  draft: Draft;
+  /* A new agent's profile is written (POST /profiles went through): a retry only writes its own models. */
+  created?: boolean;
+  /* Reading an edited agent's saved instructions and role. */
+  loading?: boolean;
+  /* What was saved, to send only what changed: instructions null when they couldn't be read. */
+  base?: { instructions: string | null; worksLike: WorksLike };
+}
+
+const roleOf = (role: string | null): WorksLike => (role === "reviewer" ? "reviewer" : "developer");
+
 const ownOf = (a: AgentRow): Partial<Record<Size, string>> => Object.fromEntries(SIZES.filter((s) => a.models[s]?.model).map((s) => [s, a.models[s]!.model!]));
 
 export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
@@ -847,8 +877,8 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   const [adding, setAdding] = useState<Size | null>(null);
   /* The row and the agent whose problems are open there. */
   const [probs, setProbs] = useState<{ size: Size; id: string } | null>(null);
-  /* The form: a new agent (name null) or the one being edited, and its answers. */
-  const [form, setForm] = useState<{ editing: string | null; draft: Draft } | null>(null);
+  /* The form: a new agent (editing null) or the one being edited, and its answers. */
+  const [form, setForm] = useState<FormState | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   /* A built-in agent whose own models are open under its row. */
   const [models, setModels] = useState<string | null>(null);
@@ -917,8 +947,13 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   };
   const put = (size: Size, change: KindPut) => save({ kinds: { [size]: change } });
 
-  /* An agent's own order for a size: the model picked, then the shared table's order behind it. */
-  const orderFor = (size: Size, id: string) => ({ model: id, fallbacks: kinds ? runOrder(kinds[size]).filter((x) => x !== id) : [] });
+  /* An agent's own order for a size: the model picked, then the shared
+     table's order behind it, less what the org refuses or no longer exists
+     (the engine checks every name it's given). */
+  const orderFor = (size: Size, id: string) => ({
+    model: id,
+    fallbacks: kinds ? runOrder(kinds[size]).filter((x) => x !== id && byName.has(x) && byName.get(x)!.allowed !== false) : [],
+  });
   const ownChanges = (before: Partial<Record<Size, string>>, after: Partial<Record<Size, string>>) => {
     const out: Record<string, { model: string; fallbacks?: string[] } | null> = {};
     for (const s of SIZES) {
@@ -929,6 +964,7 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   };
   /* What an agent's own model for a size may be: the models its role runs. */
   const choicesFor = (role: string | null) => (s: Size) => offered(role === "reviewer" ? "reviewer" : s);
+  const formChoices = (worksLike: WorksLike, s: Size) => choicesFor(worksLike)(s);
 
   const panelFor = (s: Size): Panel | null => (open?.size === s ? open.panel : null);
   const setPanel = (s: Size, p: Panel | null) => {
@@ -949,32 +985,49 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
     }
     setModels(null);
     setFormError(null);
-    setForm(
-      form?.editing === a.name
-        ? null
-        : { editing: a.name, draft: { name: a.name, purpose: a.description, instructions: "", rules: a.rules, worksLike: a.role === "reviewer" ? "reviewer" : "developer", own: ownOf(a) } },
+    if (form?.editing === a.name) return setForm(null);
+    const fallback = roleOf(a.role);
+    setForm({
+      editing: a.name,
+      loading: true,
+      draft: { name: a.name, purpose: a.description, instructions: "", rules: a.rules, worksLike: fallback, own: ownOf(a) },
+      base: { instructions: null, worksLike: fallback },
+    });
+    // Its own instructions and what it works like, as saved; only this edit's answer is used.
+    client.profile(a.name).then(
+      (d) => {
+        const like = (WORKS_LIKE as string[]).includes(d.extends?.[0] ?? "") ? (d.extends[0] as WorksLike) : fallback;
+        const saved = typeof d.instructions === "string" ? d.instructions : null;
+        setForm((f) => (f?.editing === a.name && f.loading ? { ...f, loading: false, draft: { ...f.draft, instructions: saved ?? "", worksLike: like }, base: { instructions: saved, worksLike: like } } : f));
+      },
+      () => setForm((f) => (f?.editing === a.name && f.loading ? { ...f, loading: false } : f)),
     );
   };
 
   const submit = async () => {
     if (!repo || !form) return;
-    const { draft, editing } = form;
+    const { draft, editing, base } = form;
+    let created = !!form.created;
     const name = editing ?? cleanName(draft.name);
     const before = editing ? agents.find((a) => a.name === editing) : undefined;
     setBusy(true);
     setFormError(null);
     try {
-      if (!editing) {
+      if (!editing && !created) {
         // An agent is how to work: no provider, model or effort; its model follows the job size.
         await client.createProfile({ repo, name, description: draft.purpose.trim(), works_like: draft.worksLike, instructions: draft.instructions, rules: draft.rules });
-      } else {
-        const initialRole = before?.role === "reviewer" ? "reviewer" : "developer";
+        // Written: from here a retry writes only its own models, and the list shows it.
+        created = true;
+        setForm((f) => (f && f.editing === null ? { ...f, created: true } : f));
+      } else if (editing) {
+        // Instructions go when they changed: "" clears saved ones. When they couldn't be read, only new text goes.
+        const instructions = base?.instructions == null ? (draft.instructions.trim() ? draft.instructions : undefined) : draft.instructions !== base.instructions ? draft.instructions : undefined;
         await client.updateProfile(name, {
           repo,
           description: draft.purpose.trim(),
           rules: draft.rules,
-          ...(draft.instructions.trim() ? { instructions: draft.instructions } : {}),
-          ...(!before?.pinned && draft.worksLike !== initialRole ? { works_like: draft.worksLike } : {}),
+          ...(instructions !== undefined ? { instructions } : {}),
+          ...(!before?.pinned && draft.worksLike !== (base?.worksLike ?? roleOf(before?.role ?? null)) ? { works_like: draft.worksLike } : {}),
         });
       }
       const changes = before?.pinned ? {} : ownChanges(before ? ownOf(before) : {}, draft.own);
@@ -984,6 +1037,8 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
       await load();
     } catch (e) {
       setFormError(message(e));
+      // It was written before what failed: the list shows it now.
+      if (created) void load();
     } finally {
       setBusy(false);
     }
@@ -1040,14 +1095,16 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
     form && (
       <AgentForm
         editing={editing}
+        created={!!form.created}
+        loading={!!form.loading}
         draft={form.draft}
-        setDraft={(draft) => setForm({ ...form, draft })}
+        setDraft={(draft) => setForm((f) => f && { ...f, draft })}
         rules={rules}
         taken={profiles.map((p) => p.name)}
         pinned={editing ? pinnedOf(editing) : null}
         busy={busy}
         error={formError}
-        choicesFor={choicesFor(editing?.role ?? (form.draft.worksLike === "reviewer" ? "reviewer" : null))}
+        choicesFor={formChoices}
         info={info}
         missing={missing}
         onSave={() => void submit()}

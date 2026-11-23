@@ -603,10 +603,13 @@ def get_profile(db: DB, request: Request) -> Any:
         except (KeyError, profiles.ProfileError):
             break
     prompt = f"{p.prompt.strip()}\n\n{profiles.rules_prompt(packs)}".strip() if packs else p.prompt.strip()
+    # The file's own body, without what it extends or its rule packs: what PUT /profiles/{name} replaces.
+    found = profiles._read(name, repo)
+    instructions = profiles._frontmatter(found[0])[1].strip() if found else ""
     return {**ProfileDTO.from_profile(p, errors, warnings).to_json(),
             "source": profiles.profile_source(name, repo), "extends": chain,
             "rules": [{"name": k.name, "description": k.description, "source": k.source} for k in packs],
-            "prompt": prompt, "lint": {"errors": errors, "warnings": warnings}}
+            "prompt": prompt, "instructions": instructions, "lint": {"errors": errors, "warnings": warnings}}
 
 
 @_json

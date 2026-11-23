@@ -1155,6 +1155,9 @@ export interface ProfileDetail extends ProfileDTO {
   rules: RulePackInfo[];
   /* The prompt with the rule packs' text, as the agent gets it. */
   prompt: string;
+  /* The file's own body: its instructions without what it extends or its
+     rule packs, what PUT /profiles/{name} replaces. Absent from older engines. */
+  instructions?: string;
   lint: { errors: string[]; warnings: string[] };
 }
 
