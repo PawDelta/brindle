@@ -778,10 +778,15 @@ def restart_review(db: DB, worker: Agent, ws: Workspace, since: float) -> bool:
             parent_id = parent.id if parent else None
             first = agents.default_review_profile(cfg, current, db, ws.repo_root, current.task,
                                                   parent_id=parent_id) if second else None
-            profile = agents._review_choice(db, ws, first, cfg, parent_id=parent_id)[0]
             sha = gates.head(ws)
-            if agents._live_reviewer(db, ws, sha, profile) or (
-                    cfg.checks and agents._review_pending(ws.id, profile, sha, current.reviewing_since)):
+            automatic = agents._automatic_review_pool(cfg, first)
+            if automatic:
+                request_key = ""
+                live = agents._live_reviewer(db, ws, sha, slot="")
+            else:
+                request_key = agents._review_choice(db, ws, first, cfg, parent_id=parent_id)[0]
+                live = agents._live_reviewer(db, ws, sha, request_key)
+            if live or (cfg.checks and agents._review_pending(ws.id, request_key, sha, current.reviewing_since)):
                 return False
         except agents.AgentError:
             pass   # _start_review reports an unavailable reviewer through the usual escalation
@@ -1072,6 +1077,8 @@ def on_reviewer_dead(db: DB, reviewer: Agent, ws: Workspace) -> bool:
             db.update_agent(reviewer.id, status="done")
             return True
         profiles = {reviewer.profile, *(a.profile for a in others)}
+        if slot in (None, ""):
+            profiles.add("")
         if slot is None:
             profiles.update(profile_names(ws.repo_root))
         report = review_claim(db, ws)

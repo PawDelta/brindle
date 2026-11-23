@@ -1092,6 +1092,7 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
         argv, gate = tmux.gated(argv)
     size = _resume_window_size.get()
     tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws), **({"size": size} if size else {}))
+    target = None
     try:
         env, credentials, allow, deny, org_env = _window_environment(agent, ws, m)
         agent_env, enforce = _agent_env_policy(ws)
@@ -1104,6 +1105,8 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
                                      **({"deny": deny} if deny else {}),
                                      **({"agent_env": agent_env} if agent_env else {}),
                                      **({"enforce": True} if enforce else {}))
+            if agent.provider in VERSION_DISCOVERY_PROVIDERS:
+                agent._opening_pane = target
             _record_env_drops(agent, ws, env, credentials, allow, deny, agent_env, enforce)
         agent.__dict__.pop("_pane_environment", None)
         # The pane id only means anything on the server that issued it (a
@@ -1129,10 +1132,20 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
                 _ensure_sidebar(db, root_of(db, agent.id), ws, target)
             except Exception:
                 pass
+    except Exception:  # The pane can already be running, or will run when its gate opens.
+        if target is None:
+            raise
+        log.warning("Could not finish setting up pane %s for agent %s", target, agent.id)
     finally:
-        if gate:
-            tmux.open_gate(gate)
-    tmux.apply_theme(ws.tmux_session)
+        if gate and target is not None:
+            try:
+                tmux.open_gate(gate)
+            except Exception:
+                log.warning("Could not signal the startup gate for pane %s", target)
+    try:
+        tmux.apply_theme(ws.tmux_session)
+    except Exception:
+        log.warning("Could not apply the theme to pane %s's tmux session", target)
     return target
 
 
@@ -1977,6 +1990,7 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     opening = time.monotonic()
     with _launch_step("window_s"):
         record_model = agent.provider in VERSION_DISCOVERY_PROVIDERS
+        agent.__dict__.pop("_opening_pane", None)
         previous_model = db.agent_launch_model(agent.id) if record_model else None
         if record_model:
             db.record_agent_launch_model(agent.id, profile.model)
@@ -1984,9 +1998,11 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             target = _open_window(db, agent, ws, f"{profile.name}-{agent.id[:4]}", argv, watch_pane,
                                   **({"m": m} if m is not None else {}))
         except BaseException:
-            if record_model:
+            if record_model and not getattr(agent, "_opening_pane", None):
                 db.record_agent_launch_model(agent.id, previous_model)
             raise
+        finally:
+            agent.__dict__.pop("_opening_pane", None)
         agent.__dict__.pop("_review_launch", None)
     if (spent := _window_seconds.get()) is not None:
         spent.append(time.monotonic() - opening)
@@ -5270,18 +5286,22 @@ def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig, *, launch: Revi
         raise AgentError(f"reviewer profile {name!r} refused by policy: {d.reason}")
 
 
-def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None) -> Agent | None:
-    """The reviewer still at work on ``ws`` at ``sha``, if any. With
-    ``profile``, only one running that profile (a second review by another
-    profile is not a duplicate)."""
+def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None, *,
+                   slot: str | None = None) -> Agent | None:
+    """Find a reviewer still at work on the commit, scoped by profile or dispatch slot."""
     from brindle import launch_health
 
     for a in db.list_agents(ws.id):
         if a.mode == "review" and a.result is None and alive_or_starting(a) and a.review_sha == sha \
                 and not a.unreported_noted \
+                and (slot is None or db.review_slot(a.id) == slot) \
                 and (profile is None or a.profile == profile) and not launch_health.has_mcp_failure(db, a, ws):
             return a
     return None
+
+
+def _automatic_review_pool(cfg: RepoConfig, profile: str | None) -> bool:
+    return profile is None and "reviewer" in cfg.agent_models and not cfg.reviewer_models_inherited
 
 
 def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
@@ -5314,42 +5334,47 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
             return None
         return request_review(db, caller, ws, profile, focus, cfg, second=second, slot=slot)
     _review_kill_switch(ws)
-    slot = _review_claim_slot(profile, slot)
-    automatic = profile is None and "reviewer" in cfg.agent_models and not cfg.reviewer_models_inherited
-    profile = _review_profile(db, ws, profile, cfg, parent_id=caller.id if caller else None)
-    argv = [*brindle_invocation(), "_review-after-checks", ws.id, "--review-slot", slot]
-    if caller:
-        argv += ["--caller", caller.id]
-    if profile:
-        argv += ["--profile", profile]
-    if automatic:
-        argv += ["--auto-profile"]
-    if focus:
-        argv += ["--focus", focus]
-    if second:
-        argv += ["--second-review"]
+    slot = pipeline._slot(_review_claim_slot(profile, slot), ws.repo_root)
+    automatic = _automatic_review_pool(cfg, profile)
+    parent_id = caller.id if caller else None
+    if not automatic:
+        profile = _review_profile(db, ws, profile, cfg, parent_id=parent_id)
+    request_key = slot if automatic else profile
     # Nobody's child: the worker reporting here may be closed while the checks
     # still run, and stopping it would stop this run too, so no reviewer (#190).
     with review_dispatch_lock(ws.id):
         if not _report_current(db, ws, report):
             return None   # the checks of an earlier start for this report failed already
         sha = gates.head(ws)
-        existing = _live_reviewer(db, ws, sha, profile)
+        existing = _live_reviewer(db, ws, sha, slot=slot) if automatic else _live_reviewer(db, ws, sha, profile)
         if existing:
             return existing
         # The helper is bound to the report that queued it, so a late one
         # can't review a report the branch has since left.
         if report is None:
             report = pipeline.review_claim(db, ws)
-        if _review_pending(ws.id, profile, sha, report):
+        if _review_pending(ws.id, request_key, sha, report):
             return None
+        if automatic:
+            profile = _review_profile(db, ws, profile, cfg, parent_id=parent_id)
+        argv = [*brindle_invocation(), "_review-after-checks", ws.id, "--review-slot", slot]
+        if parent_id:
+            argv += ["--caller", parent_id]
+        if profile:
+            argv += ["--profile", profile]
+        if automatic:
+            argv += ["--auto-profile"]
+        if focus:
+            argv += ["--focus", focus]
+        if second:
+            argv += ["--second-review"]
         if report is not None:
             argv += ["--report", repr(report)]
         # Publish before detaching: even a helper that hasn't started yet
-        # must know that a later request superseded it. Profiles have separate
-        # claims so a required second review survives the first one's request.
+        # must know that a later request superseded it. An automatic pool has
+        # one claim per slot, even when the leading profile changes.
         request_id = uuid.uuid4().hex
-        claim = _review_request_file(ws.id, profile)
+        claim = _review_request_file(ws.id, request_key)
         pending = claim.with_suffix("." + request_id)
         pending.write_text(f"{request_id}\n{sha}\n{time.time()}\n{'' if report is None else repr(report)}")
         pending.replace(claim)
@@ -5372,26 +5397,26 @@ def expected_check_wait(db: DB, ws: Workspace, cfg: RepoConfig) -> float | None:
 MOVED_RETRIES = 2   # check runs a branch that keeps moving under them gets again (review_after_checks)
 
 
-def _review_request_file(workspace_id: str, profile: str):
+def _review_request_file(workspace_id: str, request_key: str):
     from brindle.config import brindle_home
 
     directory = brindle_home() / "locks"
     directory.mkdir(parents=True, exist_ok=True)
-    key = hashlib.sha1(json.dumps([workspace_id, profile]).encode()).hexdigest()
+    key = hashlib.sha1(json.dumps([workspace_id, request_key]).encode()).hexdigest()
     return directory / ("review-request-" + key)
 
 
-def _review_requested(workspace_id: str, profile: str, request_id: str | None) -> bool:
+def _review_requested(workspace_id: str, request_key: str, request_id: str | None) -> bool:
     # Helpers from before request claims were introduced can still finish.
     if request_id is None:
         return True
     try:
-        return _review_request_file(workspace_id, profile).read_text().split("\n", 1)[0] == request_id
+        return _review_request_file(workspace_id, request_key).read_text().split("\n", 1)[0] == request_id
     except FileNotFoundError:
         return False
 
 
-def _review_pending(workspace_id: str, profile: str, sha: str, report: float | None = None) -> bool:
+def _review_pending(workspace_id: str, request_key: str, sha: str, report: float | None = None) -> bool:
     """Reuse this commit's queued or running helper for the report ``report``
     (see ``_report_current``), but allow a dead one to be replaced. A helper
     queued for an earlier report is not reused: it retires itself, so the new
@@ -5399,7 +5424,7 @@ def _review_pending(workspace_id: str, profile: str, sha: str, report: float | N
     from brindle import gates
 
     try:
-        request_id, commit, queued_at, *bound = _review_request_file(workspace_id, profile).read_text().splitlines()
+        request_id, commit, queued_at, *bound = _review_request_file(workspace_id, request_key).read_text().splitlines()
         starting = time.time() - float(queued_at) < LAUNCH_GRACE
         queued_for = float(bound[0]) if bound and bound[0] else None
     except (FileNotFoundError, ValueError):
@@ -5420,7 +5445,7 @@ def _report_current(db: DB, ws: Workspace, report: float | None) -> bool:
 
 
 @contextmanager
-def _review_request_run(workspace_id: str, profile: str, request_id: str | None):
+def _review_request_run(workspace_id: str, request_key: str, request_id: str | None):
     """Liveness belongs to one request, so another profile or obsolete helper cannot mask its death."""
     from brindle import gates
 
@@ -5432,8 +5457,8 @@ def _review_request_run(workspace_id: str, profile: str, request_id: str | None)
             yield
         finally:
             with review_dispatch_lock(workspace_id):
-                if _review_requested(workspace_id, profile, request_id):
-                    _review_request_file(workspace_id, profile).unlink(missing_ok=True)
+                if _review_requested(workspace_id, request_key, request_id):
+                    _review_request_file(workspace_id, request_key).unlink(missing_ok=True)
 
 
 def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: str | None = None,
@@ -5465,15 +5490,17 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
     slot = pipeline._slot(_review_claim_slot(profile, slot), ws.repo_root)
     if not auto_profile or profile is None:
         profile = _review_profile(db, ws, profile, cfg, parent_id=caller_id)
-    with _review_request_run(ws.id, profile, request_id), pipeline.review_run(ws.id):
+    request_key = slot if auto_profile else profile
+    with _review_request_run(ws.id, request_key, request_id), pipeline.review_run(ws.id):
         # ``report``: the report whose review queued this helper (start_review);
         # it acts for that report alone and retires once the branch leaves it.
         since = report if report is not None else pipeline.review_claim(db, ws)
         for _attempt in range(MOVED_RETRIES + 1):
-            if not _review_requested(ws.id, profile, request_id) or not _report_current(db, ws, report):
+            if not _review_requested(ws.id, request_key, request_id) or not _report_current(db, ws, report):
                 return None
             sha = gates.head(ws)
-            if _live_reviewer(db, ws, sha, profile):
+            existing = _live_reviewer(db, ws, sha, slot=slot) if auto_profile else _live_reviewer(db, ws, sha, profile)
+            if existing:
                 return None
             try:
                 # In the check queue as of the report (#186): a run restarted
@@ -5481,13 +5508,13 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
                 with gates.queue_place(since or time.time()):
                     summary = gates.check_summary(
                         db, ws, cfg, cancel=lambda sha=sha: gates.head(ws) != sha
-                        or not _review_requested(ws.id, profile, request_id)
+                        or not _review_requested(ws.id, request_key, request_id)
                         or not _report_current(db, ws, report))
             except gates.Abandoned:
                 summary = None
             except Exception as e:  # noqa: BLE001 - checks that never finished are a failed gate
                 summary = f"FAIL `{' && '.join(cfg.checks)}`\n(running the checks crashed: {e})"
-            if (db.get_workspace(ws.id) is None or not _review_requested(ws.id, profile, request_id)
+            if (db.get_workspace(ws.id) is None or not _review_requested(ws.id, request_key, request_id)
                     or not _report_current(db, ws, report)):
                 return None
             if gates.head(ws) != sha:
@@ -5499,7 +5526,7 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
             # A newer request cannot slip between the final claim check and
             # spawn, and the reviewer is bound to the commit that was checked.
             with review_dispatch_lock(ws.id):
-                if not _review_requested(ws.id, profile, request_id) or not _report_current(db, ws, report):
+                if not _review_requested(ws.id, request_key, request_id) or not _report_current(db, ws, report):
                     return None   # superseded, or its report is over: the checks failed, or a newer one came
                 if gates.head(ws) != sha:
                     continue   # moved while waiting for the lock: check the new commit
@@ -5646,6 +5673,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         if profile and any(_same_profile(profile, name, ws.repo_root)
                            for name in (review_scope.LIGHT_PROFILE, review_scope.CODEX_LIGHT_PROFILE)):
             profile = None
+    automatic = _automatic_review_pool(cfg, profile)
     launches: dict[str, ReviewLaunch] = {}
     profile = _review_profile(db, ws, profile, cfg, parent_id=caller.id if caller else None, launches=launches)
     if second and not slot:
@@ -5655,17 +5683,18 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         raise ReviewHeadMoved(f"{ws.branch} moved off {expected_sha[:8]} before its reviewer started")
     failed = None
     for old in db.list_agents(ws.id):
-        if (old.mode == "review" and old.result is None and old.review_sha == sha
-                and (profile is None or _same_profile(old.profile, profile, ws.repo_root))
-                and launch_health.has_mcp_failure(db, old, ws)):
+        if old.mode != "review" or old.result is not None:
+            continue
+        matching = db.review_slot(old.id) == slot if automatic else _same_profile(old.profile, profile, ws.repo_root)
+        if old.review_sha == sha and matching and launch_health.has_mcp_failure(db, old, ws):
             failed = old
             continue
-        if old.mode != "review" or old.result is not None or not alive_or_starting(old):
+        if not alive_or_starting(old):
             continue
         if old.unreported_noted:
             continue   # it stopped without a verdict: not the reviewer of anything
         if old.review_sha == sha:
-            if profile and not _same_profile(old.profile, profile, ws.repo_root):
+            if not matching:
                 continue   # another profile's review of this commit (a second review): keep both
             return old   # one reviewer per workspace and commit
         close(db, old.id)   # a new commit replaces the reviewer of the old one

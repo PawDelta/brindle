@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from brindle import agents, autopilot, model_availability, provider_health, workspaces
+from brindle import agents, autopilot, model_availability, provider_health, tmux, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from brindle.pro import team_policy
@@ -19,6 +19,8 @@ def routing(db, repo, monkeypatch):
     monkeypatch.setattr("brindle.quota.known_headroom", lambda *a, **kw: None)
     monkeypatch.setattr("brindle.providers.signed_out", lambda *a, **kw: None)
     monkeypatch.setattr("shutil.which", lambda cli: f"/usr/bin/{cli}")
+    monkeypatch.setattr(agents, "_model_checker", model_availability.ModelAvailabilityChecker(
+        discover=lambda request, limit: model_availability.Catalog(frozenset(), "codex", complete=False)))
     return ws
 
 
@@ -135,8 +137,16 @@ def test_reviewer_order_demotes_the_writers_launched_model(db, repo, routing, la
         monkeypatch.setattr(agents, "_detach", queued.append)
         assert agents.start_review(db, caller, routing, cfg=cfg) is None
         [command] = queued
-        home = "/review-home"
-        monkeypatch.setattr("brindle.gates.check_summary", lambda *a, **kw: "")
+        def check_summary(*args, **kwargs):
+            nonlocal home
+            home = "/review-home"
+            assert agents.start_review(db, caller, routing, cfg=cfg) is None
+            assert queued == [command]
+            assert agents.start_review(db, caller, routing, "same-line", cfg=cfg, second=True) is None
+            assert len(queued) == 2
+            return ""
+
+        monkeypatch.setattr("brindle.gates.check_summary", check_summary)
         reviewer = agents.review_after_checks(
             db, caller.id, routing, command[command.index("--profile") + 1], cfg=cfg,
             request_id=command[command.index("--request-id") + 1], slot="",
@@ -146,6 +156,11 @@ def test_reviewer_order_demotes_the_writers_launched_model(db, repo, routing, la
     assert reviewer.profile == "other-line"
     assert reviewer.config_home == "/review-home"
     assert flag(launches[-1], "--model") == "gpt-6.2-astra"
+    if checks:
+        monkeypatch.setattr(agents, "alive_or_starting", lambda agent: agent.id == reviewer.id)
+        assert agents.start_review(db, caller, routing, cfg=cfg).id == reviewer.id
+        assert agents.start_review(db, caller, routing, "same-line", cfg=cfg, second=True) is None
+        assert sum("_review-after-checks" in argv for argv in queued) == 2
 
 
 def test_launch_model_visible_before_pane_starts_and_restored_if_open_fails(
@@ -162,3 +177,29 @@ def test_launch_model_visible_before_pane_starts_and_restored_if_open_fails(
     with pytest.raises(OSError):
         agents._launch(db, worker, routing, prompt=None, resume="previous", watch_pane=False, model_checked=True)
     assert db.agent_launch_model(worker.id) == "gpt-6.2-sol"
+
+
+def test_post_start_theme_error_keeps_launched_model(db, repo, routing, detached, monkeypatch):
+    configure(repo, ["pinned"], pinned="gpt-6.2-astra")
+    runnable = set()
+    themed = []
+
+    def open_window(*args, tag, **kwargs):
+        assert db.agent_launch_model(tag[1]) == "gpt-6.2-astra"
+        return "%new"
+
+    def fail_theme(session):
+        themed.append(bool(runnable))
+        raise OSError("theme failed")
+
+    monkeypatch.setattr(tmux, "ensure_session", lambda *a, **kw: None)
+    monkeypatch.setattr(tmux, "new_window", open_window)
+    monkeypatch.setattr(tmux, "open_gate", runnable.add)
+    monkeypatch.setattr(tmux, "apply_theme", fail_theme)
+    monkeypatch.setattr(tmux, "mark_launched", lambda *a: None)
+    monkeypatch.setattr(agents, "_ensure_sidebar", lambda *a: None)
+    worker = agents.spawn(db, routing, "pinned", prompt="task", mode="assign",
+                          watch_pane=True, background_setup=True)
+    assert themed == [True]
+    assert db.get_agent(worker.id).tmux_window == "%new"
+    assert db.agent_launch_model(worker.id) == "gpt-6.2-astra"

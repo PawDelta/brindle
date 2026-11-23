@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shlex
@@ -18,6 +19,8 @@ from pathlib import Path
 from typing import Callable, Iterable, Iterator
 
 from brindle import __version__, spawn
+
+log = logging.getLogger(__name__)
 
 
 class TmuxError(RuntimeError):
@@ -479,12 +482,15 @@ def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[
     )
     target = NewPane(proc.stdout.strip())
     target.launch = launch
-    if tag and tag[0] == AGENT_TAG:
-        _set_for_launch(target, launch, *tag)
-    elif tag:
+    if tag and tag[0] != AGENT_TAG:
         set_pane_tag(target, *tag)
-    # Keep the agent's pane around after it exits so its output can be read.
-    _tmux("set-option", "-p", "-t", target, "remain-on-exit", "on", check=False)
+    try:
+        if tag and tag[0] == AGENT_TAG:
+            _set_for_launch(target, launch, *tag)
+        # Keep the agent's pane around after it exits so its output can be read.
+        _tmux("set-option", "-p", "-t", target, "remain-on-exit", "on", check=False)
+    except (OSError, TmuxError):
+        log.warning("Could not finish setting options on pane %s", target)
     return target
 
 
