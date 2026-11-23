@@ -18,6 +18,15 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
   current.current = { visual, picks, onPick, zoom };
   const source = useMemo(() => {
     const doc = new DOMParser().parseFromString(inertSource(visual.inline_html ?? "").source, "text/html");
+    // Keep the frame on this CSP-protected document. Links in an inline visual are inert.
+    for (const link of doc.querySelectorAll("a, area, math, math *")) {
+      link.removeAttribute("href");
+      link.removeAttribute("xlink:href");
+    }
+    for (const animation of doc.querySelectorAll("svg animate, svg set")) {
+      const attribute = animation.getAttribute("attributeName");
+      if (attribute === "href" || attribute?.endsWith(":href")) animation.remove();
+    }
     for (const group of visual.choices ?? []) {
       let field = Array.from(doc.querySelectorAll("fieldset[data-choice]")).find(el => el.getAttribute("data-choice") === group.id);
       if (!field) {
@@ -73,8 +82,10 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
     const doc = frame.current?.contentDocument;
     if (snapshotRequest > 0 && doc) onSnapshot(doc.documentElement.outerHTML);
   }, [snapshotRequest]);
+  // Older WebKit blocks even the parent's listeners with the sandboxed scripts flag
+  // (WebKit bug 98951). The sanitized srcdoc's CSP forbids all document scripts.
   return <iframe ref={frame} title={visual.title} className="min-h-0 w-full flex-1 border-0"
-    sandbox="allow-same-origin" srcDoc={source} onLoad={() => {
+    sandbox="allow-same-origin allow-scripts" srcDoc={source} onLoad={() => {
       const doc = frame.current?.contentDocument;
       if (!doc) return;
       // Cancel links/forms too: this document remains the inert revision we loaded.
