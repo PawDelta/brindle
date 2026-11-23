@@ -936,9 +936,11 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     from brindle.config import load_repo_config
 
     from brindle import guardrails
-    from brindle.profiles import load_rule_packs, rules_prompt
+    from brindle.profiles import compose, load_rule_packs, rules_prompt
 
-    profile = guardrails.effective(load_profile(agent.profile, ws.repo_root))
+    profile = (compose(agent.agent, agent.profile, ws.repo_root) if agent.agent
+               else load_profile(agent.profile, ws.repo_root))
+    profile = guardrails.effective(profile)
     if agent.mode == "doc_question":
         return replace(profile, provider=agent.provider, permission_mode="plan", headless=False,
                        strict_mcp=True, add_dirs=[], read_dirs=[], allowed_tools=[],

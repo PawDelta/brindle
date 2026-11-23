@@ -103,6 +103,11 @@ CREATE TABLE IF NOT EXISTS agent_milestones (
     agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
     title TEXT NOT NULL
 );
+-- Optional role layer composed onto agents.profile. Released tables stay unchanged.
+CREATE TABLE IF NOT EXISTS agent_roles (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    agent TEXT
+);
 -- The goal milestone a queued task's worker is assigned to (assign/handoff's milestone); a table of its
 -- own so no released table gains a column.
 CREATE TABLE IF NOT EXISTS task_milestones (
@@ -1530,6 +1535,7 @@ class Agent:
     review_slot: str | None = None         # the review claim slot it was started in (gates.standing_reviews)
     failed_why: str | None = None          # why it is 'failed': auth | model | delivery; None from an older brindle
     name: str | None = None                # a session root's name from the person; None: listed by its goal
+    agent: str | None = None               # role layer composed onto profile; None keeps legacy loading
 
 @dataclass
 class Autopilot:
@@ -2191,6 +2197,7 @@ class DB:
                 self.conn.execute(f"ALTER TABLE permission_requests ADD COLUMN {col} {kind}")
         self._move_session_repo_branches()
         self._move_task_wait_noted()
+        self._move_agent_roles()
         if "merged_at" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(session_prs)")}:
             self.conn.execute("ALTER TABLE session_prs ADD COLUMN merged_at REAL")
         health_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(launch_health)")}
@@ -2235,6 +2242,20 @@ class DB:
             c.execute("INSERT OR IGNORE INTO session_repo_branches (root_id, alias, branch) "
                       "SELECT root_id, alias, branch FROM session_repos WHERE branch IS NOT NULL")
             c.execute("ALTER TABLE session_repos DROP COLUMN branch")
+
+    def _move_agent_roles(self) -> None:
+        """Move the development-only agents.agent column without changing released tables."""
+        def has_col(c: sqlite3.Connection) -> bool:
+            return "agent" in {r["name"] for r in c.execute("PRAGMA table_info(agents)")}
+
+        if not has_col(self.conn):
+            return
+        with self.tx() as c:
+            if not has_col(c):
+                return
+            c.execute("INSERT OR IGNORE INTO agent_roles (agent_id, agent) "
+                      "SELECT id, agent FROM agents WHERE agent IS NOT NULL")
+            c.execute("ALTER TABLE agents DROP COLUMN agent")
 
     def _move_task_wait_noted(self) -> None:
         """A development build kept the long-wait note on tasks.wait_noted:
@@ -2580,6 +2601,8 @@ class DB:
                  a.transcript_path, a.done_when, a.inbox_socket, a.inbox_token, a.review_sha,
                  a.tmux_server, a.config_home),
             )
+            if a.agent is not None:
+                c.execute("INSERT INTO agent_roles (agent_id, agent) VALUES (?,?)", (a.id, a.agent))
 
     def data_version(self) -> int:
         """Changes whenever another connection commits to the database: a
@@ -2587,21 +2610,26 @@ class DB:
         return self.conn.execute("PRAGMA data_version").fetchone()[0]
 
     def get_agent(self, agent_id: str) -> Agent | None:
-        row = self.conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
+        row = self.conn.execute("SELECT a.*, r.agent FROM agents a "
+                                "LEFT JOIN agent_roles r ON r.agent_id=a.id WHERE a.id=?",
+                                (agent_id,)).fetchone()
         return _load(Agent, row) if row else None
 
     def list_agents(self, workspace_id: str | None = None) -> list[Agent]:
         if workspace_id:
             rows = self.conn.execute(
-                "SELECT * FROM agents WHERE workspace_id=? ORDER BY created_at", (workspace_id,)
+                "SELECT a.*, r.agent FROM agents a LEFT JOIN agent_roles r ON r.agent_id=a.id "
+                "WHERE a.workspace_id=? ORDER BY a.created_at", (workspace_id,)
             )
         else:
-            rows = self.conn.execute("SELECT * FROM agents ORDER BY created_at")
+            rows = self.conn.execute("SELECT a.*, r.agent FROM agents a "
+                                     "LEFT JOIN agent_roles r ON r.agent_id=a.id ORDER BY a.created_at")
         return [_load(Agent, r) for r in rows]
 
     def children(self, parent_id: str) -> list[Agent]:
         rows = self.conn.execute(
-            "SELECT * FROM agents WHERE parent_id=? ORDER BY created_at", (parent_id,)
+            "SELECT a.*, r.agent FROM agents a LEFT JOIN agent_roles r ON r.agent_id=a.id "
+            "WHERE a.parent_id=? ORDER BY a.created_at", (parent_id,)
         )
         return [_load(Agent, r) for r in rows]
 
@@ -2611,9 +2639,19 @@ class DB:
             self.set_status(agent_id, str(status))
             if not fields:
                 return
+        has_agent = "agent" in fields
+        agent = fields.pop("agent", None)
         cols = ", ".join(f"{k}=?" for k in fields)
         with self.tx() as c:
-            c.execute(f"UPDATE agents SET {cols} WHERE id=?", (*fields.values(), agent_id))
+            if has_agent:
+                if agent is None:
+                    c.execute("DELETE FROM agent_roles WHERE agent_id=?", (agent_id,))
+                else:
+                    c.execute("INSERT INTO agent_roles (agent_id, agent) "
+                              "SELECT id, ? FROM agents WHERE id=? "
+                              "ON CONFLICT(agent_id) DO UPDATE SET agent=excluded.agent", (agent, agent_id))
+            if fields:
+                c.execute(f"UPDATE agents SET {cols} WHERE id=?", (*fields.values(), agent_id))
         if "pipeline" in fields:   # the review / merge pipeline's step for this worker
             bus.publish_agent(self, "agent.pipeline", agent_id, pipeline=fields["pipeline"],
                               merge_failed=bool(fields.get("merge_failed")))
