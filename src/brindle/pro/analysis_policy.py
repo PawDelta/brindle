@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-import threading
 
 from brindle.pro import auth, license
 from brindle.pro._files import private_dir, read_private
@@ -13,8 +12,6 @@ SWITCHES = ("store", "share", "assist", "prompt_analysis", "import_upload")
 STATES = ("off", "default_on", "enforced_on", "enforced_off")
 PLAN_DEFAULT_ON = frozenset()   # analysis-doc switches are opt-in unless an org enforces them
 MAX_CACHE = 1024 * 1024
-_cache_lock = threading.Lock()
-_provider_updates_unavailable: dict[str, set[str]] = {}
 
 
 def cache_path(org: str):
@@ -43,9 +40,7 @@ def save_cached(org: str, policy: dict) -> None:
     try:
         with os.fdopen(fd, "wb") as stream:
             stream.write(data)
-        with _cache_lock:
-            os.replace(temporary, path)
-            _provider_updates_unavailable.pop(org, None)
+        os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
@@ -54,19 +49,6 @@ def save_cached(org: str, policy: dict) -> None:
 def load_cached(org: str) -> dict:
     raw = read_private(cache_path(org), MAX_CACHE)
     return _policy(json.loads(raw)) if raw is not None else {"switches": {}, "groups": {}}
-
-
-def provider_updates_read_failed(org: str, sub: str) -> None:
-    """Suspend the cached update lock for this identity until a policy arrives."""
-    with _cache_lock:
-        _provider_updates_unavailable.setdefault(org, set()).add(sub)
-
-
-def load_provider_updates_cached(org: str, sub: str) -> dict:
-    with _cache_lock:
-        if sub in _provider_updates_unavailable.get(org, ()):
-            return {}
-        return load_cached(org)
 
 
 def request(client, store, method: str, path: str, body: dict | None = None) -> dict:

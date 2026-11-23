@@ -236,6 +236,35 @@ def test_refused_org_policy_leaves_updates_unlocked(db, machine, monkeypatch):
     assert _send("GET", "/v1/user-settings")[1]["provider_cli_updates_locked"]
 
 
+def test_older_org_policy_success_cannot_restore_lock_after_a_refusal(db, monkeypatch):
+    ent = SimpleNamespace(org_id="org_overlap", sub="member", plan="enterprise",
+                          features=["analysis_docs_enterprise"])
+    policy = {"switches": {}, "groups": {}, updates.SETTING: {"mode": "automatic", "locked": True}}
+    analysis_policy.save_cached(ent.org_id, policy)
+    config.set_user(updates.SETTING, "ask")
+    monkeypatch.setattr(license, "current", lambda **kwargs: ent)
+    monkeypatch.setattr(analysis_docs, "_session", lambda: (object(), object()))
+    monkeypatch.setattr(auth, "authed", lambda *args: (200, policy))
+    save = analysis_policy.save_cached
+
+    def save_after_refusal(org, response):
+        with monkeypatch.context() as active:
+            active.setattr(auth, "authed", lambda *args: (403, {"error": "forbidden"}))
+            assert updates.setting(refresh=True) == {"mode": "ask", "locked": False}
+        save(org, response)
+
+    with monkeypatch.context() as older:
+        older.setattr(analysis_policy, "save_cached", save_after_refusal)
+        assert updates.setting(refresh=True) == {"mode": "ask", "locked": False}
+
+    ent.sub = "other_member"
+    assert updates.setting(refresh=True)["locked"]
+    ent.sub = "member"
+    settings = _send("GET", "/v1/user-settings")[1]
+    assert settings[updates.SETTING] == "ask" and not settings["provider_cli_updates_locked"]
+    assert updates.setting(refresh=True)["locked"]
+
+
 @pytest.mark.parametrize("mode", [
     "automatic",
     pytest.param("ask", marks=pytest.mark.variant("a renewed offer needs a fresh Inbox approval")),

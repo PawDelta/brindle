@@ -7,8 +7,14 @@ from brindle.service.errors import ServiceError
 
 def read(repo=None):
     ent = _docs_entitlement(repo)
-    policy = docs_org_api("GET", "policy", repo=repo, admin=True, org_id=ent.org_id)
+    request = provider_updates.start_policy_request()
+    try:
+        policy = docs_org_api("GET", "policy", repo=repo, admin=True, org_id=ent.org_id)
+    except ServiceError:
+        provider_updates.record_org_policy(ent, request, None)
+        raise
     analysis_policy.save_cached(ent.org_id, policy)
+    provider_updates.record_org_policy(ent, request, policy)
     return {"org_id": ent.org_id, "actor_sub": ent.sub, "policy": policy,
             "can_edit_org": ent.plan == "enterprise" and "analysis_docs_enterprise" in ent.features,
             "can_edit_groups": "analysis_docs_team" in ent.features}
@@ -47,6 +53,7 @@ def _save_row(ent, repo, org, actor, name, value, group, previous):
     for attempt in range(2):
         current = read(repo)["policy"]
         policy = _changed_policy(current, ent, name, value, group, previous)
+        request = provider_updates.start_policy_request()
         try:
             saved = docs_org_api("PUT", "policy", policy, repo=repo, admin=True, org_id=org)
         except ServiceError as error:
@@ -56,6 +63,7 @@ def _save_row(ent, repo, org, actor, name, value, group, previous):
         if name == provider_updates.SETTING and saved.get(name) != value:
             raise ServiceError("upstream", "The account server did not save the provider update setting.", 502)
         analysis_policy.save_cached(org, saved)
+        provider_updates.record_org_policy(ent, request, saved)
         return {"org_id": org, "actor_sub": actor, "policy": saved,
                 "can_edit_org": ent.plan == "enterprise" and "analysis_docs_enterprise" in ent.features,
                 "can_edit_groups": "analysis_docs_team" in ent.features}

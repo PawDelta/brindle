@@ -5,7 +5,9 @@ import json
 import logging
 import os
 import re
+import threading
 import time
+from itertools import count
 from urllib.request import urlopen
 
 from packaging.version import InvalidVersion, Version
@@ -24,6 +26,9 @@ DAY = 24 * 60 * 60
 REGISTRY = "https://registry.npmjs.org"
 RELEASE_CHECK_WAIT = 5.0
 VERSION = re.compile(r"\d+\.\d+\.\d+")
+_policy_lock = threading.Lock()
+_policy_requests = count(1)
+_org_policies: dict[tuple[str, str, str], tuple[int, dict]] = {}
 
 
 def org_setting(policy: dict) -> dict:
@@ -42,6 +47,36 @@ def can_govern(ent: license.Entitlement) -> bool:
     return ent.plan == "enterprise" and "analysis_docs_enterprise" in ent.features
 
 
+def start_policy_request() -> int:
+    with _policy_lock:
+        return next(_policy_requests)
+
+
+def record_org_policy(ent: license.Entitlement, request: int, policy: dict | None) -> None:
+    if not ent.org_id or not can_govern(ent):
+        return
+    try:
+        current = license.current(refresh=False)
+    except license.LicenseError:
+        return
+    if (current.org_id, current.sub) != (ent.org_id, ent.sub):
+        return
+    identity = (str(config.brindle_home()), ent.org_id, ent.sub)
+    try:
+        effective = org_setting(policy) if policy is not None else DEFAULT_POLICY
+    except ValueError:
+        policy = None
+        effective = DEFAULT_POLICY
+    with _policy_lock:
+        previous = _org_policies.get(identity)
+        if previous is not None and request <= previous[0]:
+            return
+        # A failed read invalidates every request already in flight for this identity.
+        # A successful read replaces only results from requests that started earlier.
+        accepted = next(_policy_requests) if policy is None else request
+        _org_policies[identity] = (accepted, effective)
+
+
 def setting(*, refresh: bool = False) -> dict:
     """The active org's lock, then the person's choice, then the org default."""
     try:
@@ -53,15 +88,20 @@ def setting(*, refresh: bool = False) -> dict:
         if refresh:
             from brindle.pro import analysis_docs
 
+            request = start_policy_request()
             try:
                 client, store = analysis_docs._session()
-                analysis_policy.fetch(ent.org_id, client, store)
+                policy = analysis_policy.fetch(ent.org_id, client, store)
             except Exception:  # Account policy is optional for the member setting.
-                analysis_policy.provider_updates_read_failed(ent.org_id, ent.sub)
+                policy = None
                 log.debug("Couldn't read the organization provider update policy")
-            return setting()  # use the same cache as Settings, for the current identity
+            record_org_policy(ent, request, policy)
+            return setting()  # use the same observations as Settings, for the current identity
         try:
-            org = org_setting(analysis_policy.load_provider_updates_cached(ent.org_id, ent.sub))
+            identity = (str(config.brindle_home()), ent.org_id, ent.sub)
+            with _policy_lock:
+                observed = _org_policies.get(identity)
+                org = observed[1] if observed else org_setting(analysis_policy.load_cached(ent.org_id))
         except Exception:
             log.debug("Couldn't read the cached organization provider update policy")
     local = config.user_settings().get(SETTING)
