@@ -10,7 +10,7 @@ def read(repo=None):
     policy = docs_org_api("GET", "policy", repo=repo, admin=True, org_id=ent.org_id)
     analysis_policy.save_cached(ent.org_id, policy)
     return {"org_id": ent.org_id, "actor_sub": ent.sub, "policy": policy,
-            "can_edit_org": "analysis_docs_enterprise" in ent.features,
+            "can_edit_org": ent.plan == "enterprise" and "analysis_docs_enterprise" in ent.features,
             "can_edit_groups": "analysis_docs_team" in ent.features}
 
 
@@ -33,6 +33,8 @@ def save(body):
         raise ServiceError("forbidden", "Org-wide settings require Enterprise; Team admins can edit group settings.", 403)
     allowed = ("anyone", "org", "off") if name == "share_links" else analysis_policy.STATES
     if name == provider_updates.SETTING:
+        if not provider_updates.can_govern(ent):
+            raise ServiceError("forbidden", "Organization-wide provider updates require Enterprise.", 403)
         if group is not None or not provider_updates.valid_policy(value):
             raise ServiceError("invalid", "Choose an organization-wide provider update mode and lock.")
     elif name not in (*analysis_policy.SWITCHES, "share_links") or value not in allowed:
@@ -55,7 +57,7 @@ def _save_row(ent, repo, org, actor, name, value, group, previous):
             raise ServiceError("upstream", "The account server did not save the provider update setting.", 502)
         analysis_policy.save_cached(org, saved)
         return {"org_id": org, "actor_sub": actor, "policy": saved,
-                "can_edit_org": "analysis_docs_enterprise" in ent.features,
+                "can_edit_org": ent.plan == "enterprise" and "analysis_docs_enterprise" in ent.features,
                 "can_edit_groups": "analysis_docs_team" in ent.features}
 
 

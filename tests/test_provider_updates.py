@@ -144,7 +144,7 @@ def test_ask_queues_an_inbox_update(db, machine):
 
 
 def test_org_lock_overrides_member_and_refuses_personal_edit(db, machine, monkeypatch):
-    ent = SimpleNamespace(org_id="org_test", sub="person", role="admin",
+    ent = SimpleNamespace(org_id="org_test", sub="person", role="admin", plan="enterprise",
                           features=["analysis_docs_enterprise"])
     monkeypatch.setattr(license, "current", lambda **kwargs: ent)
     monkeypatch.setattr(org_settings, "_docs_entitlement", lambda repo: ent)
@@ -176,6 +176,18 @@ def test_org_lock_overrides_member_and_refuses_personal_edit(db, machine, monkey
     assert status == 200
     assert settings[updates.SETTING] == "off" and settings["provider_cli_updates_locked"]
     assert _send("PATCH", "/v1/user-settings", {updates.SETTING: "ask"})[0] == 403
+
+    ent.plan = "team"
+    settings = _send("GET", "/v1/user-settings")[1]
+    assert settings[updates.SETTING] == "ask" and not settings["provider_cli_updates_locked"]
+    assert _send("PATCH", "/v1/user-settings", {updates.SETTING: "automatic"})[0] == 200
+    ent.role = "admin"
+    assert not _send("GET", "/v1/org-settings")[1]["can_edit_org"]
+    status, _ = _send("PUT", "/v1/org-settings", {
+        "org_id": ent.org_id, "actor_sub": ent.sub, "name": updates.SETTING,
+        "previous": {"mode": "off", "locked": True}, "value": {"mode": "ask", "locked": True},
+    })
+    assert status == 403
 
 
 def test_failed_staged_install_preserves_old_version_and_one_notice(db, machine, monkeypatch):

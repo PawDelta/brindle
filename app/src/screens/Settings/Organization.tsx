@@ -15,11 +15,11 @@ const ROWS: { id: OrgSettingName; name: string; help: string }[] = [
 ];
 
 function valueOf(state: OrgSettings, id: OrgSettingName) {
-  if (id === "provider_cli_updates") return state.policy.provider_cli_updates?.mode ?? "automatic";
+  if (id === "provider_cli_updates") return state.can_edit_org ? state.policy.provider_cli_updates?.mode ?? "automatic" : "automatic";
   return id === "share_links" ? state.policy.share_links ?? "org" : state.policy.switches[id] ?? "off";
 }
 function fixed(state: OrgSettings, id: OrgSettingName) {
-  if (id === "provider_cli_updates") return state.policy.provider_cli_updates?.locked ?? false;
+  if (id === "provider_cli_updates") return state.can_edit_org && (state.policy.provider_cli_updates?.locked ?? false);
   return id === "share_links" || valueOf(state, id).startsWith("enforced_");
 }
 function choices(id: OrgSettingName) {

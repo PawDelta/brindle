@@ -38,6 +38,10 @@ def valid_policy(value: object) -> bool:
             and isinstance(value.get("locked"), bool))
 
 
+def can_govern(ent: license.Entitlement) -> bool:
+    return ent.plan == "enterprise" and "analysis_docs_enterprise" in ent.features
+
+
 def setting(*, refresh: bool = False) -> dict:
     """The active org's lock, then the person's choice, then the org default."""
     try:
@@ -45,7 +49,7 @@ def setting(*, refresh: bool = False) -> dict:
     except license.LicenseError:
         ent = None
     policy = {}
-    if ent and ent.org_id and "analysis_docs_enterprise" in ent.features:
+    if ent and ent.org_id and can_govern(ent):
         if refresh:
             from brindle.pro import analysis_docs
 
