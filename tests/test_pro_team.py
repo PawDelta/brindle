@@ -181,12 +181,18 @@ def test_unpinned_model_policy_and_launch(db, repo, team, monkeypatch, launches,
     assert (row["model"], row["allowed"]) == models["developer"]
 
 
-def test_unpinned_claude_routing_uses_the_target_worktree(db, repo, team, monkeypatch, launches, detached):
+@pytest.mark.parametrize("provider, profile_name, root_model, target_model", [
+    ("claude", "developer", "claude-sonnet-5-5", "claude-opus-5-5"),
+    pytest.param("codex", "dev.gpt", "gpt-6.1-terra", "gpt-6.2-sol", marks=pytest.mark.variant(
+        "Weighted Codex routing must apply the target model before its early provisioning policy check")),
+])
+def test_unpinned_routing_uses_the_target_worktree(db, repo, team, monkeypatch, launches, detached,
+                                                  provider, profile_name, root_model, target_model):
     import asyncio
     from pathlib import Path
     from types import SimpleNamespace
 
-    from brindle import agents, config, doctor, policy, provider_health, workspaces
+    from brindle import agents, codex_hook, config, doctor, model_availability, policy, provider_health, providers, workspaces
     from brindle.daemon.routes_read import _routing
     from brindle.db import Agent
     from brindle.pro import team_policy
@@ -197,29 +203,36 @@ def test_unpinned_claude_routing_uses_the_target_worktree(db, repo, team, monkey
     caller = Agent("boss", source.id, "supervisor", "claude", None, "interactive", "idle", "", None, 1)
     db.add_agent(caller)
     monkeypatch.setattr(mcp_server, "_caller", lambda db: (caller, source))
-    for directory, filename, model in ((repo, "settings.json", "sonnet"),
-                                       (ws.path, "settings.local.json", "opus")):
-        settings = Path(directory) / ".claude" / filename
-        settings.parent.mkdir(exist_ok=True)
-        settings.write_text(json.dumps({"model": model}))
-    config.set_local(root, "routing", {"medium": ["developer"]})
+    if provider == "codex":
+        configured = {root: root_model, ws.path: target_model}
+        monkeypatch.setattr(providers, "codex_default_model", lambda cwd, **kw: configured[cwd])
+        monkeypatch.setattr(codex_hook, "launch_flags", lambda *a, **kw: [])
+        monkeypatch.setattr(agents, "_model_checker", model_availability.ModelAvailabilityChecker(
+            discover=lambda request, limit: model_availability.Catalog(frozenset({target_model}), "codex")))
+    else:
+        for directory, filename, model in ((repo, "settings.json", root_model),
+                                           (ws.path, "settings.local.json", target_model)):
+            settings = Path(directory) / ".claude" / filename
+            settings.parent.mkdir(exist_ok=True)
+            settings.write_text(json.dumps({"model": model}))
+    config.set_local(root, "routing", {"medium": [profile_name]})
     config.set_local(root, "routing_locked", ["medium"])
-    team.policy_body["policy"]["allowed_models"] = ["claude-opus-5-5"]
+    team.policy_body["policy"]["allowed_models"] = [target_model]
     org_plugin = plugin(team)
     monkeypatch.setattr(policy, "plugin", lambda cfg, root: org_plugin)
     monkeypatch.setattr(team_policy, "access", lambda root: team_policy.Access(
-        org_id=ORG, allowed_models=("claude-opus-5-5",)))
+        org_id=ORG, allowed_models=(target_model,)))
     monkeypatch.setattr(provider_health, "check", lambda *a, **kw: provider_health.Health("ok"))
     monkeypatch.setattr("brindle.providers.signed_out", lambda *a, **kw: None)
     monkeypatch.setattr("brindle.quota.known_headroom", lambda *a, **kw: None)
     monkeypatch.setattr("shutil.which", lambda cli: f"/usr/bin/{cli}")
-    monkeypatch.setattr(doctor, "signin_providers", lambda: ["claude"])
+    monkeypatch.setattr(doctor, "signin_providers", lambda: [provider])
     monkeypatch.setattr(agents, "_effective_window_env", lambda *args: {})
     dry_run = asyncio.run(mcp_server.assign(task="change it", branch=ws.branch, weight="medium", dry_run=True))
-    assert "profile: developer" in dry_run and "claude-opus-5-5" in dry_run
+    assert f"profile: {profile_name}" in dry_run and target_model in dry_run
     reply = _routing(db, SimpleNamespace(query_params={"repo": ws.path}), learn=False)
     [row] = reply["tiers"]["medium"]["models"]
-    assert (row["profile"], row["model"], row["allowed"]) == ("developer", "claude-opus-5-5", True)
+    assert (row["profile"], row["model"], row["allowed"]) == (profile_name, target_model, True)
     agents.spawn(db, ws, row["profile"], mode="assign", background_setup=True)
     [argv] = launches
     assert flag(argv, "--model") == row["model"]

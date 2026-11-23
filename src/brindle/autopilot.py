@@ -927,7 +927,8 @@ CLI_FOR_PROVIDER = {"claude": "claude", "codex": "codex", "antigravity": "agy", 
 
 
 def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
-                 weight: str | None = None) -> str | None:
+                 weight: str | None = None, *, workspace: Workspace | None = None,
+                 resolved: tuple[str, str | None] | None = None) -> str | None:
     """Why routing skips profile ``name`` (its provider is in
     ``exclude_providers``, its CLI isn't installed or
     signed in, its provider is out of headroom, it would break a budget
@@ -945,12 +946,11 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     if over:
         return f"over budget, skipped {name} ({over})"
     from brindle import agents
-    from brindle.db import Workspace
     # Read-only preview: no adopted workspace, branch, setup or model turn.
-    ws = Workspace("preflight", repo_root, "preflight", "root", "", None,
-                   repo_root, None, "", 0.0)
+    ws = workspace or Workspace("preflight", repo_root, "preflight", "root", "", None,
+                                repo_root, None, "", 0.0)
     try:
-        problem = agents.model_problem(name, ws)
+        problem = agents.model_problem(name, ws, **({"resolved": resolved} if resolved else {}))
     except agents.AgentError as e:
         problem = str(e)
     if problem:
@@ -964,7 +964,8 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     cli = CLI_FOR_PROVIDER.get(p.provider)
     # One definition of "can take work now" (refused, installed, signed in,
     # limited, rate limited, erroring, closing); the headroom margin below is routing's own.
-    health = provider_health.check(p.provider, model=effective_profile_model(p, repo_root) or None,
+    model = resolved[1] if resolved else effective_profile_model(p, repo_root) or None
+    health = provider_health.check(p.provider, model=model,
                                    profile=name, repo_root=repo_root, env=route_env, installed=bool(cli))
     if health.state == provider_health.SIGNED_OUT:
         return f"{cli} isn't signed in, skipped {name}"
@@ -1064,6 +1065,7 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
         goal = routing_goal.for_learner(repo_root)
     ctx = dict(policy or {})
     model_fields = ctx.get("model_fields")
+    workspace = ctx.get("workspace")
     try:
         running = pol.running_workers(db, repo_root)
     except Exception:  # noqa: BLE001 - the policy decides what an unknown count means
@@ -1077,13 +1079,18 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
         # A denial is a denial whatever its text: an empty reason never reads as allowed.
         return None if d.allowed else (d.reason or "the repo's policy refused it")
 
+    def availability(name: str) -> str | None:
+        return _unavailable(name, cfg, repo_root, gate, weight, workspace=workspace,
+                            resolved=model_fields(name) if model_fields else None)
+
     try:
         # With a learner, every replacement is checked so it can weigh them all.
         learner = not locked and learning.plugin(cfg, repo_root) is not None
     except Exception:  # noqa: BLE001 - no learner: the table's order stands
         learner = False
     found = cascade.workers(cfg, repo_root, weight, gate=gate, ceiling=ceiling, design_heavy=design_heavy,
-                            after=after or (), weights=goal, policy=refusal, full=learner, agent=agent)
+                            after=after or (), weights=goal, policy=refusal, full=learner, agent=agent,
+                            **({"availability": availability} if workspace else {}))
     order, remaining = found.pool, found.order
     own = set(own_order if own_order is not None else tier_order(cfg, weight))
     over = {n: why for n, why in found.skipped if why.startswith("over budget")}
@@ -1496,10 +1503,16 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     if problem := memory_problem(selected):
         tier = weight or profile_weight(name, cfg, repo_root)
         alternatives = list(dict.fromkeys([*cfg.routing.get(tier, []), *selected.fallback]))
+
+        def available(candidate: str) -> bool:
+            workspace = ctx.get("workspace")
+            context = {"workspace": workspace, "resolved": model_fields(candidate)} if workspace else {}
+            return not _unavailable(candidate, cfg, repo_root, weight=tier, **context)
+
         replacement = next((n for n in alternatives if n != name and
                             cfg.routing_allows(n, design_heavy) and
                             (not ceiling or weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]) and
-                            not _unavailable(n, cfg, repo_root, weight=tier)), None)
+                            available(n)), None)
         if replacement is None:
             raise AutopilotError(f"{problem}; no available fallback for {name}")
         if why is not None:

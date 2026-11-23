@@ -818,7 +818,8 @@ def _routing(db: DB, request: Request, learn: bool) -> Any:
 
     # Every candidate's check reads the same stored keys: each from the store once.
     with keystore.reading():
-        kinds = _routing_kinds(db, cfg, repo, learn=learn, **({"model_fields": policy._model_fields} if workspace else {}))
+        context = {"workspace": workspace, "model_fields": policy._model_fields} if workspace else None
+        kinds = _routing_kinds(db, cfg, repo, learn=learn, **({"routing_context": context} if context else {}))
     for row in rows:
         if row.kind == "agent":
             agent_rows[row.name] = RoutingAgentDTO(description=row.description, rules=row.rules, role=row.role,
@@ -836,7 +837,7 @@ def _routing(db: DB, request: Request, learn: bool) -> Any:
 
 
 def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str, learn: bool = True, *,
-                   model_fields=None) -> dict[str, RoutingKindDTO]:
+                   routing_context: dict | None = None) -> dict[str, RoutingKindDTO]:
     """Per kind of work: the owner's pick, its ordered fallbacks, whether it
     is locked, and the different profile hosted learning runs for it now
     (``learn=False``: none asked for, each null). A locked kind is never
@@ -859,7 +860,7 @@ def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str, learn: bool = True
     def weight_pick(t: str) -> str | None:
         # The dispatch's own resolution, so an excluded or unavailable candidate is never reported.
         name, learned_pick, _ = autopilot._route_by_weight(
-            db, cfg, repo, t, None, None, **({"policy": {"model_fields": model_fields}} if model_fields else {}))
+            db, cfg, repo, t, None, None, **({"policy": routing_context} if routing_context else {}))
         return name if learned_pick else None
 
     for t in config.WEIGHTS:

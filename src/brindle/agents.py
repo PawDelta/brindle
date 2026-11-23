@@ -1424,8 +1424,8 @@ def _check_launch_model(repo_root: str, provider: str, model: str | None) -> Non
 
 
 def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = None,
-                  profile=None, m=_UNREAD) -> str | None:
-    """Read-only provisioning gate. A supplied profile already has its launch model."""
+                  profile=None, m=_UNREAD, resolved: tuple[str, str | None] | None = None) -> str | None:
+    """Read-only provisioning gate for a supplied launch profile or a routed model."""
     from dataclasses import replace
     from brindle import guardrails, model_access
     from brindle.pro import managed_models
@@ -1463,9 +1463,12 @@ def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = Non
         from brindle import policy
         from brindle.config import load_repo_config
 
-        decision = policy.check_launch(load_repo_config(ws.repo_root), ws, agent, effective)
+        decision = policy.check_launch(load_repo_config(ws.repo_root), ws, agent, effective,
+                                       **({"resolved": resolved} if resolved else {}))
         if not decision.allowed:
             return f"profile {profile_name!r} refused by policy: {decision.reason}"
+    if resolved:
+        profile = replace(profile, model=resolved[1])
     denied = model_access.refused(profile_name, ws.repo_root, fp=fingerprint(profile, effective))
     if denied:
         return denied.line()
