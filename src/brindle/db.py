@@ -726,11 +726,16 @@ CREATE TABLE IF NOT EXISTS routing_decisions (
     outcome TEXT,                   -- merged | removed_unmerged, once it's over
     demoted_from TEXT,              -- the profile a budget moved this task off (brindle.budget)
     budget_state TEXT,              -- warned | over | stopped (brindle.budget.sweep)
-    seeded_at REAL,                 -- when `brindle learning seed` sent it to the hosted learner
-    agent TEXT                     -- role layer, separate from the model profile
+    seeded_at REAL                  -- when `brindle learning seed` sent it to the hosted learner
 );
 CREATE INDEX IF NOT EXISTS routing_decisions_repo_root ON routing_decisions(repo_root, ts);
 CREATE INDEX IF NOT EXISTS routing_decisions_agent ON routing_decisions(agent_id);
+-- Keep the role layer with the historical decision, even after its worker is pruned.
+-- Released tables never gain columns.
+CREATE TABLE IF NOT EXISTS routing_decision_agents (
+    decision_id INTEGER PRIMARY KEY REFERENCES routing_decisions(id) ON DELETE CASCADE,
+    agent TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS launch_health (
     agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
     token TEXT NOT NULL DEFAULT '',
@@ -2189,8 +2194,7 @@ class DB:
         routing_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(routing_decisions)")}
         if "prior" not in routing_cols:
             self.conn.execute("ALTER TABLE routing_decisions ADD COLUMN prior INTEGER NOT NULL DEFAULT 0")
-        for col, kind in (("demoted_from", "TEXT"), ("budget_state", "TEXT"), ("seeded_at", "REAL"),
-                          ("agent", "TEXT")):
+        for col, kind in (("demoted_from", "TEXT"), ("budget_state", "TEXT"), ("seeded_at", "REAL")):
             if col not in routing_cols:
                 self.conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {col} {kind}")
         request_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(permission_requests)")}
@@ -4423,12 +4427,15 @@ class DB:
                              ts: float | None = None, demoted_from: str | None = None,
                              agent: str | None = None) -> None:
         with self.tx() as c:
-            c.execute(
+            inserted = c.execute(
                 "INSERT INTO routing_decisions (repo_root, ts, task_id, agent_id, weight, "
-                "baseline_profile, profile, learned, prior, demoted_from, agent) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                "baseline_profile, profile, learned, prior, demoted_from) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (repo_root, time.time() if ts is None else ts, task_id, agent_id, weight,
-                 baseline_profile, profile, int(learned), int(learned and prior), demoted_from, agent),
+                 baseline_profile, profile, int(learned), int(learned and prior), demoted_from),
             )
+            if agent is not None:
+                c.execute("INSERT INTO routing_decision_agents (decision_id, agent) VALUES (?,?)",
+                          (inserted.lastrowid, agent))
 
     def set_budget_state(self, agent_id: str, state: str | None) -> None:
         with self.tx() as c:
@@ -4436,9 +4443,12 @@ class DB:
 
     def set_routing_agent(self, task_id: str, agent_id: str) -> None:
         with self.tx() as c:
-            c.execute("UPDATE routing_decisions SET agent_id=?, "
-                      "agent=COALESCE((SELECT agent FROM agent_roles WHERE agent_id=?), agent) WHERE task_id=?",
-                      (agent_id, agent_id, task_id))
+            c.execute("UPDATE routing_decisions SET agent_id=? WHERE task_id=?", (agent_id, task_id))
+            c.execute("INSERT INTO routing_decision_agents (decision_id, agent) "
+                      "SELECT rd.id, r.agent FROM routing_decisions rd "
+                      "JOIN agent_roles r ON r.agent_id=rd.agent_id "
+                      "WHERE rd.task_id=? AND r.agent IS NOT NULL "
+                      "ON CONFLICT(decision_id) DO UPDATE SET agent=excluded.agent", (task_id,))
 
     def note_routing_outcome(self, agent_id: str, *, review: bool = False, escalated: bool = False,
                              outcome: str | None = None) -> None:
@@ -4451,13 +4461,17 @@ class DB:
             )
 
     def routing_decision_for_agent(self, agent_id: str) -> RoutingDecision | None:
-        row = self.conn.execute("SELECT * FROM routing_decisions WHERE agent_id=? ORDER BY id DESC LIMIT 1",
+        row = self.conn.execute("SELECT rd.*, r.agent FROM routing_decisions rd "
+                                "LEFT JOIN routing_decision_agents r ON r.decision_id=rd.id "
+                                "WHERE rd.agent_id=? ORDER BY rd.id DESC LIMIT 1",
                                 (agent_id,)).fetchone()
         return _load(RoutingDecision, row) if row else None
 
     def list_routing_decisions(self, repo_root: str | None = None) -> list[RoutingDecision]:
         where, args = ("WHERE repo_root=?", (repo_root,)) if repo_root else ("", ())
-        rows = self.conn.execute(f"SELECT * FROM routing_decisions {where} ORDER BY id", args)
+        rows = self.conn.execute("SELECT rd.*, r.agent FROM routing_decisions rd "
+                                 "LEFT JOIN routing_decision_agents r ON r.decision_id=rd.id "
+                                 f"{where} ORDER BY rd.id", args)
         return [_load(RoutingDecision, r) for r in rows]
 
     def unseeded_finished_decisions(self, repo_root: str) -> list[tuple[RoutingDecision, str, str | None]]:
@@ -4465,8 +4479,9 @@ class DB:
         `brindle learning seed`, each with its task's text and files JSON ('' / None when the
         decision has no task row)."""
         rows = self.conn.execute(
-            "SELECT rd.*, t.task_text AS _text, t.files AS _files, t.weight AS _tweight "
+            "SELECT rd.*, r.agent, t.task_text AS _text, t.files AS _files, t.weight AS _tweight "
             "FROM routing_decisions rd LEFT JOIN tasks t ON t.id = rd.task_id "
+            "LEFT JOIN routing_decision_agents r ON r.decision_id=rd.id "
             "WHERE rd.repo_root=? AND rd.seeded_at IS NULL "
             "AND rd.outcome IN ('merged', 'removed_unmerged') ORDER BY rd.id", (repo_root,))
         out = []
@@ -4491,7 +4506,8 @@ class DB:
     def list_routing_decisions_for_live_agents(self) -> list[RoutingDecision]:
         """Return routing decisions for agents that are currently running (not dismissed or done)."""
         rows = self.conn.execute(
-            "SELECT rd.* FROM routing_decisions rd "
+            "SELECT rd.*, r.agent FROM routing_decisions rd "
+            "LEFT JOIN routing_decision_agents r ON r.decision_id=rd.id "
             "JOIN agents a ON rd.agent_id = a.id "
             "WHERE a.dismissed_at IS NULL AND a.status != 'done' "
             "ORDER BY rd.id"

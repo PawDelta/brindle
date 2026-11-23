@@ -102,6 +102,11 @@ def test_composed_agent_recording(db, ws, monkeypatch, model, agent, expected):
     savings.record(db, ws.repo_root, {"profile": model}, agent_id=w.id)
     decision = db.routing_decision_for_agent(w.id)
     assert (decision.agent, decision.profile) == (agent, model)
+    db.note_routing_outcome(w.id, outcome="merged")
+    db.delete_agent(w.id)
+    assert all(d.agent == agent for d in db.list_routing_decisions(ws.repo_root))
+    seeded = db.unseeded_finished_decisions(ws.repo_root)
+    assert seeded and all(d.agent == agent for d, _, _ in seeded)
 
 
 @pytest.mark.variant("a learning plugin cannot select a profile outside the allowed candidate set")
