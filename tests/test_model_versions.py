@@ -263,3 +263,41 @@ def test_critical_pane_startup_failure_is_reported(db, repo, routing, detached, 
         assert not gate_signals
         assert db.get_agent(agent_id) is not None
         assert db.agent_launch_model(agent_id) == "gpt-6.2-astra"
+
+
+def test_review_dispatch_surfaces_unconfirmed_gate_on_later_requests(db, repo, routing, detached, monkeypatch):
+    from brindle import gates, login_shell_env
+
+    configure(repo, ["pinned"], pinned="gpt-6.2-astra")
+    opened = []
+
+    def new_window(*args, tag, **kwargs):
+        opened.append(tag[1])
+        return "%waiting"
+
+    def fail_signal(gate):
+        raise OSError("gate signal did not reach tmux")
+
+    monkeypatch.setattr(login_shell_env, "asks_daemon", lambda: True)
+    monkeypatch.setattr(login_shell_env, "shim", lambda agent_id, argv: argv)
+    monkeypatch.setattr(tmux, "ensure_session", lambda *a, **kw: None)
+    monkeypatch.setattr(tmux, "new_window", new_window)
+    monkeypatch.setattr(tmux, "open_gate", fail_signal)
+    monkeypatch.setattr(agents, "alive_or_starting", lambda agent: agent.tmux_window == "%waiting")
+    monkeypatch.setattr(agents, "_hidden_brindle_tools", lambda keep: [])
+
+    with pytest.raises(agents.AgentError):
+        agents.request_review(db, None, routing, "pinned")
+
+    [agent_id] = opened
+    assert db.get_agent(agent_id).tmux_window == "%waiting"
+    assert db.agent_launch_model(agent_id) == "gpt-6.2-astra"
+    assert db.review_claim(routing.id, gates.head(routing), "pinned")[0] == agent_id
+
+    with pytest.raises(agents.AgentError):
+        agents.request_review(db, None, routing, "pinned")
+    with pytest.raises(agents.AgentError):
+        agents.start_review(db, None, routing, "pinned", cfg=RepoConfig(checks=["suite"]))
+    with pytest.raises(agents.AgentError):
+        agents.request_review(db, None, routing, "review.gpt", slot="pinned")
+    assert opened == [agent_id] and not detached

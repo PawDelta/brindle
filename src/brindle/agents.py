@@ -192,6 +192,9 @@ class LaunchPaneUnconfirmed(AgentError):
         super().__init__(f"Could not complete {stage} for agent {agent_id}. Pane {pane} may still exist.")
 
 
+_REVIEW_STARTUP_FAILURE = "review-startup-failure"
+
+
 class StrayPane(AgentError):
     """A pane that should be closed won't, or tmux can't say: nothing is launched beside it."""
 
@@ -1146,6 +1149,8 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
             except Exception:
                 pass
         if gate:
+            if agent.mode == "review":
+                db.set_mark(agent.id, _REVIEW_STARTUP_FAILURE, f"Startup gate for pane {target} is unconfirmed.")
             stage = "startup gate release"
             tmux.open_gate(gate)
     except Exception:
@@ -1157,7 +1162,19 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
                 db.update_agent(agent.id, tmux_window=previous_window, tmux_server=previous_server)
                 agent.tmux_window, agent.tmux_server = previous_window, previous_server
             raise
-        raise LaunchPaneUnconfirmed(stage, agent.id, target) from None
+        error = LaunchPaneUnconfirmed(stage, agent.id, target)
+        if agent.mode == "review":
+            try:
+                db.set_mark(agent.id, _REVIEW_STARTUP_FAILURE, str(error))
+            except Exception:
+                log.warning("Could not record the startup failure for reviewer %s", agent.id)
+        raise error from None
+    if agent.mode == "review":
+        try:
+            if db.mark(agent.id, _REVIEW_STARTUP_FAILURE) is not None:
+                db.set_mark(agent.id, _REVIEW_STARTUP_FAILURE, None)
+        except Exception:
+            log.warning("Could not clear the startup failure for reviewer %s", agent.id)
     try:
         tmux.apply_theme(ws.tmux_session)
     except Exception:
@@ -5302,17 +5319,23 @@ def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig, *, launch: Revi
         raise AgentError(f"reviewer profile {name!r} refused by policy: {d.reason}")
 
 
+def _check_review_startup(db: DB, reviewer: Agent) -> None:
+    if failure := db.mark(reviewer.id, _REVIEW_STARTUP_FAILURE):
+        raise AgentError(f"Reviewer startup is unconfirmed. {failure}")
+
+
 def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None, *,
                    slot: str | None = None) -> Agent | None:
     """Find a reviewer still at work on the commit, scoped by profile or dispatch slot."""
     from brindle import launch_health
 
     for a in db.list_agents(ws.id):
-        if a.mode == "review" and a.result is None and alive_or_starting(a) and a.review_sha == sha \
-                and not a.unreported_noted \
+        if a.mode == "review" and a.result is None and a.review_sha == sha \
                 and (slot is None or db.review_slot(a.id) == slot) \
-                and (profile is None or a.profile == profile) and not launch_health.has_mcp_failure(db, a, ws):
-            return a
+                and (profile is None or a.profile == profile):
+            _check_review_startup(db, a)
+            if not a.unreported_noted and alive_or_starting(a) and not launch_health.has_mcp_failure(db, a, ws):
+                return a
     return None
 
 
@@ -5702,9 +5725,11 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         if old.mode != "review" or old.result is not None:
             continue
         matching = db.review_slot(old.id) == slot if automatic else _same_profile(old.profile, profile, ws.repo_root)
-        if old.review_sha == sha and matching and launch_health.has_mcp_failure(db, old, ws):
-            failed = old
-            continue
+        if old.review_sha == sha and matching:
+            _check_review_startup(db, old)
+            if launch_health.has_mcp_failure(db, old, ws):
+                failed = old
+                continue
         if not alive_or_starting(old):
             continue
         if old.unreported_noted:
@@ -5868,6 +5893,8 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         reviewer_id = reviewer.id if reviewer else None
     except LaunchPaneUnconfirmed as exc:
         reviewer_id = exc.agent_id
+        if db.mark(reviewer_id, _REVIEW_STARTUP_FAILURE) is None:
+            db.set_mark(reviewer_id, _REVIEW_STARTUP_FAILURE, str(exc))
         raise
     finally:
         db.hold_review(ws.id, sha, slot, token, reviewer_id)
@@ -5901,12 +5928,14 @@ def _same_profile(a: str | None, b: str | None, repo_root: str) -> bool:
 def _live_claim(db: DB, held: tuple) -> Agent | str | None:
     """What holds a review claim ``held`` (``(agent_id, claimed_at)``): its live
     reviewer, ``"starting"`` while its dispatcher is still starting it, or None
-    when it is finished, stopped or stale and may be taken over."""
+    when it is finished, stopped or stale and may be taken over. An
+    unconfirmed pane blocks reassignment and surfaces its startup failure."""
     agent_id, claimed_at = held
     holder = db.get_agent(agent_id) if agent_id else None
-    if holder is not None and holder.result is None and not holder.unreported_noted \
-            and alive_or_starting(holder):
-        return holder
+    if holder is not None and holder.result is None:
+        _check_review_startup(db, holder)
+        if not holder.unreported_noted and alive_or_starting(holder):
+            return holder
     if agent_id is None and time.time() - claimed_at < LAUNCH_GRACE:
         return "starting"
     return None
