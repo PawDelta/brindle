@@ -19,18 +19,18 @@ def provider_name(provider: str | None) -> str | None:
     return team_policy.CLI_NAMES.get(provider, provider) if provider else None
 
 
-def legacy_medium_override(cfg: config.RepoConfig, name: str) -> list[str] | None:
-    """The explicit Medium order an older app's single role row represents."""
-    if name == "reviewer" and (cfg.review_profile or cfg.reviewer_models_inherited):
+def legacy_medium_override(cfg: config.RepoConfig, name: str, *, pinned: bool) -> list[str] | None:
+    """The destination's explicit Medium order when the effective row uses it."""
+    if name == "reviewer" and (pinned or cfg.reviewer_models_inherited):
         return None
     return cfg.agent_models.get(name, {}).get("medium")
 
 
-def shadows_legacy_medium(settings: dict, name: str) -> bool:
+def shadows_legacy_medium(settings: dict, name: str, *, inherits_medium: bool) -> bool:
     models = settings.get("agent_models")
     sizes = models.get(name) if isinstance(models, dict) else None
     # An empty map resets all inherited overrides for this role.
-    return isinstance(sizes, dict) and (not sizes or any(
+    return isinstance(sizes, dict) and ((inherits_medium and not sizes) or any(
         config.normalize_weight(size) == "medium" and isinstance(order, list) for size, order in sizes.items()))
 
 

@@ -1820,25 +1820,33 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     agent_changes = parse_agent_model_changes(_get(body, "agents", dict) or {}, known, profile_root)
     if cfg.review_profile and any(order is not None for order in agent_changes.get("reviewer", {}).values()):
         raise ServiceError("conflict", "Remove the review_profile pin before setting reviewer model overrides", 409)
+    # The top-level reviewer field sets the default. The role row edits the active pin.
+    reviewer_model = kinds.get("reviewer", {}).get("model") if cfg.review_profile else reviewer
     legacy_edits = [(name, model, extra.get(f"{name}_fallbacks")) for name, model in (
-        ("reviewer", reviewer), ("supervisor", extra.get("supervisor_profile")))]
+        ("reviewer", reviewer_model), ("supervisor", extra.get("supervisor_profile")))]
     legacy_edits = [(name, model, fallbacks) for name, model, fallbacks in legacy_edits
                     if model is not None or fallbacks is not None]
     destination = cfg
+    local = {}
     if scope == "repo" and legacy_edits:
         local = config._read_json(config.scope_paths(repo)["local"])
         destination = config.load_repo_config(repo, include_local=False)
-        for name, _, _ in legacy_edits:
-            if shadows_legacy_medium(local, name):
-                raise ServiceError("conflict", f"Edit {name} in local scope or clear the local Medium override first", 409)
-            if name == "reviewer" and "review_profile" in local and (cfg.review_profile or destination.review_profile):
-                raise ServiceError("conflict", "Edit reviewer in local scope or remove the local review_profile setting", 409)
     for name, model, fallbacks in legacy_edits:
-        old = legacy_medium_override(destination, name)
+        pinned = name == "reviewer" and bool(cfg.review_profile)
+        old = legacy_medium_override(destination, name, pinned=pinned)
+        if not pinned and shadows_legacy_medium(local, name, inherits_medium=old is not None):
+            raise ServiceError("conflict", f"Edit {name} in local scope or clear the local Medium override first", 409)
         if old is not None:
             primary = model if model is not None else old[0] if old else None
             names = [primary, *(fallbacks if fallbacks is not None else old[1:])]
             agent_changes.setdefault(name, {}).setdefault("medium", [n for n in dict.fromkeys(names) if n])
+            continue
+        primary_key = "review_profile" if pinned else "reviewer" if name == "reviewer" else "supervisor_profile"
+        for key, value in ((primary_key, model), (f"{name}_fallbacks", fallbacks)):
+            if value is not None and key in local:
+                raise ServiceError("conflict", f"Edit {key} in local scope or remove its local setting first", 409)
+        if pinned and model is not None:
+            extra["review_profile"] = model
     named = [reviewer] if reviewer is not None else []
     for value in extra.values():     # supervisor and reviewer choices and fallbacks are profiles too
         named.extend(value if isinstance(value, list) else [value])
@@ -1901,8 +1909,6 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
                   "repo": functools.partial(config.update_repo, repo)}[scope]
         path = update("agent_models", lambda value: merge_agent_model_changes(value, agent_changes))
         updated.append("agent_models")
-    if reviewer is not None and kinds.get("reviewer", {}).get("model") and destination.review_profile:
-        write("review_profile", reviewer)   # it would win over `reviewer`, so the new choice must replace it
     if not updated:
         raise ServiceError("invalid", "give tiers, reviewer, exclude_providers, kinds or agents")
     return {"updated": updated, "path": str(path)}

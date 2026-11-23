@@ -1098,6 +1098,35 @@ def test_shared_legacy_reviewer_edit_cannot_copy_or_hide_behind_a_local_order(re
     assert cfg.agent_models["reviewer"] == {"medium": ["reviewer", "review.gpt"], "light": ["review.gemini"]}
 
 
+@pytest.mark.parametrize("pin_scope,edit,expected", [
+    ("repo", {"model": "review.gpt"}, ("review.gpt", ["review.gemini"])),
+    pytest.param("local", {"fallbacks": ["review.gpt"]}, ("review.claude-sonnet.high", ["review.gpt"]),
+                 marks=pytest.mark.variant("a local pin controls only the primary, not shared fallbacks")),
+])
+def test_shared_legacy_reviewer_edit_uses_effective_pinned_fields(repo, db, pin_scope, edit, expected):
+    from brindle import agents, config
+
+    write_pin = config.set_repo if pin_scope == "repo" else config.set_local
+    write_pin(repo, "review_profile", "review.claude-sonnet.high")
+    config.set_repo(repo, "reviewer_fallbacks", ["review.gemini"])
+    if pin_scope == "repo":
+        config.set_local(repo, "agent_models", {"reviewer": {"medium": ["reviewer"]}})
+    local = config.scope_paths(repo)["local"]
+    before = local.read_text()
+    app = build_app(TOKEN)
+    code, reply = asyncio.run(_read_request(app, "/v1/routing", AUTH, method="PUT", payload={
+        "repo": str(repo), "scope": "repo", "kinds": {"reviewer": edit},
+    }))
+    assert code == 200, reply
+    cfg = config.load_repo_config(repo)
+    assert local.read_text() == before
+    assert (agents.default_review_profile(cfg, None), cfg.reviewer_fallbacks) == expected
+    code, routing = _get("/v1/routing", AUTH, f"repo={repo}&learned=0")
+    assert code == 200, routing
+    for row in (routing["kinds"]["reviewer"], routing["agents"]["reviewer"]["models"]["medium"]):
+        assert (row["model"], row["fallbacks"]) == expected
+
+
 def test_reviewer_override_requires_removing_an_existing_pin(repo, db, monkeypatch):
     from brindle import agents, config
 

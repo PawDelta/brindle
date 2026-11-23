@@ -814,7 +814,7 @@ def _routing(db: DB, request: Request, learn: bool) -> Any:
                                                       cfg, row.name, kinds.get(row.name)))
     # The older app has one slot per role. Medium is the representative size.
     for name in ("reviewer", "supervisor"):
-        if name in agent_rows and legacy_medium_override(cfg, name) is not None:
+        if name in agent_rows and legacy_medium_override(cfg, name, pinned=bool(cfg.review_profile)) is not None:
             kinds[name] = kinds[name].model_copy(update=agent_rows[name].models["medium"].to_json())
     return RoutingDTO(
         tiers=tiers,
