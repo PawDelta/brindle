@@ -83,12 +83,12 @@ afterEach(async () => {
 });
 
 describe("visuals", () => {
-  async function openPublishedChoices(onBack = () => {}) {
+  async function openPublishedChoices(onBack = () => {}, inlineHtml = publishedChoicesHtml) {
     const row: VisualDTO = {
       id: "v_bfc81230923b", session: "a89ea94c", by: "a89ea94c", kind: "visual", rev: 1,
       title: "Two questions", question: "New model versions: who switches routing over?",
       answer: null, answered_in_chat: false, kept: false, unread: false, created_at: 1795453531.8060968,
-      answer_agent_id: "a89ea94c", accepts_files: true, holding: 0, inline_html: publishedChoicesHtml,
+      answer_agent_id: "a89ea94c", accepts_files: true, holding: 0, inline_html: inlineHtml,
       choices: [
         { id: "bumps", question: "New model versions: who switches routing over?", options: [
           { id: "me", label: "You do it, as a small task each time", detail: null },
@@ -144,6 +144,53 @@ describe("visuals", () => {
     option.focus();
     fireEvent.keyDown(option, { key: "Escape" });
     expect(onBack).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps author code out of the inline iframe and installs the parent policy first", async () => {
+    const html = `<!doctype html><html><head>
+      <meta http-equiv="Content-Security-Policy" content="script-src 'unsafe-inline'">
+      <meta http-equiv="refresh" content="0;url=#redirect">
+      <script>document.documentElement.dataset.scriptRan = 'yes'</script>
+      </head><body>
+      <fieldset data-choice="bumps">
+        <button id="pick" data-option="me" onclick="document.documentElement.dataset.clickRan = 'yes'">Pick</button>
+      </fieldset>
+      <img id="image" onerror="document.documentElement.dataset.errorRan = 'yes'">
+      <a id="link" href="javascript:document.documentElement.dataset.urlRan = 'yes'">Link</a>
+      </body></html>`;
+    await openPublishedChoices(undefined, html);
+    const frame = screen.getByTitle("Two questions") as HTMLIFrameElement;
+    const probe = document.body.appendChild(document.createElement("iframe"));
+    try {
+      const doc = probe.contentDocument!;
+      // Parse the actual srcdoc with jsdom's scripting enabled. jsdom does not enforce CSP,
+      // so the execution checks exercise sanitization and the policy is checked separately.
+      doc.open();
+      doc.write("<script>document.documentElement.dataset.canExecute = 'yes'</script>");
+      doc.close();
+      expect(doc.documentElement.dataset.canExecute).toBe("yes");
+
+      doc.open();
+      doc.write(frame.srcdoc);
+      doc.close();
+      const policy = doc.head.firstChild as HTMLMetaElement;
+      expect(policy.httpEquiv.toLowerCase()).toBe("content-security-policy");
+      expect(policy.content.split(";").map(directive => directive.trim())).toContain("script-src 'none'");
+      expect(Array.from(doc.querySelectorAll("meta"))).toEqual([policy]);
+      expect(doc.querySelector("script")).toBeNull();
+
+      const pick = doc.querySelector("#pick")!;
+      const image = doc.querySelector("#image")!;
+      const link = doc.querySelector("#link")!;
+      fireEvent.click(pick);
+      fireEvent.error(image);
+      expect(pick.hasAttribute("onclick")).toBe(false);
+      expect(image.hasAttribute("onerror")).toBe(false);
+      expect(link.hasAttribute("href")).toBe(false);
+      expect(Object.keys(doc.documentElement.dataset)).toHaveLength(0);
+    } finally {
+      probe.remove();
+    }
   });
 
   it("selects two inline groups and sends one combined answer", async () => {
