@@ -849,7 +849,7 @@ interface FormState {
   /* The agent being edited, or null for a new one. */
   editing: string | null;
   draft: Draft;
-  /* A new agent's profile is written (POST /profiles went through): a retry only writes its own models. */
+  /* A new agent's profile is written (POST /profiles went through): saving again writes only its own models. */
   created?: boolean;
   /* Reading an edited agent's saved instructions and role. */
   loading?: boolean;
@@ -1016,7 +1016,7 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
       if (!editing && !created) {
         // An agent is how to work: no provider, model or effort; its model follows the job size.
         await client.createProfile({ repo, name, description: draft.purpose.trim(), works_like: draft.worksLike, instructions: draft.instructions, rules: draft.rules });
-        // Written: from here a retry writes only its own models, and the list shows it.
+        // Written: from here a second Save writes only its own models, and the list shows it.
         created = true;
         setForm((f) => (f && f.editing === null ? { ...f, created: true } : f));
       } else if (editing) {

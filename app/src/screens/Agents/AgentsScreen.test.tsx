@@ -322,7 +322,7 @@ describe("agents tab", () => {
     fireEvent.click(option(within(form).getByRole("group", { name: "Choices for careful-dev Light" }), "developer-heavy")!);
     fireEvent.click(within(form).getByRole("button", { name: "Create agent" }));
 
-    // Made, but its models weren't saved: it's listed, and the form stays to retry only that.
+    // Made, but its models weren't saved: it's listed, and the form stays to save only those again.
     await waitFor(() => expect(agent("careful-dev").dataset.modelMode).toBe("follows"));
     expect(within(form).getByTestId("form-error")).toBeTruthy();
     fireEvent.click(within(form).getByRole("button", { name: "Save its models" }));
