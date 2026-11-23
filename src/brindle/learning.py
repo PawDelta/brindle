@@ -44,6 +44,7 @@ class TaskInfo:
     started_at: float | None = None
     # What routing aims for (brindle.routing_goal): (cost, speed, first_try), None: no goal
     weights: tuple[float, float, float] | None = None
+    agent: str | None = None       # role layer; profile remains the model's id
 
 
 @dataclass(frozen=True)
@@ -327,14 +328,15 @@ def _task_info(db: DB, worker: Agent, ws: Workspace) -> TaskInfo:
     return TaskInfo(
         repo_root=ws.repo_root, task=worker.task or "", files=files, weight=weight,
         agent_id=worker.id, profile=worker.profile, provider=worker.provider, model=model,
-        started_at=worker.created_at,
+        started_at=worker.created_at, agent=worker.agent,
     )
 
 
 def _reviewer_info(db: DB, reviewer: Agent, ws: Workspace,
                    worker: Agent | None = None) -> TaskInfo:
     from brindle import agents
-    from brindle.profiles import load_profile
+    from brindle.profiles import builtin_names, load_profile
+    from brindle.model_names import canonical
 
     if worker is None:
         worker = agents.workspace_worker(db, ws)
@@ -345,10 +347,15 @@ def _reviewer_info(db: DB, reviewer: Agent, ws: Workspace,
         pass
     files, weight = _task_files(db, worker, ws.repo_root) if worker else ((), None)
     task = (worker.task if worker and worker.task else "") or (reviewer.task or "")
+    profile = canonical(reviewer.profile)
+    if reviewer.agent and profile.startswith("dev."):
+        review_profile = "review." + profile.removeprefix("dev.")
+        if review_profile in builtin_names():
+            profile = review_profile
     return TaskInfo(
         repo_root=ws.repo_root, task=task, files=files, weight=weight,
-        agent_id=reviewer.id, profile=reviewer.profile, provider=reviewer.provider,
-        model=model, started_at=reviewer.created_at,
+        agent_id=reviewer.id, profile=profile, provider=reviewer.provider,
+        model=model, started_at=reviewer.created_at, agent=reviewer.agent,
     )
 
 
@@ -431,7 +438,7 @@ def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
                files: list[str] | None = None, candidates: list[str] | None = None,
                weight: str | None = None,
                default: str | None = None, *, design_heavy: bool = False,
-               goal: dict | None = None) -> tuple[str | None, str | None]:
+               goal: dict | None = None, agent: str | None = None) -> tuple[str | None, str | None]:
     """(override, reason): the learner's pick among ``candidates`` (default:
     the repo's ``learning_candidates``, else the medium tier's routing list)
     when it overrides ``default`` (what brindle would use: the first
@@ -462,7 +469,7 @@ def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
         if goal is None:
             goal = routing_goal.for_learner(repo_root)
         pick = p.suggest(TaskInfo(repo_root=repo_root, task=task or "", files=tuple(files or ()),
-                                  weight=weight, weights=routing_goal.as_tuple(goal)), names, default)
+                                  weight=weight, weights=routing_goal.as_tuple(goal), agent=agent), names, default)
         if isinstance(pick, str) and pick not in names:
             from brindle.profiles import current_name
 
@@ -479,12 +486,14 @@ def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
 def choose(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
            files: list[str] | None = None, candidates: list[str] | None = None,
            weight: str | None = None, default: str | None = None, *,
-           design_heavy: bool = False, goal: dict | None = None) -> str | None:
+           design_heavy: bool = False, goal: dict | None = None, agent: str | None = None) -> str | None:
     """The learner's override of ``default`` among ``candidates``, or None
     (no learner, nothing to choose between, or it kept the default)."""
     options: dict = {"design_heavy": True} if design_heavy else {}
     if goal is not None:
         options["goal"] = goal
+    if agent is not None:
+        options["agent"] = agent
     return choose_why(db, cfg, repo_root, task, files, candidates, weight, default, **options)[0]
 
 

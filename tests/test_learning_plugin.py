@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from brindle import agents, autopilot, learning, plugins, workspaces
+from brindle import agents, autopilot, learning, plugins, savings, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from brindle.pro import learning as pro_learning
@@ -74,6 +74,34 @@ def test_outcomes_reach_the_cloud_learner(db, ws, monkeypatch):
     assert last.checks_passed and last.wall_seconds >= 5
     learning.note(db, cfg, w, ws, merged=False)
     assert p.events[-1][1].event == "removed_unmerged"
+
+
+@pytest.mark.parametrize("model, agent, expected", [
+    ("dev.gpt", "qa", "dev.gpt"),
+    ("dev.gpt", "reviewer", "review.gpt"),
+    ("dev.claude-opus", "reviewer", "dev.claude-opus"),
+])
+def test_composed_agent_recording(db, ws, monkeypatch, model, agent, expected):
+    p = Recorder()
+    install(monkeypatch, p)
+    cfg = RepoConfig(learning="cloud")
+    w = worker(db, ws)
+    db.update_agent(w.id, profile=model, agent=agent,
+                    mode="review" if agent == "reviewer" else "assign")
+    w = db.get_agent(w.id)
+    savings.record(db, ws.repo_root, {"profile": model}, task_id="t1")
+    savings.attach_agent(db, "t1", w.id)
+    if agent == "reviewer":
+        learning.note_reviewer(db, cfg, w, ws, approved=True)
+    else:
+        learning.note(db, cfg, w, ws, merged=True)
+    info, _ = p.events[-1]
+    assert (info.agent, info.profile) == (agent, expected)
+    decision = db.routing_decision_for_agent(w.id)
+    assert (decision.agent, decision.profile) == (agent, model)
+    savings.record(db, ws.repo_root, {"profile": model}, agent_id=w.id)
+    decision = db.routing_decision_for_agent(w.id)
+    assert (decision.agent, decision.profile) == (agent, model)
 
 
 @pytest.mark.variant("a learning plugin cannot select a profile outside the allowed candidate set")
@@ -157,7 +185,7 @@ def test_reviewer_verdict_and_no_verdict_and_abandoned_worker_cleanup(db, repo, 
                 for t, o in p.events]
     assert [e[4] for e in by_event] == ["review", "verdict", "no_verdict", "removed_unmerged"]
     verdict = by_event[1]
-    assert verdict[:6] == ("r1", "reviewer-codex", "heavy", "fix the crash in parser.py", "verdict", False)
+    assert verdict[:6] == ("r1", "review.gpt", "heavy", "fix the crash in parser.py", "verdict", False)
     assert verdict[6] >= 100
     no_verdict = by_event[2]
     assert no_verdict[:6] == ("r2", "reviewer", "heavy", "fix the crash in parser.py", "no_verdict", None)

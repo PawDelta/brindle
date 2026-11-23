@@ -3,6 +3,7 @@ back (to no suggestion: the learner only ever runs on the server)."""
 import json
 import threading
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -93,7 +94,7 @@ def no_forbidden(body):
 
 def test_record_payload_keys_and_contents(parts, remote):
     lr = make(parts, remote)
-    lr.record(task(), Outcome("reported", wall_seconds=12.5))
+    lr.record(replace(task(), agent="qa"), Outcome("reported", wall_seconds=12.5))
     lr.record(task(), Outcome("review", approved=False))
     lr.record(task(), Outcome("escalated"))
     lr.record(task(), Outcome("merged", checks_passed=True, tokens=1234, wall_seconds=61.5))

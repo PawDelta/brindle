@@ -726,7 +726,8 @@ CREATE TABLE IF NOT EXISTS routing_decisions (
     outcome TEXT,                   -- merged | removed_unmerged, once it's over
     demoted_from TEXT,              -- the profile a budget moved this task off (brindle.budget)
     budget_state TEXT,              -- warned | over | stopped (brindle.budget.sweep)
-    seeded_at REAL                  -- when `brindle learning seed` sent it to the hosted learner
+    seeded_at REAL,                 -- when `brindle learning seed` sent it to the hosted learner
+    agent TEXT                     -- role layer, separate from the model profile
 );
 CREATE INDEX IF NOT EXISTS routing_decisions_repo_root ON routing_decisions(repo_root, ts);
 CREATE INDEX IF NOT EXISTS routing_decisions_agent ON routing_decisions(agent_id);
@@ -1720,6 +1721,7 @@ class RoutingDecision:
     demoted_from: str | None = None
     budget_state: str | None = None
     seeded_at: float | None = None
+    agent: str | None = None
 
 
 @dataclass
@@ -2187,7 +2189,8 @@ class DB:
         routing_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(routing_decisions)")}
         if "prior" not in routing_cols:
             self.conn.execute("ALTER TABLE routing_decisions ADD COLUMN prior INTEGER NOT NULL DEFAULT 0")
-        for col, kind in (("demoted_from", "TEXT"), ("budget_state", "TEXT"), ("seeded_at", "REAL")):
+        for col, kind in (("demoted_from", "TEXT"), ("budget_state", "TEXT"), ("seeded_at", "REAL"),
+                          ("agent", "TEXT")):
             if col not in routing_cols:
                 self.conn.execute(f"ALTER TABLE routing_decisions ADD COLUMN {col} {kind}")
         request_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(permission_requests)")}
@@ -4417,13 +4420,14 @@ class DB:
     def add_routing_decision(self, repo_root: str, *, task_id: str | None, agent_id: str | None,
                              weight: str | None, baseline_profile: str, profile: str,
                              learned: bool, prior: bool = False,
-                             ts: float | None = None, demoted_from: str | None = None) -> None:
+                             ts: float | None = None, demoted_from: str | None = None,
+                             agent: str | None = None) -> None:
         with self.tx() as c:
             c.execute(
                 "INSERT INTO routing_decisions (repo_root, ts, task_id, agent_id, weight, "
-                "baseline_profile, profile, learned, prior, demoted_from) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "baseline_profile, profile, learned, prior, demoted_from, agent) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (repo_root, time.time() if ts is None else ts, task_id, agent_id, weight,
-                 baseline_profile, profile, int(learned), int(learned and prior), demoted_from),
+                 baseline_profile, profile, int(learned), int(learned and prior), demoted_from, agent),
             )
 
     def set_budget_state(self, agent_id: str, state: str | None) -> None:
@@ -4432,7 +4436,9 @@ class DB:
 
     def set_routing_agent(self, task_id: str, agent_id: str) -> None:
         with self.tx() as c:
-            c.execute("UPDATE routing_decisions SET agent_id=? WHERE task_id=?", (agent_id, task_id))
+            c.execute("UPDATE routing_decisions SET agent_id=?, "
+                      "agent=COALESCE((SELECT agent FROM agent_roles WHERE agent_id=?), agent) WHERE task_id=?",
+                      (agent_id, agent_id, task_id))
 
     def note_routing_outcome(self, agent_id: str, *, review: bool = False, escalated: bool = False,
                              outcome: str | None = None) -> None:
