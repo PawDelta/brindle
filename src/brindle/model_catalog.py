@@ -217,6 +217,11 @@ CATALOG: dict[str, Model] = dict([
 ALIASES = {alias: key for key, model in CATALOG.items() for alias in model.aliases}
 
 
+def default_model(provider: str) -> str | None:
+    """Catalog default to pass explicitly when a profile leaves its model unset."""
+    return ALIASES.get("sonnet") if provider == "claude" else None
+
+
 def lookup(model: str | None) -> Model | None:
     return CATALOG.get(normalize(model)) if model else None
 

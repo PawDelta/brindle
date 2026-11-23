@@ -1136,8 +1136,9 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     return name, bool(pick), why
 
 
-def effective_profile_model(p, repo_root: str | None = None) -> str:
-    """Resolve the effective model for a profile, checking model, provider-specific env variables, and managed overrides."""
+def effective_profile_model(p, repo_root: str | None = None, default: str | None = None) -> str:
+    """Resolve the model from the profile, an explicit launch default, or the
+    environment, with managed route settings taking precedence."""
     from brindle import profiles
 
     prof = p
@@ -1147,7 +1148,7 @@ def effective_profile_model(p, repo_root: str | None = None) -> str:
         except Exception:
             prof = p
 
-    m = getattr(prof, "model", None) or ""
+    m = getattr(prof, "model", None) or default or ""
     provider = getattr(prof, "provider", None) or "claude"
 
     # Provider-specific model environment variables in order of provider precedence
@@ -1191,14 +1192,15 @@ def effective_profile_model(p, repo_root: str | None = None) -> str:
 def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
     """Format the worker's display name, effort, id and cost tier."""
     try:
-        from brindle import agents, model_catalog, pricing
+        from brindle import agents, model_catalog, policy, pricing
         from brindle.model_names import describe
         from brindle.profiles import load_profile
         p = load_profile(name, repo_root)
-        eff = effective_profile_model(p, repo_root)
-        resolved = agents.routing_model(p, repo_root) if repo_root else p.model
-        if resolved != p.model:
-            eff = resolved
+        if repo_root and not p.model and model_catalog.default_model(p.provider):
+            _, resolved = policy._profile_fields(name, repo_root)
+        else:
+            resolved = agents.routing_model(p, repo_root) if repo_root else p.model
+        eff = resolved if resolved != p.model else effective_profile_model(p, repo_root)
         named = describe(p, eff)
         worker = named["display"]
         if named["effort"]:

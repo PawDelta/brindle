@@ -150,7 +150,11 @@ def _profile_fields(profile: str | None, repo_root: str, *,
         if not model:
             try:
                 from brindle.autopilot import effective_profile_model
-                model = effective_profile_model(p, None if user_library else repo_root) or None
+                from brindle.model_catalog import default_model
+
+                # A concrete launch flag wins over ambient model variables.
+                default = default_model(p.provider)
+                model = effective_profile_model(p, repo_root if default or not user_library else None, default) or None
             except Exception:
                 pass
         if not model:

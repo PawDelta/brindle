@@ -21,6 +21,7 @@ from brindle.pro.team_policy import ProPolicy
 from pro_fixtures import (  # noqa: F401 - fixtures
     BASE, ROOT_SHA, backend, claims, fixed_identity, pro_env, sign, signing_key,
 )
+from test_launch_health import detached, flag, launches  # noqa: F401
 
 ORG = "org_team1"
 REPO = "/work/secret-client-project"
@@ -116,6 +117,67 @@ def test_a_broken_credential_store_allows_everything(backend, monkeypatch):
 def test_undeclared_model_is_denied_when_a_list_is_set(team):
     d = plugin(team).check_assign(assign(model=None))
     assert not d.allowed and "no declared model" in d.reason
+
+
+@pytest.mark.parametrize("provider, allowed, expected", [
+    ("claude", ("claude-sonnet-5-5",), "developer"),
+    pytest.param("claude", ("claude-sonnet-4",), None, marks=pytest.mark.variant(
+        "a known default outside the allowlist must be refused by its actual model")),
+    pytest.param("antigravity", ("claude-sonnet-5-5",), "developer", marks=pytest.mark.variant(
+        "an unknown default must be refused while the next allowed profile can run")),
+])
+def test_unpinned_model_policy_and_launch(db, repo, team, monkeypatch, launches, detached,
+                                         provider, allowed, expected):
+    from types import SimpleNamespace
+
+    from brindle import agents, autopilot, config, doctor, policy, provider_health, workspaces
+    from brindle.daemon.routes_read import _routing
+    from brindle.pro import team_policy
+    from test_pricing import profile
+
+    root = str(repo)
+    ws = workspaces.adopt_root(db, root)
+    order = ["developer"]
+    if provider == "antigravity":
+        profile(repo, "unpinned", provider=provider)
+        order.insert(0, "unpinned")
+    config.set_local(root, "routing", {"medium": order})
+    config.set_local(root, "routing_locked", ["medium"])
+    team.policy_body["policy"].update(allowed_providers=["claude", "antigravity"], allowed_models=list(allowed))
+    org_plugin = plugin(team)
+    monkeypatch.setattr(policy, "plugin", lambda cfg, root: org_plugin)
+    monkeypatch.setattr(team_policy, "access", lambda root: team_policy.Access(
+        org_id=ORG, allowed_models=allowed))
+    monkeypatch.setattr(provider_health, "check", lambda *a, **kw: provider_health.Health("ok"))
+    monkeypatch.setattr("brindle.providers.signed_out", lambda *a, **kw: None)
+    monkeypatch.setattr("brindle.quota.known_headroom", lambda *a, **kw: None)
+    monkeypatch.setattr("shutil.which", lambda cli: f"/usr/bin/{cli}")
+    monkeypatch.setattr(doctor, "signin_providers", lambda: ["claude", "antigravity"])
+    for key in ("ANTHROPIC_MODEL", "CLAUDE_MODEL", "GEMINI_MODEL", "MODEL"):
+        monkeypatch.delenv(key, raising=False)
+
+    request = SimpleNamespace(query_params={"repo": root})
+    reply = _routing(db, request, learn=False)
+    medium = reply["tiers"]["medium"]
+    assert medium["values"] == order
+    models = {row["profile"]: (row["model"], row["allowed"]) for row in medium["models"]}
+    if provider == "antigravity":
+        assert models["unpinned"] == (None, False)
+        assert not policy.assign_decision(config.load_repo_config(root), root, "unpinned", "task", "assign").allowed
+    if expected:
+        why = []
+        chosen, _ = autopilot.choose_profile(db, "", root, weight="medium", why=why)
+        assert chosen == expected
+        assert "claude-sonnet-5-5" in " ".join(why)
+        agents.spawn(db, ws, chosen, prompt="task", mode="assign", background_setup=True)
+        [argv] = launches
+        assert flag(argv, "--model") == "claude-sonnet-5-5"
+    else:
+        with pytest.raises(autopilot.AutopilotError):
+            autopilot.choose_profile(db, "", root, weight="medium")
+    assert models["developer"] == ("claude-sonnet-5-5", expected == "developer")
+    row = next(row for row in reply["profiles"] if row["name"] == "developer")
+    assert (row["model"], row["allowed"]) == models["developer"]
 
 
 @pytest.mark.variant("unpinned CLI defaults must not borrow permission from the old hard-coded Gemini model")

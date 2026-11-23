@@ -1377,9 +1377,9 @@ class ClaudeCode(Provider):
             argv += ["--add-dir", directory]
         argv += ["--append-system-prompt",
                  "\n\n".join(filter(None, [ctx.profile.prompt, DELIVERY_NOTE]))]
-        from brindle import company_login
+        from brindle import company_login, model_catalog
 
-        model = company_login.claude_model(p.model, ctx.cwd)
+        model = company_login.claude_model(p.model, ctx.cwd) or model_catalog.default_model(self.name)
         if model:
             argv += ["--model", model]
         argv += ["--permission-mode", start_mode]

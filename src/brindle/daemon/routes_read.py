@@ -748,7 +748,7 @@ def get_routing(db: DB, request: Request) -> Any:
 def _routing(db: DB, request: Request, learn: bool) -> Any:
     from concurrent.futures import ThreadPoolExecutor
 
-    from brindle import autopilot, providers
+    from brindle import autopilot, model_catalog, providers
     from brindle.service.routing import RoutingPolicy, agent_model_orders, legacy_medium_override, provider_name
 
     repo = _need_repo(request)
@@ -793,7 +793,10 @@ def _routing(db: DB, request: Request, learn: bool) -> Any:
         except (KeyError, profiles.ProfileError):
             kind = "pinned"  # Unresolved inheritance still has a row for its lint errors.
         role = profiles.base_role(p.name, lib)
-        model = autopilot.effective_profile_model(p, lib) or None
+        if not p.model and model_catalog.default_model(p.provider):
+            _, model = policy.runs(p.name)
+        else:
+            model = autopilot.effective_profile_model(p, lib) or None
         rows.append(RoutingProfileDTO(
             lint_errors=errors, lint_warnings=warnings,
             kind=kind, description=p.description, rules=p.rules,
