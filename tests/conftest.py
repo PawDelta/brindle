@@ -505,12 +505,12 @@ def machine_has_room(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def no_signed_in_providers(monkeypatch):
-    """No sign-in probes in tests, and no `providers` param on /entitlement
-    (tests/test_entitlement_providers.py sets its own)."""
-    from brindle import doctor
+def no_entitlement_provider_probes(monkeypatch):
+    """Entitlement tests opt into fakes for provider sign-in and catalogs."""
+    from brindle import doctor, model_availability
 
     monkeypatch.setattr(doctor, "signed_in_providers", lambda: [])
+    monkeypatch.setattr(model_availability, "reportable_models", lambda names: None)
     # And no `<cli> --version` run of whatever claude/codex the machine has.
     monkeypatch.setattr(doctor, "_version", lambda argv: "")
 

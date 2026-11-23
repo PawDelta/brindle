@@ -385,6 +385,15 @@ def _fetch_entitlement(client: Client, access: str, now: float | None, org_id: s
     names = _signed_in_providers()
     if names:
         params["providers"] = ",".join(names)
+    if org_id is not None and not airgap.enabled():
+        from brindle.model_availability import reportable_models
+
+        try:
+            models = reportable_models(names)
+            if models is not None:
+                params["available_models"] = json.dumps(models, separators=(",", ":"))
+        except Exception:  # noqa: BLE001 - reporting models must never break a refresh
+            pass
     path = "/entitlement" + ("?" + urllib.parse.urlencode(params, safe=",") if params else "")
     status, body = client.get(path, token=access)
     if status == 401:
@@ -700,6 +709,21 @@ def refresh_captured(store, record: dict, transport: Transport | None = None, *,
         store.save(new)
     license.clear_cache()
     return new
+
+
+def refresh_after_provider_update() -> None:
+    """Send the new catalogs without waiting for the next entitlement sweep."""
+    from brindle.pro import credentials
+
+    if airgap.enabled():
+        return
+    try:
+        store = credentials.default_store()
+        record = store.load() or {}
+        if record.get("org_id") and record.get("refresh_token"):
+            refresh(Client(record.get("base_url")), store, record)
+    except Exception:  # noqa: BLE001 - an optional report must not fail an install
+        log.debug("couldn't refresh the entitlement after the provider update")
 
 
 def switch_org(client: Client, store, org_id: str | None, *,
