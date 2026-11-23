@@ -10,6 +10,7 @@ import type { InboxItemDTO, SessionDTO } from "../../../api/schema";
 import { createAppStore } from "../../../store/store";
 import { FakeDaemon } from "../../../test/fakeDaemon";
 import { REPO, question, root, waiting } from "../../../test/fixtures";
+import publishedChoicesHtml from "../../../test/fixtures/v_bfc81230923b.html?raw";
 import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 import { VisualFrame, inertSource, inlineStyles, type VisualFrameProps, type VisualSource } from "./frame";
 import { PARKED, closeParkedVisuals, themeMessage } from "./NativeFrame";
@@ -82,6 +83,48 @@ afterEach(async () => {
 });
 
 describe("visuals", () => {
+  it("selects both published inline choices under older WebKit's event policy", async () => {
+    const row: VisualDTO = {
+      id: "v_bfc81230923b", session: "a89ea94c", by: "a89ea94c", kind: "visual", rev: 1,
+      title: "Two questions", question: "New model versions: who switches routing over?",
+      answer: null, answered_in_chat: false, kept: false, unread: false, created_at: 1795453531.8060968,
+      answer_agent_id: "a89ea94c", accepts_files: true, holding: 0, inline_html: publishedChoicesHtml,
+      choices: [
+        { id: "bumps", question: "New model versions: who switches routing over?", options: [
+          { id: "me", label: "You do it, as a small task each time", detail: null },
+          { id: "brindle", label: "brindle does it by itself", detail: null },
+        ] },
+        { id: "flag", question: "Warn when a routing override names a missing or outdated profile?", options: [
+          { id: "yes", label: "Yes, warn me", detail: null },
+          { id: "no", label: "No", detail: null },
+        ] },
+      ],
+    };
+    const client = new DaemonClient({ baseUrl: "http://daemon/v1", token: "test", fetch: async () =>
+      new Response(JSON.stringify([{ ...row, options: null }])) });
+    const [visual] = await client.visuals(row.session);
+    render(<VisualReader client={client} visual={visual} onBack={() => {}} onAnswered={() => {}} />);
+    const frame = screen.getByTitle(row.title) as HTMLIFrameElement;
+    const doc = frame.contentDocument!;
+    doc.documentElement.innerHTML = new DOMParser().parseFromString(frame.srcdoc, "text/html").documentElement.innerHTML;
+    // jsdom does not enforce iframe sandbox flags. Older WebKit suppresses even the
+    // parent's callbacks when the target document has the sandboxed scripts flag.
+    if (!frame.getAttribute("sandbox")?.split(/\s+/).includes("allow-scripts")) {
+      doc.addEventListener("click", event => event.stopImmediatePropagation(), { capture: true });
+    }
+    fireEvent.load(frame);
+
+    const bumps = doc.querySelector('[data-choice="bumps"] [data-option="me"]')!;
+    const flag = doc.querySelector('[data-choice="flag"] [data-option="yes"]')!;
+    const send = screen.getByTestId<HTMLButtonElement>("visual-send");
+    fireEvent.click(bumps);
+    expect(bumps.getAttribute("aria-checked")).toBe("true");
+    expect(send.disabled).toBe(true);
+    fireEvent.click(flag);
+    expect(flag.getAttribute("aria-checked")).toBe("true");
+    expect(send.disabled).toBe(false);
+  });
+
   it("selects two inline groups and sends one combined answer", async () => {
     const sent: unknown[] = [];
     const row = { ...visual, options: undefined, choices: [

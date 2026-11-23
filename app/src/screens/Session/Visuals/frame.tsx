@@ -415,7 +415,7 @@ export function inlineStyles(doc: Document, read: StyleReader = (element, pseudo
   return doc.documentElement.outerHTML;
 }
 
-const INERT_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'";
+const INERT_CSP = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'";
 const ACTIVE = "script, iframe, frame, frameset, object, embed, applet, link, meta, base, portal, template, audio, video, source, track";
 const FETCHING = new Set(["src", "srcset", "href", "xlink:href", "action", "formaction", "poster", "background", "data", "ping",
   "longdesc", "lowsrc", "dynsrc", "manifest", "codebase", "archive"]);
