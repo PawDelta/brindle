@@ -83,7 +83,7 @@ afterEach(async () => {
 });
 
 describe("visuals", () => {
-  it("selects both published inline choices under older WebKit's event policy", async () => {
+  async function openPublishedChoices(onBack = () => {}) {
     const row: VisualDTO = {
       id: "v_bfc81230923b", session: "a89ea94c", by: "a89ea94c", kind: "visual", rev: 1,
       title: "Two questions", question: "New model versions: who switches routing over?",
@@ -103,17 +103,23 @@ describe("visuals", () => {
     const client = new DaemonClient({ baseUrl: "http://daemon/v1", token: "test", fetch: async () =>
       new Response(JSON.stringify([{ ...row, options: null }])) });
     const [visual] = await client.visuals(row.session);
-    render(<VisualReader client={client} visual={visual} onBack={() => {}} onAnswered={() => {}} />);
+    render(<VisualReader client={client} visual={visual} onBack={onBack} onAnswered={() => {}} />);
     const frame = screen.getByTitle(row.title) as HTMLIFrameElement;
     const doc = frame.contentDocument!;
     doc.documentElement.innerHTML = new DOMParser().parseFromString(frame.srcdoc, "text/html").documentElement.innerHTML;
     // jsdom does not enforce iframe sandbox flags. Older WebKit suppresses even the
     // parent's callbacks when the target document has the sandboxed scripts flag.
     if (!frame.getAttribute("sandbox")?.split(/\s+/).includes("allow-scripts")) {
-      doc.addEventListener("click", event => event.stopImmediatePropagation(), { capture: true });
+      const suppress = (event: Event) => event.stopImmediatePropagation();
+      doc.addEventListener("click", suppress, { capture: true });
+      doc.addEventListener("keydown", suppress, { capture: true });
     }
     fireEvent.load(frame);
+    return doc;
+  }
 
+  it("selects both published inline choices under older WebKit's event policy", async () => {
+    const doc = await openPublishedChoices();
     const bumps = doc.querySelector('[data-choice="bumps"] [data-option="me"]')!;
     const flag = doc.querySelector('[data-choice="flag"] [data-option="yes"]')!;
     const send = screen.getByTestId<HTMLButtonElement>("visual-send");
@@ -123,6 +129,21 @@ describe("visuals", () => {
     fireEvent.click(flag);
     expect(flag.getAttribute("aria-checked")).toBe("true");
     expect(send.disabled).toBe(false);
+  });
+
+  it("goes back on Escape from the parent and from a published inline choice", async () => {
+    const onBack = vi.fn();
+    const doc = await openPublishedChoices(onBack);
+
+    const back = screen.getByTestId("visual-back");
+    back.focus();
+    fireEvent.keyDown(back, { key: "Escape" });
+    expect(onBack).toHaveBeenCalledTimes(1);
+
+    const option = doc.querySelector<HTMLButtonElement>('[data-choice="bumps"] [data-option="me"]')!;
+    option.focus();
+    fireEvent.keyDown(option, { key: "Escape" });
+    expect(onBack).toHaveBeenCalledTimes(2);
   });
 
   it("selects two inline groups and sends one combined answer", async () => {
