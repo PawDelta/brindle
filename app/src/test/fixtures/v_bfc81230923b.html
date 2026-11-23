@@ -1,0 +1,21 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Two questions</title>
+<style>
+:root{--bg:#fbfbfa;--panel:#fff;--ink:#1d1d1f;--ink3:#8a8c91;--line:#e7e7e4}
+@media (prefers-color-scheme:dark){:root{--bg:#18181a;--panel:#202023;--ink:#ececee;--ink3:#86878c;--line:#2e2e32}}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,Inter,system-ui,sans-serif}
+main{max-width:640px;margin:0 auto;padding:24px 16px}
+h1{font-size:18px;margin:0 0 14px}
+fieldset{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:0 0 12px;background:var(--panel)}
+legend{font-weight:600;padding:0 4px}
+p{margin:2px 0 10px;color:var(--ink3);font-size:13px}
+button{font:inherit;font-size:13px;border:1px solid var(--line);background:var(--bg);color:var(--ink);border-radius:8px;padding:6px 12px;margin:0 6px 6px 0}
+</style></head><body><main>
+<h1>Two questions</h1>
+<fieldset data-choice="bumps"><legend>New model versions (like GPT‑6.2): who switches routing over?</legend>
+<p>Either way only the version changes, never the routing order. My pick: I do it, so you see each one as a small branch.</p>
+<button data-option="me">You do it, as a small task each time</button><button data-option="brindle">brindle does it by itself</button></fieldset>
+<fieldset data-choice="flag"><legend>Should brindle warn when a routing override names a missing or outdated profile?</legend>
+<p>That's what silently sent work to GPT‑6 Astra. My pick: yes, as one Inbox note.</p>
+<button data-option="yes">Yes, warn me</button><button data-option="no">No</button></fieldset>
+</main></body></html>
