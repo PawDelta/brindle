@@ -147,7 +147,8 @@ def test_ranked_worker_fallback(db, repo, boss, monkeypatch, weight, blocked, ex
 def test_default_reviewer_pick(db, repo, boss, monkeypatch, unavailable, expected):
     from brindle import policy, providers
 
-    db.add_agent(Agent("writer", boss.id, "dev.claude-sonnet", "claude", None,
+    # A different model keeps the default order and its fallback eligible.
+    db.add_agent(Agent("writer", boss.id, "dev.claude-opus", "claude", None,
                        "assign", "done", "@0", "done", time.time()))
     monkeypatch.setattr(policy, "check_assign", lambda cfg, root, name, *args:
                         policy.Decision(allowed=not (unavailable == "policy" and name == "review.claude-sonnet.high")))
