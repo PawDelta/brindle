@@ -759,6 +759,12 @@ def kind_of(name: str, repo_root: str | None = None) -> str:
     return "pinned" if any(key in meta for key in ("provider", "model", "effort")) else "agent"
 
 
+def agent_root(name: str, repo_root: str | None = None) -> str:
+    """The role root (developer, reviewer or supervisor) ``compose`` builds
+    agent ``name`` on."""
+    return _agent_layer(name, repo_root)[0]
+
+
 def compose(agent: str, model: str, repo_root: str | None = None) -> Profile:
     """Join an agent's role layer to a model, retaining the provider's tool ceiling.
 

@@ -329,10 +329,30 @@ def _weight(w: str) -> str:
     return {"reasoning": "advanced", "complex": "advanced"}.get(w, w)
 
 
+def agent_pool(cfg, repo_root: str, agent: str | None, tier: str, ceiling: str | None = None) -> list[str] | None:
+    """``agent``'s own model order for a ``tier`` task (``agent_models``)
+    under ``ceiling`` (else the repo's ``max_weight``), or None when it has
+    none and the shared table applies. Its own order is locked: it is the
+    whole pool, never reordered and never overridden by the learner."""
+    names = (cfg.agent_models.get(agent) or {}).get(tier) if agent else None
+    if not names:
+        return None
+    from brindle import autopilot
+    from brindle.profiles import current_name
+
+    rank = {t: i for i, t in enumerate(TIERS)}
+    ceiling = ceiling or (cfg.max_weight if cfg.max_weight in rank else None)
+    names = list(dict.fromkeys(current_name(n, repo_root) for n in names))
+    if ceiling in rank:
+        names = [n for n in names if rank.get(_weight(autopilot.profile_weight(n, cfg, repo_root)), 3)
+                 <= rank[ceiling]]
+    return names
+
+
 def workers(cfg, repo_root: str, tier: str, *, gate=None, ceiling: str | None = None,
             design_heavy: bool = False, after: Iterable[str] = (), kind: str | None = None,
             weights: dict | None = None, policy: Callable[[str], str | None] | None = None,
-            full: bool = False) -> Result:
+            full: bool = False, agent: str | None = None) -> Result:
     """The cascade for a worker of ``tier``: what ``autopilot.eligible``
     checks for its own tier, over the whole pool, plus the assignment
     policy (``policy``: why it refuses a profile for this task, as a fresh
@@ -340,7 +360,8 @@ def workers(cfg, repo_root: str, tier: str, *, gate=None, ceiling: str | None = 
     ``policy_refused`` names those that could otherwise have run, so a
     caller can refuse the delegation as policy does. ``full``: check every
     replacement even while the tier has a candidate (for a learner that
-    weighs them all)."""
+    weighs them all). ``agent``: who does the task; its own ``agent_models``
+    order for ``tier`` (``agent_pool``), when set, is the pool instead."""
     from brindle import autopilot
 
     refused: list[str] = []
@@ -354,6 +375,11 @@ def workers(cfg, repo_root: str, tier: str, *, gate=None, ceiling: str | None = 
             return f"refused by policy ({no}), skipped {name}"
         return why
 
+    own_order = agent_pool(cfg, repo_root, agent, tier, ceiling)
+    if own_order is not None:
+        found = run(tier, own_order, why_not, repo_root=repo_root, kind=kind, after=after, pinned=True)
+        found.policy_refused = refused
+        return found
     pool = worker_pool(cfg, repo_root, tier, ceiling)
     own = set(autopilot.tier_order(cfg, tier))
     found = run(tier, pool, why_not, repo_root=repo_root, kind=kind, after=after, weights=weights,

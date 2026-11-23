@@ -71,8 +71,8 @@ CATALOG: tuple[Model, ...] = (
     Model("codex", "Codex", CLI, "codex", "dev.gpt"),
     _pick("gpt-6-luna", "gpt-6-luna", CLI, "codex", "dev.gpt-luna"),
     _pick("gpt-6.1-terra", "gpt-6.1-terra", CLI, "codex", "dev.gpt-terra"),
-    _pick("gpt-6.1-sol", "gpt-6.1-sol", CLI, "codex", "dev.gpt-sol"),
-    _pick("gpt-6-astra", "gpt-6-astra", CLI, "codex", "dev.gpt-astra"),
+    _pick("gpt-6.2-sol", "gpt-6.2-sol", CLI, "codex", "dev.gpt-sol"),
+    _pick("gpt-6.2-astra", "gpt-6.2-astra", CLI, "codex", "dev.gpt-astra"),
     _pick("antigravity", "gemini-4-argon", CLI, "antigravity", "dev.gemini"),
     _pick("local-qwen3-coder", "qwen3-coder:30b", LOCAL, "native", "dev.qwen3-coder"),
     _pick("or-qwen3-coder", "qwen/qwen3-coder", KEY, "native", "developer-or-qwen3-coder", ("light", "medium")),
@@ -81,7 +81,13 @@ CATALOG: tuple[Model, ...] = (
 )
 
 
+# Saved routing choices follow the upgraded built-in profiles.
+_PICK_ALIASES = {"gpt-6.1-sol": "gpt-6.2-sol", "gpt-6-astra": "gpt-6.2-astra"}
+
+
 def find(model_id: object) -> Model | None:
+    if isinstance(model_id, str):
+        model_id = _PICK_ALIASES.get(model_id, model_id)
     return next((m for m in CATALOG if m.id == model_id), None)
 
 
