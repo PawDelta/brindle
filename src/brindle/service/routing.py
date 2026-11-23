@@ -7,9 +7,11 @@ be refused. Models are named as the org policy and the website name them
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from brindle import config, profiles
+from brindle.db import Workspace
 from brindle.pro import managed_models, team_policy
 from brindle.service.dto import RoutingLockDTO, RoutingModelOrderDTO, RoutingPolicyDTO
 from brindle.service.errors import ServiceError
@@ -100,9 +102,10 @@ class RoutingPolicy:
     repo_root: str
     _runs: dict = field(default_factory=dict)
     user_library: bool = False      # profile names are the person's, never the repo's own
+    _model_fields: Callable[[str], tuple[str, str | None] | None] | None = None
 
     @classmethod
-    def load(cls, repo_root: str, *, user_library: bool = False) -> RoutingPolicy:
+    def load(cls, repo_root: str, *, user_library: bool = False, workspace: Workspace | None = None) -> RoutingPolicy:
         """The policy for ``repo_root``; ``user_library``: judging the
         person's own profiles (scope "user"), under the same policy."""
         acc = team_policy.access(repo_root)
@@ -112,7 +115,10 @@ class RoutingPolicy:
                 managed = managed_models.current(repo_root)
             except managed_models.ManagedUnavailable as e:
                 acc = team_policy.Access(org_id=acc.org_id, error=str(e))
-        return cls(acc, managed, repo_root, user_library=user_library)
+        from brindle.policy import workspace_models
+
+        model_fields = workspace_models(workspace, user_library=user_library) if workspace else None
+        return cls(acc, managed, repo_root, user_library=user_library, _model_fields=model_fields)
 
     @property
     def applies(self) -> bool:
@@ -123,7 +129,8 @@ class RoutingPolicy:
         if profile not in self._runs:
             from brindle.policy import _profile_fields
 
-            self._runs[profile] = _profile_fields(profile, self.repo_root, user_library=self.user_library)
+            resolved = self._model_fields(profile) if self._model_fields else None
+            self._runs[profile] = resolved or _profile_fields(profile, self.repo_root, user_library=self.user_library)
         return self._runs[profile]
 
     def runs(self, profile: str) -> tuple[str | None, str | None]:

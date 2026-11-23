@@ -2014,10 +2014,13 @@ def _launch_refusal(db: DB, t: Task) -> str | None:
     except Exception:  # noqa: BLE001 - the policy decides what an unknown count means
         running = None
     caller = db.get_agent(t.caller_id) if t.caller_id else None
+    source = db.get_workspace(t.caller_ws_id)
+    launch_ws = agents.delegation_workspace(db, source, bool(t.isolate), t.branch) if source else None
+    resolved = policy.workspace_models(launch_ws, mode=t.mode, parent_id=t.caller_id)(t.profile) if launch_ws else None
     d = policy.check_assign(
         load_repo_config(t.repo_root), t.repo_root, t.profile, t.task_text, t.mode,
         files=_loads(t.files) or None, weight=t.weight, branch=t.branch, actor=caller,
-        running_workers=running,
+        running_workers=running, **({"resolved": resolved} if resolved else {}),
     )
     return None if d.allowed else d.reason
 

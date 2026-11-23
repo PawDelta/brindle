@@ -71,6 +71,13 @@ class ViewReads(DB):
         return self._milestones.get(agent_id)
 
     @cached_property
+    def _launch_models(self):
+        return dict(self.conn.execute("SELECT agent_id, model FROM agent_launch_models"))
+
+    def agent_launch_model(self, agent_id: str) -> str | None:
+        return self._launch_models.get(agent_id)
+
+    @cached_property
     def _messages(self):
         return {r[0]: (r[1], r[2]) for r in self.conn.execute(
             "SELECT agent_id, SUM(COALESCE(held,0)=0), SUM(held=1) FROM inbox "

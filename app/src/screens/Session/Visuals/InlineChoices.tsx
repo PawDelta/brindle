@@ -2,6 +2,12 @@ import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import type { VisualDTO } from "../../../api/client";
 import { inertSource } from "./frame";
 
+function syncChoiceColors(doc: Document) {
+  const theme = getComputedStyle(document.documentElement);
+  doc.documentElement.style.setProperty("--brindle-choice-border", theme.getPropertyValue("--branch"));
+  doc.documentElement.style.setProperty("--brindle-choice-fill", theme.getPropertyValue("--branch-soft"));
+}
+
 /* No page code runs in this frame. Only the parent app attaches listeners and owns picks.
    Never accept postMessage choices from the scripted native visual for these groups. */
 export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, onSnapshot, onBack }: {
@@ -34,9 +40,11 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
         field.setAttribute("data-choice", group.id);
         doc.body.append(field);
       }
-      const legend = doc.createElement("legend");
-      legend.textContent = group.question;
-      field.prepend(legend);
+      if (!field.querySelector(":scope > legend, h1, h2, h3, h4, h5, h6, [role='heading']")) {
+        const legend = doc.createElement("legend");
+        legend.textContent = group.question;
+        field.prepend(legend);
+      }
       for (const option of group.options) {
         let item = Array.from(field.querySelectorAll<HTMLButtonElement>("button[data-option]")).find(el => el.dataset.option === option.id);
         if (!item) {
@@ -44,19 +52,21 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
           item.dataset.option = option.id;
           field.append(item);
         }
-        // Keep the preview and explanatory children intact. The app adds the canonical
-        // answer label separately so the visible/accessibility label matches delivery.
-        const label = doc.createElement("span");
-        label.setAttribute("data-choice-label", "");
-        label.style.display = "block";
-        label.textContent = option.label;
-        item.append(label);
         item.setAttribute("aria-label", option.label);
       }
     }
+    const style = doc.createElement("style");
+    style.textContent = `
+      fieldset[data-choice] button[data-option][role="radio"][aria-checked="true"] {
+        border: 2px solid !important;
+        border-color: var(--brindle-choice-border) !important;
+        background-color: var(--brindle-choice-fill) !important;
+      }
+    `;
+    doc.head.append(style);
     return `<!doctype html>${doc.documentElement.outerHTML}`;
   }, [visual.inline_html, visual.choices]);
-  const refresh = () => {
+  const refresh = (loaded = false) => {
     const doc = frame.current?.contentDocument;
     if (!doc?.body) return;
     doc.documentElement.style.setProperty("zoom", String(current.current.zoom));
@@ -68,16 +78,37 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
       field.setAttribute("aria-label", group.question);
       for (const item of Array.from(field.querySelectorAll<HTMLButtonElement>("button[data-option]"))) {
         const id = item.dataset.option!;
+        const option = group.options.find(o => o.id === id);
         item.type = "button";
-        item.disabled = !!row.answer || !!row.answered_in_chat || !group.options.some(o => o.id === id);
+        item.disabled = !!row.answer || !!row.answered_in_chat || !option;
         item.setAttribute("role", "radio");
-        const checked = selected[group.id] === id;
-        item.setAttribute("aria-checked", String(checked));
-        item.style.setProperty("outline", checked ? "3px solid #8055c7" : "none", "important");
+        item.setAttribute("aria-checked", String(selected[group.id] === id));
+        // Read rendered text after loading so hidden preview text doesn't replace the label.
+        if (loaded && option && !(item.innerText ?? item.textContent)?.trim()) {
+          const label = doc.createElement("span");
+          label.setAttribute("data-choice-label", "");
+          label.style.display = "block";
+          label.textContent = option.label;
+          item.append(label);
+        }
       }
     }
   };
   useLayoutEffect(refresh, [picks, visual, zoom]);
+  useEffect(() => {
+    const sync = () => {
+      const doc = frame.current?.contentDocument;
+      if (doc) syncChoiceColors(doc);
+    };
+    const observer = new MutationObserver(sync);
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "style", "class"] });
+    const system = window.matchMedia?.("(prefers-color-scheme: dark)");
+    system?.addEventListener("change", sync);
+    return () => {
+      observer.disconnect();
+      system?.removeEventListener("change", sync);
+    };
+  }, []);
   useEffect(() => {
     const doc = frame.current?.contentDocument;
     if (snapshotRequest > 0 && doc) onSnapshot(doc.documentElement.outerHTML);
@@ -102,6 +133,7 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
       };
       doc.onsubmit = event => event.preventDefault();
       doc.onkeydown = event => { if (event.key === "Escape") onBack(); };
-      refresh();
+      syncChoiceColors(doc);
+      refresh(true);
     }} />;
 }

@@ -2,6 +2,7 @@ import pytest
 
 from brindle import learning, model_names, profiles
 from brindle.pro import learning as pro_learning
+from test_launch_health import detached, flag, launches  # noqa: F401
 
 
 def test_learner_history_under_an_old_id_is_recorded_under_the_renamed_profile():
@@ -89,6 +90,65 @@ def test_gemini_worker_launch_selects_the_catalog_model(monkeypatch):
     argv = Antigravity().command(LaunchContext("worker", p, None))
     assert argv[argv.index("--model") + 1] == "gemini-4-argon"
     assert argv[argv.index("--effort") + 1] == "high"
+
+
+@pytest.mark.parametrize("profile, provider, model, display", [
+    ("review.gpt", "codex", "gpt-6.2-sol", "GPT‑6.2 Sol"),
+    pytest.param("review.opencode", "opencode", "opencode/beam-free", "Beam Free", marks=pytest.mark.variant(
+        "OpenCode must prefer its merged configured model to the catalog fallback")),
+    pytest.param("developer", "claude", "claude-opus-5-5", "Claude Opus 5.5", marks=pytest.mark.variant(
+        "Claude must prefer a configured model alias to its catalog default")),
+])
+@pytest.mark.variant("each row is a provider whose unpinned profile must show the concrete model it launches, never the bare family")
+def test_unpinned_profile_shows_the_launched_model(db, repo, monkeypatch, codex_default_model, launches, detached,
+                                                  profile, provider, model, display):
+    from types import SimpleNamespace
+
+    from brindle import agents, codex_hook, model_availability, policy, providers, spawn, view, workspaces
+    from brindle.service.routing import RoutingPolicy
+
+    class AppServer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def call(self, method, params):
+            if method == "config/read":
+                return {"config": {}}
+            assert method == "model/list"
+            return {"data": [{"model": "gpt-6.1-terra", "isDefault": True}]}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(codex_hook, "_AppServer", AppServer)
+    monkeypatch.setattr(providers, "codex_default_model", codex_default_model)
+    monkeypatch.setattr(agents, "_model_checker", model_availability.ModelAvailabilityChecker(
+        discover=lambda request, limit: model_availability.Catalog(frozenset(), "codex", complete=False)))
+    monkeypatch.setattr(agents, "_effective_window_env", lambda *args: {})
+    monkeypatch.setattr(codex_hook, "launch_flags", lambda *args, **kwargs: [])
+    monkeypatch.setattr(providers, "trust_codex_project", lambda *args: None)
+    if provider == "opencode":
+        read = spawn.read
+
+        def configured(argv, *args, **kwargs):
+            if argv[1:] == ["debug", "config", "--pure"]:
+                return SimpleNamespace(stdout='{"model":"opencode/beam-free"}', returncode=0)
+            return read(argv, *args, **kwargs)
+
+        monkeypatch.setattr(spawn, "read", configured)
+    if provider == "claude":
+        monkeypatch.delenv("ANTHROPIC_MODEL", raising=False)
+        settings = repo / ".claude" / "settings.json"
+        settings.parent.mkdir()
+        settings.write_text('{"model":"opus"}')
+    ws = workspaces.adopt_root(db, str(repo))
+    assert policy._profile_fields(profile, ws.repo_root) == (provider, model)
+    assert RoutingPolicy.load(ws.repo_root).runs(profile) == (provider, model)
+    agent = agents.spawn(db, ws, profile, mode="assign" if provider == "claude" else "review", background_setup=True)
+    [argv] = launches
+    assert flag(argv, "--model") == model
+    entry = view.agent_entry(db, agent, alive=False)
+    assert (entry["model"], entry["model_display"]) == (model, display)
 
 
 @pytest.mark.variant("managed and suffixed Claude ids must name the right model, not the raw route id")

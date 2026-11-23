@@ -96,6 +96,7 @@ def test_snapshot_query_count_is_independent_of_workspace_count(db, tmp_path, fa
         for i in range(previous, total):
             ws = _worktree(tmp_path, db, str(i), OLD)
             db.update_agent(f"ag-{i}", parent_id="ag-0" if i else None)
+            db.record_agent_launch_model(f"ag-{i}", f"gpt-ag-{i}")
             db.add_review(ws.id, OLD, None, approved=True, summary="")
         if total == 1:
             db.add_autopilot("ag-0")
@@ -109,6 +110,9 @@ def test_snapshot_query_count_is_independent_of_workspace_count(db, tmp_path, fa
         queries.clear()
         assert len(rows) == total
         assert all(row["autopilot"] and row["review"] == "approved" for row in rows)
+        for row in rows:
+            [agent] = row["agents"]
+            assert agent["model"] == f"gpt-{agent['id']}"
         assert rows[0]["asking"] == "ag-0"
         assert all(row["asking"] is None for row in rows[1:])
         previous = total

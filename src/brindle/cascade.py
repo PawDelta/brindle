@@ -352,7 +352,8 @@ def agent_pool(cfg, repo_root: str, agent: str | None, tier: str, ceiling: str |
 def workers(cfg, repo_root: str, tier: str, *, gate=None, ceiling: str | None = None,
             design_heavy: bool = False, after: Iterable[str] = (), kind: str | None = None,
             weights: dict | None = None, policy: Callable[[str], str | None] | None = None,
-            full: bool = False, agent: str | None = None) -> Result:
+            full: bool = False, agent: str | None = None,
+            availability: Callable[[str], str | None] | None = None) -> Result:
     """The cascade for a worker of ``tier``: what ``autopilot.eligible``
     checks for its own tier, over the whole pool, plus the assignment
     policy (``policy``: why it refuses a profile for this task, as a fresh
@@ -361,7 +362,8 @@ def workers(cfg, repo_root: str, tier: str, *, gate=None, ceiling: str | None = 
     caller can refuse the delegation as policy does. ``full``: check every
     replacement even while the tier has a candidate (for a learner that
     weighs them all). ``agent``: who does the task; its own ``agent_models``
-    order for ``tier`` (``agent_pool``), when set, is the pool instead."""
+    order for ``tier`` (``agent_pool``), when set, is the pool instead.
+    ``availability`` checks a candidate in a known launch context."""
     from brindle import autopilot
 
     refused: list[str] = []
@@ -369,7 +371,7 @@ def workers(cfg, repo_root: str, tier: str, *, gate=None, ceiling: str | None = 
     def why_not(name: str) -> str | None:
         if not cfg.routing_allows(name, design_heavy):
             return f"Fable is reserved for design-heavy tasks, skipped {name}"
-        why = autopilot._unavailable(name, cfg, repo_root, gate, tier)
+        why = availability(name) if availability is not None else autopilot._unavailable(name, cfg, repo_root, gate, tier)
         if why is None and policy is not None and (no := policy(name)):
             refused.append(name)
             return f"refused by policy ({no}), skipped {name}"

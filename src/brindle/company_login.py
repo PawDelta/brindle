@@ -558,7 +558,9 @@ def route_model(c, model: str | None) -> str | None:
     profile's ``model``: the profile's own when the route serves it, or when
     it is an alias (opus, sonnet, haiku) the route pins in ``models`` (the
     pane's ANTHROPIC_DEFAULT_*_MODEL maps it); else the route's default."""
-    if not c.model_ids or model in c.model_ids:
+    if not c.model_ids:
+        return model or c.default_model
+    if model in c.model_ids:
         return model
     if model in ("opus", "sonnet", "haiku") and c.models is not None and getattr(c.models, model):
         return model

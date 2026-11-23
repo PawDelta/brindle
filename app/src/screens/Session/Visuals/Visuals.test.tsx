@@ -10,6 +10,7 @@ import type { InboxItemDTO, SessionDTO } from "../../../api/schema";
 import { createAppStore } from "../../../store/store";
 import { FakeDaemon } from "../../../test/fakeDaemon";
 import { REPO, question, root, waiting } from "../../../test/fixtures";
+import dockChoicesHtml from "../../../test/fixtures/choices-test.html?raw";
 import publishedChoicesHtml from "../../../test/fixtures/v_bfc81230923b.html?raw";
 import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 import { VisualFrame, inertSource, inlineStyles, type VisualFrameProps, type VisualSource } from "./frame";
@@ -100,6 +101,10 @@ describe("visuals", () => {
         ] },
       ],
     };
+    return openInlineChoices(row, onBack);
+  }
+
+  async function openInlineChoices(row: VisualDTO, onBack = () => {}) {
     const client = new DaemonClient({ baseUrl: "http://daemon/v1", token: "test", fetch: async () =>
       new Response(JSON.stringify([{ ...row, options: null }])) });
     const [visual] = await client.visuals(row.session);
@@ -117,6 +122,38 @@ describe("visuals", () => {
     fireEvent.load(frame);
     return doc;
   }
+
+  const dockChoices: VisualDTO = {
+    ...visual, options: undefined, inline_html: dockChoicesHtml, choices: [
+      { id: "dock", question: "After today's update, how many brindle icons are in your Dock?",
+        options: [{ id: "one", label: "One" }, { id: "two", label: "Two" }] },
+      { id: "astra", question: "Move the last October profile (developer-codex-heavy, GPT‑6 Astra) aside?",
+        options: [{ id: "yes", label: "Yes, move it aside" }, { id: "no", label: "No, keep it" }] },
+      { id: "worked", question: "Did clicking these buttons work?",
+        options: [{ id: "yes", label: "Yes" }, { id: "no", label: "No" }] },
+    ],
+  };
+
+  it("preserves the inline option's existing text without appending a second label", async () => {
+    const doc = await openInlineChoices(dockChoices);
+    const option = doc.querySelector('[data-choice="dock"] [data-option="one"]')!;
+    const original = new DOMParser().parseFromString(dockChoicesHtml, "text/html");
+    expect(option.textContent).toBe(original.querySelector('[data-choice="dock"] [data-option="one"]')!.textContent);
+  });
+
+  it("uses the inline fieldset's existing legend without adding another heading", async () => {
+    const doc = await openInlineChoices(dockChoices);
+    expect(doc.querySelectorAll('[data-choice="dock"] :is(legend,h1,h2,h3,h4,h5,h6,[role="heading"])')).toHaveLength(1);
+  });
+
+  it("shows a checked inline option with a border and without a selection outline", async () => {
+    const doc = await openInlineChoices(dockChoices);
+    const option = doc.querySelector<HTMLButtonElement>('[data-choice="dock"] [data-option="one"]')!;
+    fireEvent.click(option);
+    expect(option.getAttribute("aria-checked")).toBe("true");
+    expect(option.style.outline).toBe("");
+    expect(doc.defaultView!.getComputedStyle(option).borderWidth).toBe("2px");
+  });
 
   it("selects both published inline choices under older WebKit's event policy", async () => {
     const doc = await openPublishedChoices();
