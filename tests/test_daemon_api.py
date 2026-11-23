@@ -64,16 +64,17 @@ def _get(path: str, headers: dict[str, str], query: str = "", peer_pid: int | No
     return asyncio.run(_read_request(build_app(TOKEN, port=8123), path, headers, query, peer_pid))
 
 
-async def _read_request(app, path, headers, query="", peer_pid=None):
+async def _read_request(app, path, headers, query="", peer_pid=None, *, method="GET", payload=None):
     sent: list[dict] = []
 
     async def receive():
-        return {"type": "http.request", "body": b"", "more_body": False}
+        return {"type": "http.request", "body": json.dumps(payload).encode() if payload is not None else b"",
+                "more_body": False}
 
     async def send(message):
         sent.append(message)
 
-    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET",
+    scope = {"type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": method,
              "scheme": "http", "path": path, "raw_path": path.encode(), "query_string": query.encode(),
              "root_path": "", "server": ("127.0.0.1", 8123), "client": ("127.0.0.1", 50000),
              "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
@@ -974,6 +975,199 @@ def test_routing_user_view_runs_no_learner_and_no_sign_in_probe(seeded, monkeypa
     pro_reads.clear()
     assert _get("/v1/routing", AUTH, f"repo={repo}&scope=user&learned=0")[0] == 200
     assert len(pro_reads) <= 1       # at most one read; main's cross-process entitlement cache may serve it
+
+
+def test_model_less_agent_can_be_created_and_edited(repo, db):
+    from brindle import config, profiles
+
+    app = build_app(TOKEN)
+    path = "/v1/profiles"
+    rule = "style/minimal-diff"
+    code, reply = asyncio.run(_read_request(app, path, AUTH, method="POST", payload={
+        "repo": str(repo), "name": "proofreader", "description": "Proofread changes",
+        "instructions": "Check the spelling.", "rules": [rule],
+    }))
+    assert code == 200, reply
+    target = config.user_profiles_dir() / "proofreader.md"
+    assert target == Path(reply["path"])
+    assert "extends: developer" in target.read_text().splitlines()
+    assert not any(line.startswith("model:") for line in target.read_text().splitlines())
+
+    query = f"repo={repo}&scope=user&learned=0"
+    code, routing = _get("/v1/routing", AUTH, query)
+    assert code == 200, routing
+    agent = routing["agents"]["proofreader"]
+    assert (agent["kind"], agent["models"], agent["rules"], agent["description"]) == (
+        "agent", {}, [rule], "Proofread changes")
+    row = next(p for p in routing["profiles"] if p["name"] == "proofreader")
+    assert (row["kind"], row["description"], row["rules"]) == ("agent", agent["description"], [rule])
+
+    # The editor changes only the selected fields in an existing custom file.
+    target.write_text(target.read_text().replace("rules: ", "write_scope: docs/**\nrules: "))
+    code, reply = asyncio.run(_read_request(app, f"{path}/proofreader", AUTH, method="PUT", payload={
+        "repo": str(repo), "works_like": "qa", "instructions": "Read the diff.", "rules": [],
+    }))
+    assert code == 200, reply
+    edited = profiles._parse(target.read_text(), "proofreader")
+    assert (edited.extends, edited.description, edited.prompt, edited.rules, edited.write_scope) == (
+        "qa", "Proofread changes", "Read the diff.", [], ["docs/**"])
+
+
+def test_agent_routing_overrides_merge_clear_and_enforce_policy(repo, db, monkeypatch):
+    from brindle import config
+    from brindle.pro import managed_models, team_policy
+
+    app = build_app(TOKEN)
+    code, _ = asyncio.run(_read_request(app, "/v1/profiles", AUTH, method="POST", payload={
+        "repo": str(repo), "name": "proofreader", "works_like": "reviewer",
+    }))
+    assert code == 200
+
+    def put(agents):
+        return asyncio.run(_read_request(app, "/v1/routing", AUTH, method="PUT", payload={
+            "repo": str(repo), "scope": "user", "agents": agents,
+        }))
+
+    model = "review.claude-sonnet.high"
+    assert put({"proofreader": {"models": {"light": {"model": model}, "heavy": {"model": model}}}})[0] == 200
+    assert put({"proofreader": {"models": {"light": None}},
+                "reviewer": {"models": {"medium": {"model": model, "fallbacks": ["review.gpt"]}}}})[0] == 200
+    code, routing = _get("/v1/routing", AUTH, f"repo={repo}&scope=user&learned=0")
+    assert code == 200, routing
+    assert routing["agents"]["proofreader"]["models"] == {
+        "heavy": {"model": model, "fallbacks": [], "locked": True, "learned": None}}
+    assert routing["agents"]["proofreader"]["role"] == "reviewer"
+    reviewer = routing["agents"]["reviewer"]["models"]["medium"]
+    assert all(routing["kinds"]["reviewer"][field] == value for field, value in reviewer.items())
+    before = config.user_settings()["agent_models"]
+    monkeypatch.setattr(team_policy, "access", lambda repo: team_policy.Access(
+        org_id="acme", allowed_providers=("claude",)))
+    monkeypatch.setattr(managed_models, "current", lambda repo: None)
+    assert put({"proofreader": {"models": {"light": {"model": model, "fallbacks": ["review.gpt"]}}}})[0] == 403
+    assert config.user_settings()["agent_models"] == before
+
+
+def test_legacy_reviewer_update_changes_the_medium_override(repo, db):
+    from brindle import agents, config
+
+    app = build_app(TOKEN)
+
+    def put(**changes):
+        return asyncio.run(_read_request(app, "/v1/routing", AUTH, method="PUT", payload={
+            "repo": str(repo), "scope": "repo", **changes,
+        }))
+
+    first = "review.claude-sonnet.high"
+    assert put(agents={"reviewer": {"models": {"medium": {"model": first}}}})[0] == 200
+    chosen, fallback = "review.gpt", "review.gemini"
+    assert put(kinds={"reviewer": {"model": chosen, "fallbacks": [fallback]}})[0] == 200
+    code, routing = _get("/v1/routing", AUTH, f"repo={repo}&learned=0")
+    assert code == 200, routing
+    for row in (routing["kinds"]["reviewer"], routing["agents"]["reviewer"]["models"]["medium"]):
+        assert (row["model"], row["fallbacks"]) == (chosen, [fallback])
+    cfg = config.load_repo_config(repo)
+    assert agents.default_review_profile(cfg, None) == chosen
+
+
+def test_shared_legacy_reviewer_edit_cannot_copy_or_hide_behind_a_local_order(repo, db):
+    from brindle import config
+
+    shared = {"reviewer": {"medium": ["review.claude-sonnet.high", "review.gpt"]}}
+    local = {"reviewer": {"medium": ["review.gpt", "review.gemini"]}}
+    config.set_repo(repo, "agent_models", shared)
+    config.set_local(repo, "agent_models", local)
+    app = build_app(TOKEN)
+
+    def put():
+        return asyncio.run(_read_request(app, "/v1/routing", AUTH, method="PUT", payload={
+            "repo": str(repo), "scope": "repo", "kinds": {"reviewer": {"model": "reviewer"}},
+        }))
+
+    paths = config.scope_paths(repo)
+    before = paths["repo"].read_text(), paths["local"].read_text()
+    code, _ = put()
+    assert code == 409
+    assert (paths["repo"].read_text(), paths["local"].read_text()) == before
+    config.set_local(repo, "agent_models", {"reviewer": {"light": ["review.gemini"]}})
+    config.set_local(repo, "review_profile", "review.gemini")
+    assert put()[0] == 409
+    assert paths["repo"].read_text() == before[0]
+    config.unset_local(repo, "review_profile")
+    assert put()[0] == 200
+    cfg = config.load_repo_config(repo)
+    assert cfg.agent_models["reviewer"] == {"medium": ["reviewer", "review.gpt"], "light": ["review.gemini"]}
+
+
+@pytest.mark.parametrize("pin_scope,edit,expected", [
+    ("repo", {"model": "review.gpt"}, ("review.gpt", ["review.gemini"])),
+    pytest.param("local", {"fallbacks": ["review.gpt"]}, ("review.claude-sonnet.high", ["review.gpt"]),
+                 marks=pytest.mark.variant("a local pin controls only the primary, not shared fallbacks")),
+])
+def test_shared_legacy_reviewer_edit_uses_effective_pinned_fields(repo, db, pin_scope, edit, expected):
+    from brindle import agents, config
+
+    write_pin = config.set_repo if pin_scope == "repo" else config.set_local
+    write_pin(repo, "review_profile", "review.claude-sonnet.high")
+    default = "review.gemini"
+    config.set_repo(repo, "reviewer", default)
+    config.set_repo(repo, "reviewer_fallbacks", ["review.gemini"])
+    if pin_scope == "repo":
+        config.set_local(repo, "agent_models", {"reviewer": {"medium": ["reviewer"]}})
+    local = config.scope_paths(repo)["local"]
+    before = local.read_text()
+    app = build_app(TOKEN)
+    code, reply = asyncio.run(_read_request(app, "/v1/routing", AUTH, method="PUT", payload={
+        "repo": str(repo), "scope": "repo", "kinds": {"reviewer": edit},
+    }))
+    assert code == 200, reply
+    cfg = config.load_repo_config(repo)
+    assert cfg.reviewer == default
+    assert local.read_text() == before
+    assert (agents.default_review_profile(cfg, None), cfg.reviewer_fallbacks) == expected
+    code, routing = _get("/v1/routing", AUTH, f"repo={repo}&learned=0")
+    assert code == 200, routing
+    for row in (routing["kinds"]["reviewer"], routing["agents"]["reviewer"]["models"]["medium"]):
+        assert (row["model"], row["fallbacks"]) == expected
+
+
+def test_reviewer_override_requires_removing_an_existing_pin(repo, db, monkeypatch):
+    from brindle import agents, config
+
+    pin = "review.claude-sonnet.high"
+    chosen = "review.gpt"
+    fallback = "review.gemini"
+    config.set_repo(repo, "review_profile", pin)
+    config.set_repo(repo, "reviewer_fallbacks", [fallback])
+    config.set_repo(repo, "agent_models", {"reviewer": {"medium": [fallback]}})
+    app = build_app(TOKEN)
+
+    def put():
+        return asyncio.run(_read_request(app, "/v1/routing", AUTH, method="PUT", payload={
+            "repo": str(repo), "scope": "repo", "agents": {"reviewer": {"models": {"medium": {"model": chosen}}}},
+        }))
+
+    code, reply = put()
+    assert (code, reply["error"]["code"]) == (409, "conflict")
+    code, routing = _get("/v1/routing", AUTH, f"repo={repo}&learned=0")
+    assert code == 200, routing
+    cfg = config.load_repo_config(repo)
+    assert cfg.agent_models["reviewer"]["medium"] == [fallback]
+    assert routing["kinds"]["reviewer"]["model"] == agents.default_review_profile(cfg, None) == pin
+    order = routing["agents"]["reviewer"]["models"]["medium"]
+    assert (order["model"], order["fallbacks"], order["locked"]) == (pin, [fallback], False)
+    assert all(routing["kinds"]["reviewer"][field] == value for field, value in order.items())
+
+    def can_run(name, ws, cfg):
+        if name == pin:
+            raise agents.AgentError("provider unavailable")
+
+    monkeypatch.setattr(agents, "_reviewer_can_run", can_run)
+    ws = workspaces.adopt_root(db, str(repo))
+    assert agents._review_choice(db, ws, None, cfg)[0] == order["fallbacks"][0]
+
+    config.unset_repo(repo, "review_profile")
+    assert put()[0] == 200
+    assert agents.default_review_profile(config.load_repo_config(repo), None) == chosen
 
 
 def test_knowledge_doc_reads_the_source_file(seeded, db, tmp_path):

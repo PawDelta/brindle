@@ -919,6 +919,9 @@ class RoutingTierDTO(RoutingSettingDTO):
 
 class RoutingProfileDTO(_DTO):
     name: str
+    kind: Literal["model", "agent", "pinned"] = "pinned"
+    description: str = ""
+    rules: list[str] = []
     provider: str
     provider_name: str | None = None
     model: str | None = None
@@ -941,17 +944,27 @@ class RoutingProfileDTO(_DTO):
     lint_warnings: list[str] = []
 
 
-class RoutingKindDTO(_DTO):
-    """One kind of work (light, medium, heavy, advanced, reviewer, supervisor):
-    the owner's pick and its ordered fallbacks, whether it is locked against
-    hosted learning, and the different profile learning is running for it now
-    (``learned``; None when it keeps the owner's pick)."""
+class RoutingModelOrderDTO(_DTO):
+    """The configured model order and its current learning state."""
     model: str | None = None
     fallbacks: list[str] = []
     locked: bool = False
     learned: str | None = None
+
+
+class RoutingKindDTO(RoutingModelOrderDTO):
+    """Routing for a size or a legacy reviewer or supervisor slot."""
     effort: str | None = None          # the owner's effort for whatever runs this kind (None: its profile's own)
     instructions: str | None = None    # text added to the prompt of whatever runs this kind
+
+
+class RoutingAgentDTO(_DTO):
+    kind: Literal["agent"] = "agent"
+    description: str
+    rules: list[str]
+    role: str | None
+    builtin: bool
+    models: dict[str, RoutingModelOrderDTO] = {}
 
 
 class RuleDTO(_DTO):
@@ -992,6 +1005,7 @@ class RoutingDTO(_DTO):
     profiles: list[RoutingProfileDTO]
     policy: RoutingPolicyDTO = RoutingPolicyDTO()
     kinds: dict[str, RoutingKindDTO] = {}
+    agents: dict[str, RoutingAgentDTO] = {}
 
 
 class AccountOrgDTO(_DTO):

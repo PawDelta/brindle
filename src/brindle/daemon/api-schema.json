@@ -11036,10 +11036,160 @@
       "title": "RepoDTO",
       "type": "object"
     },
+    "RoutingAgentDTO": {
+      "$defs": {
+        "RoutingModelOrderDTO": {
+          "description": "The configured model order and its current learning state.",
+          "properties": {
+            "fallbacks": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Fallbacks",
+              "type": "array"
+            },
+            "learned": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Learned"
+            },
+            "locked": {
+              "default": false,
+              "title": "Locked",
+              "type": "boolean"
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Model"
+            }
+          },
+          "title": "RoutingModelOrderDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "builtin": {
+          "title": "Builtin",
+          "type": "boolean"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "kind": {
+          "const": "agent",
+          "default": "agent",
+          "title": "Kind",
+          "type": "string"
+        },
+        "models": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RoutingModelOrderDTO"
+          },
+          "default": {},
+          "title": "Models",
+          "type": "object"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Role"
+        },
+        "rules": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Rules",
+          "type": "array"
+        }
+      },
+      "required": [
+        "description",
+        "rules",
+        "role",
+        "builtin"
+      ],
+      "title": "RoutingAgentDTO",
+      "type": "object"
+    },
     "RoutingDTO": {
       "$defs": {
+        "RoutingAgentDTO": {
+          "properties": {
+            "builtin": {
+              "title": "Builtin",
+              "type": "boolean"
+            },
+            "description": {
+              "title": "Description",
+              "type": "string"
+            },
+            "kind": {
+              "const": "agent",
+              "default": "agent",
+              "title": "Kind",
+              "type": "string"
+            },
+            "models": {
+              "additionalProperties": {
+                "$ref": "#/$defs/RoutingModelOrderDTO"
+              },
+              "default": {},
+              "title": "Models",
+              "type": "object"
+            },
+            "role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Role"
+            },
+            "rules": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Rules",
+              "type": "array"
+            }
+          },
+          "required": [
+            "description",
+            "rules",
+            "role",
+            "builtin"
+          ],
+          "title": "RoutingAgentDTO",
+          "type": "object"
+        },
         "RoutingKindDTO": {
-          "description": "One kind of work (light, medium, heavy, advanced, reviewer, supervisor):\nthe owner's pick and its ordered fallbacks, whether it is locked against\nhosted learning, and the different profile learning is running for it now\n(``learned``; None when it keeps the owner's pick).",
+          "description": "Routing for a size or a legacy reviewer or supervisor slot.",
           "properties": {
             "effort": {
               "anyOf": [
@@ -11127,6 +11277,50 @@
             "reason"
           ],
           "title": "RoutingLockDTO",
+          "type": "object"
+        },
+        "RoutingModelOrderDTO": {
+          "description": "The configured model order and its current learning state.",
+          "properties": {
+            "fallbacks": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Fallbacks",
+              "type": "array"
+            },
+            "learned": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Learned"
+            },
+            "locked": {
+              "default": false,
+              "title": "Locked",
+              "type": "boolean"
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Model"
+            }
+          },
+          "title": "RoutingModelOrderDTO",
           "type": "object"
         },
         "RoutingPolicyDTO": {
@@ -11255,6 +11449,11 @@
               "title": "Cost Tier",
               "type": "string"
             },
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
             "display": {
               "anyOf": [
                 {
@@ -11286,6 +11485,16 @@
             "installed": {
               "title": "Installed",
               "type": "boolean"
+            },
+            "kind": {
+              "default": "pinned",
+              "enum": [
+                "model",
+                "agent",
+                "pinned"
+              ],
+              "title": "Kind",
+              "type": "string"
             },
             "lint_errors": {
               "default": [],
@@ -11370,6 +11579,14 @@
               ],
               "default": null,
               "title": "Role"
+            },
+            "rules": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Rules",
+              "type": "array"
             },
             "signed_in": {
               "title": "Signed In",
@@ -11506,6 +11723,14 @@
         }
       },
       "properties": {
+        "agents": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RoutingAgentDTO"
+          },
+          "default": {},
+          "title": "Agents",
+          "type": "object"
+        },
         "exclude_providers": {
           "$ref": "#/$defs/RoutingSettingDTO"
         },
@@ -11560,7 +11785,7 @@
       "type": "object"
     },
     "RoutingKindDTO": {
-      "description": "One kind of work (light, medium, heavy, advanced, reviewer, supervisor):\nthe owner's pick and its ordered fallbacks, whether it is locked against\nhosted learning, and the different profile learning is running for it now\n(``learned``; None when it keeps the owner's pick).",
+      "description": "Routing for a size or a legacy reviewer or supervisor slot.",
       "properties": {
         "effort": {
           "anyOf": [
@@ -11648,6 +11873,50 @@
         "reason"
       ],
       "title": "RoutingLockDTO",
+      "type": "object"
+    },
+    "RoutingModelOrderDTO": {
+      "description": "The configured model order and its current learning state.",
+      "properties": {
+        "fallbacks": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Fallbacks",
+          "type": "array"
+        },
+        "learned": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Learned"
+        },
+        "locked": {
+          "default": false,
+          "title": "Locked",
+          "type": "boolean"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        }
+      },
+      "title": "RoutingModelOrderDTO",
       "type": "object"
     },
     "RoutingPolicyDTO": {
@@ -11801,6 +12070,11 @@
           "title": "Cost Tier",
           "type": "string"
         },
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
         "display": {
           "anyOf": [
             {
@@ -11832,6 +12106,16 @@
         "installed": {
           "title": "Installed",
           "type": "boolean"
+        },
+        "kind": {
+          "default": "pinned",
+          "enum": [
+            "model",
+            "agent",
+            "pinned"
+          ],
+          "title": "Kind",
+          "type": "string"
         },
         "lint_errors": {
           "default": [],
@@ -11916,6 +12200,14 @@
           ],
           "default": null,
           "title": "Role"
+        },
+        "rules": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Rules",
+          "type": "array"
         },
         "signed_in": {
           "title": "Signed In",
@@ -15784,6 +16076,10 @@
     },
     {
       "method": "GET",
+      "path": "/v1/profiles/{name}"
+    },
+    {
+      "method": "PUT",
       "path": "/v1/profiles/{name}"
     },
     {

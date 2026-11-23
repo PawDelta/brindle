@@ -92,9 +92,11 @@ export interface ApiSchema {
   ProviderConnectionDTO: ProviderConnectionDTO;
   QueuedChatMessageDTO: QueuedChatMessageDTO;
   RepoDTO: RepoDTO;
+  RoutingAgentDTO: RoutingAgentDTO;
   RoutingDTO: RoutingDTO;
   RoutingKindDTO: RoutingKindDTO;
   RoutingLockDTO: RoutingLockDTO;
+  RoutingModelOrderDTO: RoutingModelOrderDTO;
   RoutingPolicyDTO: RoutingPolicyDTO1;
   RoutingProfileDTO: RoutingProfileDTO;
   RoutingSettingDTO: RoutingSettingDTO;
@@ -1497,9 +1499,38 @@ export interface RepoDTO {
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "RoutingAgentDTO".
+ */
+export interface RoutingAgentDTO {
+  builtin: boolean;
+  description: string;
+  kind?: "agent";
+  models?: {
+    [k: string]: RoutingModelOrderDTO;
+  };
+  role: string | null;
+  rules: string[];
+}
+/**
+ * The configured model order and its current learning state.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "RoutingModelOrderDTO".
+ */
+export interface RoutingModelOrderDTO {
+  fallbacks?: string[];
+  learned?: string | null;
+  locked?: boolean;
+  model?: string | null;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "RoutingDTO".
  */
 export interface RoutingDTO {
+  agents?: {
+    [k: string]: RoutingAgentDTO;
+  };
   exclude_providers: RoutingSettingDTO;
   kinds?: {
     [k: string]: RoutingKindDTO;
@@ -1520,10 +1551,7 @@ export interface RoutingSettingDTO {
   values: string[];
 }
 /**
- * One kind of work (light, medium, heavy, advanced, reviewer, supervisor):
- * the owner's pick and its ordered fallbacks, whether it is locked against
- * hosted learning, and the different profile learning is running for it now
- * (``learned``; None when it keeps the owner's pick).
+ * Routing for a size or a legacy reviewer or supervisor slot.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "RoutingKindDTO".
@@ -1574,10 +1602,12 @@ export interface RoutingProfileDTO {
   allowed?: boolean;
   builtin?: boolean;
   cost_tier: string;
+  description?: string;
   display?: string | null;
   effort?: string | null;
   excluded: boolean;
   installed: boolean;
+  kind?: "model" | "agent" | "pinned";
   lint_errors?: string[];
   lint_warnings?: string[];
   maker?: string | null;
@@ -1587,6 +1617,7 @@ export interface RoutingProfileDTO {
   provider_name?: string | null;
   refusal?: string | null;
   role?: string | null;
+  rules?: string[];
   signed_in: boolean;
   tool?: string | null;
 }
