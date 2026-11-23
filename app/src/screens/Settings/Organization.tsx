@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { DaemonError, type DaemonClient, type OrgSettingName, type OrgSettings } from "../../api/client";
+import { DaemonError, type DaemonClient, type OrgSettingName, type OrgSettings, type ProviderUpdateMode } from "../../api/client";
 import { plain } from "../../api/wording";
 import { alert, field, h2, label, main, quiet } from "../../components/ui";
+import { PROVIDER_UPDATE_CHOICES } from "./ProviderUpdatesSetting";
 
 const ROWS: { id: OrgSettingName; name: string; help: string }[] = [
   { id: "share", name: "Sharing", help: "Whether plans can be shared with people, teams and everyone here. People choose who, plan by plan." },
@@ -10,15 +11,19 @@ const ROWS: { id: OrgSettingName; name: string; help: string }[] = [
   { id: "store", name: "Where plans are kept", help: "On each person's Mac, or encrypted on brindle servers." },
   { id: "assist", name: "Briefs", help: "New work starts with a brief from the plans that match it." },
   { id: "import_upload", name: "Imported folders", help: "Folders people add to the Library are uploaded, so briefs can draw on them." },
+  { id: "provider_cli_updates", name: "Provider CLI updates", help: "How brindle updates provider CLIs when their workers are idle." },
 ];
 
 function valueOf(state: OrgSettings, id: OrgSettingName) {
+  if (id === "provider_cli_updates") return state.policy.provider_cli_updates?.mode ?? "automatic";
   return id === "share_links" ? state.policy.share_links ?? "org" : state.policy.switches[id] ?? "off";
 }
 function fixed(state: OrgSettings, id: OrgSettingName) {
+  if (id === "provider_cli_updates") return state.policy.provider_cli_updates?.locked ?? false;
   return id === "share_links" || valueOf(state, id).startsWith("enforced_");
 }
 function choices(id: OrgSettingName) {
+  if (id === "provider_cli_updates") return PROVIDER_UPDATE_CHOICES;
   if (id === "share_links") return [
     { value: "org", name: "People in this organization", help: "A link requires sign-in to this organization." },
     { value: "anyone", name: "Anyone with the link", help: "Anyone who has the link can open the plan." },
@@ -36,7 +41,7 @@ function choices(id: OrgSettingName) {
 function display(state: OrgSettings, id: OrgSettingName) {
   const raw = valueOf(state, id);
   const on = raw === "default_on" || raw === "enforced_on";
-  const value = id === "share_links" ? choices(id).find(c => c.value === raw)!.name
+  const value = id === "share_links" || id === "provider_cli_updates" ? choices(id).find(c => c.value === raw)?.name ?? raw
     : id === "store" ? on ? "brindle servers" : "Each person's Mac"
     : id === "share" && on ? "People, teams and everyone here" : on ? "On" : "Off";
   return fixed(state, id) ? value : `Starts ${value.toLowerCase()}`;
@@ -78,7 +83,7 @@ export function Organization({ client }: { client: Pick<DaemonClient, "orgSettin
   const open = (id: OrgSettingName) => {
     if (!view || !canEdit(id) || saving.current) return;
     const raw = valueOf(view, id);
-    setSelected(id === "share_links" ? raw : raw === "default_on" || raw === "enforced_on" ? "on" : "off");
+    setSelected(id === "share_links" || id === "provider_cli_updates" ? raw : raw === "default_on" || raw === "enforced_on" ? "on" : "off");
     setMembersChoose(!fixed(view, id));
     setEditing(id);
     setError(null);
@@ -87,7 +92,8 @@ export function Organization({ client }: { client: Pick<DaemonClient, "orgSettin
     if (!state || !editing || saving.current) return;
     const current = generation.current;
     const id = editing;
-    const value = id === "share_links" ? selected : membersChoose ? selected === "on" ? "default_on" : "off" : `enforced_${selected}`;
+    const value = id === "provider_cli_updates" ? { mode: selected as ProviderUpdateMode, locked: !membersChoose }
+      : id === "share_links" ? selected : membersChoose ? selected === "on" ? "default_on" : "off" : `enforced_${selected}`;
     saving.current = true;
     setBusy(true);
     setError(null);
@@ -119,14 +125,14 @@ export function Organization({ client }: { client: Pick<DaemonClient, "orgSettin
     }
   };
 
-  return <section className="flex flex-col gap-s2" aria-label="Organization Library settings">
-    <header className="flex flex-wrap items-baseline gap-x-s2 gap-y-0.5"><h2 className={h2}>Library</h2><span className="text-xs text-ink-3">What everyone gets, as members read it. Change one setting at a time.</span></header>
+  return <section className="flex flex-col gap-s2" aria-label="Organization settings">
+    <header className="flex flex-wrap items-baseline gap-x-s2 gap-y-0.5"><h2 className={h2}>Organization policy</h2><span className="text-xs text-ink-3">What everyone gets, as members read it. Change one setting at a time.</span></header>
     {state && Object.keys(state.policy.groups).length > 0 && <label className="flex items-baseline gap-s2 text-sm">Settings for<select className={field} aria-label="Settings for" value={scope} disabled={busy} onChange={e => { setScope(e.target.value); setEditing(null); setError(null); }}><option value="">Organization</option>{Object.keys(state.policy.groups).map(group => <option key={group} value={group}>{group}</option>)}</select></label>}
     {state && !state.can_edit_org && !scope && <p className="px-s2 text-xs text-ink-3">Organization-wide settings require Enterprise. On Team, admins can change their groups' settings.</p>}
     {!state && !error && <p role="status" className="text-sm text-ink-3">Loading organization settings…</p>}
     {view && [true, false].map(isFixed => <div key={String(isFixed)} className="flex flex-col gap-1.5">
       <div className="flex flex-wrap items-baseline gap-s2 px-s2"><h3 className={label}>{isFixed ? "Set for everyone" : "Members choose"}</h3><span className="text-xs text-ink-3">{isFixed ? "Members see the value and can't change it." : "Each person starts with the value shown."}</span></div>
-      {ROWS.filter(row => (!scope || row.id !== "share_links") && fixed(view, row.id) === isFixed).map(row => <div key={row.id} data-testid={`org-setting-${row.id}`} data-state={editing === row.id ? "editing" : "reading"} className={`border-t px-s2 py-s1 ${editing === row.id ? "border-branch" : "border-line"}`}>
+      {ROWS.filter(row => (!scope || (row.id !== "share_links" && row.id !== "provider_cli_updates")) && fixed(view, row.id) === isFixed).map(row => <div key={row.id} data-testid={`org-setting-${row.id}`} data-state={editing === row.id ? "editing" : "reading"} className={`border-t px-s2 py-s1 ${editing === row.id ? "border-branch" : "border-line"}`}>
         {editing === row.id ? <div className="flex flex-col gap-s1">
           <div className="flex items-baseline justify-between gap-s2"><div><h4 className="text-sm font-medium">{row.name}</h4><p className="text-xs text-ink-3">{row.help}</p></div><span className="text-xs font-medium uppercase tracking-wider text-branch">Changing</span></div>
           <fieldset disabled={busy} className="flex flex-col gap-1.5"><legend className="sr-only">{row.name}</legend>{choices(row.id).map(choice => <label key={choice.value} className="flex items-start gap-2.5 text-sm"><input type="radio" name={`org-${row.id}`} value={choice.value} checked={selected === choice.value} onChange={() => setSelected(choice.value)} className="mt-1 accent-branch" /><span>{choice.name}<span className="block text-xs text-ink-3">{choice.help}</span></span></label>)}</fieldset>

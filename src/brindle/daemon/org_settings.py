@@ -1,4 +1,5 @@
-"""Settings' one-row editor over the CLI's analysis-doc policy."""
+"""Settings' one-row editor over the organization policy."""
+from brindle import provider_updates
 from brindle.daemon.routes_actions import _docs_entitlement, docs_org_api
 from brindle.pro import analysis_policy
 from brindle.service.errors import ServiceError
@@ -25,15 +26,19 @@ def save(body):
     if ent.org_id != org or ent.sub != actor:
         raise ServiceError("identity_changed", "Your active account changed; reload these settings.", 409)
     name = _get(body, "name", required=True)
-    value = _get(body, "value", required=True)
+    value = _get(body, "value", dict if name == provider_updates.SETTING else str, required=True)
     group = _get(body, "group")
     if (group is None and "analysis_docs_enterprise" not in ent.features) or (
             group is not None and "analysis_docs_team" not in ent.features):
         raise ServiceError("forbidden", "Org-wide settings require Enterprise; Team admins can edit group settings.", 403)
     allowed = ("anyone", "org", "off") if name == "share_links" else analysis_policy.STATES
-    if name not in (*analysis_policy.SWITCHES, "share_links") or value not in allowed:
+    if name == provider_updates.SETTING:
+        if group is not None or not provider_updates.valid_policy(value):
+            raise ServiceError("invalid", "Choose an organization-wide provider update mode and lock.")
+    elif name not in (*analysis_policy.SWITCHES, "share_links") or value not in allowed:
         raise ServiceError("invalid", "Unknown organization setting or value.")
-    return _save_row(ent, repo, org, actor, name, value, group, _get(body, "previous", required=True))
+    previous = _get(body, "previous", type(value), required=True)
+    return _save_row(ent, repo, org, actor, name, value, group, previous)
 
 
 def _save_row(ent, repo, org, actor, name, value, group, previous):
@@ -46,6 +51,8 @@ def _save_row(ent, repo, org, actor, name, value, group, previous):
             if error.code == "version_conflict" and attempt == 0:
                 continue
             raise
+        if name == provider_updates.SETTING and saved.get(name) != value:
+            raise ServiceError("upstream", "The account server did not save the provider update setting.", 502)
         analysis_policy.save_cached(org, saved)
         return {"org_id": org, "actor_sub": actor, "policy": saved,
                 "can_edit_org": "analysis_docs_enterprise" in ent.features,
@@ -61,12 +68,15 @@ def _changed_policy(current, ent, name, value, group, previous):
             raise ServiceError("forbidden", "This setting is fixed for the whole organization.", 403)
         switches = current["groups"][group]["switches"]
     # Refuse an edit of an out-of-date row, preserving unrelated fields and groups.
-    actual = current.get("share_links", "org") if name == "share_links" else switches.get(name, "off")
+    if name == provider_updates.SETTING:
+        actual = provider_updates.org_setting(current)
+    else:
+        actual = current.get("share_links", "org") if name == "share_links" else switches.get(name, "off")
     if previous != actual:
         raise ServiceError("policy_changed", "This setting changed; reload before saving.", 409)
     policy = {k: v for k, v in current.items() if k not in ("version", "updated_at", "updated_by")}
     policy["switches"] = dict(current["switches"])
-    if name == "share_links":
+    if name in ("share_links", provider_updates.SETTING):
         policy[name] = value
     elif group is None:
         policy["switches"][name] = value

@@ -1039,7 +1039,9 @@ export interface DocPolicy {
 
 export type DocSwitchName = "store" | "share" | "assist" | "prompt_analysis" | "import_upload";
 
-export type OrgSettingName = DocSwitchName | "share_links";
+export type ProviderUpdateMode = "automatic" | "ask" | "off";
+export type ProviderUpdatePolicy = { mode: ProviderUpdateMode; locked: boolean };
+export type OrgSettingName = DocSwitchName | "share_links" | "provider_cli_updates";
 export type OrgSwitchState = "off" | "default_on" | "enforced_on" | "enforced_off";
 export interface OrgSettings {
   org_id: string;
@@ -1050,6 +1052,7 @@ export interface OrgSettings {
     switches: Partial<Record<DocSwitchName, OrgSwitchState>>;
     groups: Record<string, { switches: Partial<Record<DocSwitchName, OrgSwitchState>> }>;
     share_links?: "anyone" | "org" | "off";
+    provider_cli_updates?: ProviderUpdatePolicy;
   };
 }
 
@@ -1291,6 +1294,8 @@ export interface VisualOffer {
 }
 
 export interface UserSettings {
+  provider_cli_updates?: ProviderUpdateMode;
+  provider_cli_updates_locked?: boolean;
   visuals?: "on" | "off";
   /* The visuals feature itself (on unless turned off); `visuals` above is only the offers. */
   visuals_enabled?: "on" | "off";
@@ -1519,7 +1524,7 @@ export interface SessionConflict {
 /* POST /inbox/{id}/{action} (daemon/routes_actions.py inbox_action).
    "permission" (engine branch desktop/permission-items) takes {request,
    digest, choice}: the person's answer to the request the item showed. */
-export type InboxAction = "answer" | "approve" | "reject" | "accept" | "decline" | "review" | "merge" | "read" | "permission" | "dismiss" | "pr-not-now";
+export type InboxAction = "answer" | "approve" | "reject" | "accept" | "decline" | "review" | "merge" | "read" | "permission" | "dismiss" | "pr-not-now" | "provider-update";
 
 /* What an action answers: a message or status, a reviewer, or a job id. */
 export interface InboxActionResult {
@@ -2767,9 +2772,10 @@ export class DaemonClient {
     return this.get<OrgSettings>("/org-settings");
   }
 
-  setOrgSetting(state: OrgSettings, name: OrgSettingName, value: string, group?: string) {
+  setOrgSetting(state: OrgSettings, name: OrgSettingName, value: string | ProviderUpdatePolicy, group?: string) {
     const switches = group ? state.policy.groups[group].switches : state.policy.switches;
-    const previous = name === "share_links" ? state.policy.share_links ?? "org" : switches[name] ?? "off";
+    const previous = name === "provider_cli_updates" ? state.policy.provider_cli_updates ?? { mode: "automatic", locked: false }
+      : name === "share_links" ? state.policy.share_links ?? "org" : switches[name] ?? "off";
     return this.put<OrgSettings>("/org-settings", { org_id: state.org_id, actor_sub: state.actor_sub, name, value, previous, group });
   }
 

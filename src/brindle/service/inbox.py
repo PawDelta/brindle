@@ -357,7 +357,9 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
     names its session (``root_id``), so the app can link into it.
     ``known_git``: as for ``view.snapshot``. ``snapshot_rows`` reuses a rendering
     already made for the adjacent snapshot request."""
-    out: list[InboxItemDTO] = []
+    from brindle import provider_updates
+
+    out: list[InboxItemDTO] = provider_updates.inbox_items(db)
     shown: set[str] = set()
     occurrences = {r["source"]: r["generation"] for r in db.conn.execute("SELECT source, generation FROM inbox_occurrences")}
     if snapshot_rows is None:

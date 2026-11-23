@@ -1092,6 +1092,7 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
     sessions it ran are paused on its way out (``serve``)."""
     from brindle.daemon import health
     from brindle.daemon.session_review import ReadinessWatch
+    from brindle.provider_updates import DAY as PROVIDER_POLICY_EVERY
     from brindle.upgrade import InstallWatch
 
     install = InstallWatch()
@@ -1101,7 +1102,9 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
     shared_due = clock()
     cull_due = clock() + CULL_EVERY
     switch_due = clock() + PROVIDER_SWITCH_EVERY
+    update_policy_due = clock()
     sharing: asyncio.Task | None = None     # on its own task: a slow Library never holds up these checks
+    updating: asyncio.Task | None = None
     while not server.should_exit:
         due = clock() + WATCH_INTERVAL      # the wait's deadline, before any maintenance below
         await wait(WATCH_INTERVAL)
@@ -1124,12 +1127,18 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
         if clock() >= switch_due:
             switch_due = clock() + PROVIDER_SWITCH_EVERY
             await asyncio.to_thread(_provider_switch_sweep)
+            if updating is None or updating.done():
+                refresh_policy = clock() >= update_policy_due
+                if refresh_policy:
+                    update_policy_due = clock() + PROVIDER_POLICY_EVERY
+                updating = asyncio.create_task(asyncio.to_thread(_provider_update_sweep, refresh_policy))
         if clock() >= shared_due and (sharing is None or sharing.done()):
             shared_due = clock() + SHARED_DOCS_EVERY
             sharing = asyncio.create_task(asyncio.to_thread(_sync_shared_docs))
         if install.changed():
             server.should_exit = True
         elif (idle_exit and activity.open == 0
+              and (updating is None or updating.done())
               and time.monotonic() - activity.last >= IDLE_SECONDS
               and not await asyncio.to_thread(_agents_running)):
             server.should_exit = True
@@ -1171,6 +1180,20 @@ def _provider_switch_sweep() -> None:
             db.conn.close()
     except Exception:  # noqa: BLE001 - a sweep must never stop the watch
         log.debug("brindle: couldn't run the provider switch sweep", exc_info=True)
+
+
+def _provider_update_sweep(refresh_policy: bool) -> None:
+    from brindle import provider_updates
+    from brindle.db import DB
+
+    try:
+        db = DB()
+        try:
+            provider_updates.sweep(db, refresh_policy=refresh_policy)
+        finally:
+            db.conn.close()
+    except Exception:  # background maintenance can leave the update pending
+        log.debug("brindle: couldn't run the provider update sweep", exc_info=True)
 
 
 def _purge_typed_words() -> None:

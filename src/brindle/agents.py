@@ -1872,6 +1872,7 @@ def _launch_checked(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     Within a gated resume (resume's ``gate``), the preflight checks the gate
     and the launch itself holds it (_gate_commit)."""
     from brindle import preflight, provider_homes
+    from brindle.providers_install import update_gate
 
     # A provider the person turned off in brindle never starts, and nothing
     # below (deciding its home, model check, identity probe) runs its CLI either.
@@ -1884,7 +1885,7 @@ def _launch_checked(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             agent.config_home = provider_homes.decide(agent.provider)
         if agent.config_home is not None:
             db.update_agent(agent.id, config_home=agent.config_home)
-    with provider_homes.using(agent.provider, agent.config_home), ExitStack() as hold:
+    with update_gate(agent.provider), provider_homes.using(agent.provider, agent.config_home), ExitStack() as hold:
         _launch_resolved(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane,
                          background_setup=background_setup, model_checked=model_checked, hold=hold)
 

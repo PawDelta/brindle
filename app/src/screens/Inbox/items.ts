@@ -44,6 +44,7 @@ export const KIND_LABEL: Record<string, string> = {
   credentials: "Credentials",
   login: "Cloud login",
   org_notice: "Org notice",
+  provider_update: "Provider update",
   org_blocked: "Org policy",
   setup: "Setup",
   idle_stopped: "Stopped while idle",
@@ -88,6 +89,7 @@ export const KIND_SHORT: Record<string, string> = {
   credentials: "login",
   login: "login",
   org_notice: "notice",
+  provider_update: "update",
   org_blocked: "org policy",
   setup: "setup",
   idle_stopped: "idle",
@@ -213,7 +215,7 @@ export const needsDecision = (item: InboxItemDTO): boolean => ["review", "merge_
 
 /* The id POST /inbox/{id}/{action} takes: an org notice's notice_id, else the agent's. */
 export const actionId = (item: InboxItemDTO) =>
-  (item.kind === "doc" ? item.request_id : REVIEW_KINDS.includes(item.kind) ? `${item.doc ?? ""}` : item.kind === "org_notice" ? item.notice_id : item.agent_id) ?? "";
+  (item.kind === "doc" || item.kind === "provider_update" ? item.request_id : REVIEW_KINDS.includes(item.kind) ? `${item.doc ?? ""}` : item.kind === "org_notice" ? item.notice_id : item.agent_id) ?? "";
 
 /* Stable across snapshots, so a new item can be told from one already seen.
    A setup item belongs to no agent: it is told by what it fixes; an org Block by what it says. */
@@ -241,7 +243,7 @@ export const FILTERS: { key: string; label: string; kinds: string[] }[] = [
   { key: "reviews", label: "Reviews", kinds: ["review", "merge_failed"] },
   { key: "checks", label: "Checks", kinds: ["proposed_checks"] },
   { key: "docs", label: "Docs", kinds: ["doc", ...REVIEW_KINDS] },
-  { key: "other", label: "Other", kinds: ["credentials", "login", "org_notice", "org_blocked", "setup", "idle_stopped"] },
+  { key: "other", label: "Other", kinds: ["credentials", "login", "org_notice", "org_blocked", "setup", "idle_stopped", "provider_update"] },
 ];
 
 export const filterOf = (item: InboxItemDTO) => FILTERS.find((f) => f.kinds.includes(item.kind))?.key ?? "other";
