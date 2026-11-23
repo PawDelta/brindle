@@ -951,6 +951,7 @@ def _route_clash(req: _Request, db: DB, caller: Agent, ws: Workspace, profile: s
             db, caller, ws, profile, task, mode, isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=[*(depends_on or []), clash.holder],
             plan_first=plan_first, weight=weight, milestone=milestone, fast_path=fast_path,
+            agent=decision.get("agent"),
         )
         savings.record(db, ws.repo_root, decision, task_id=t.id)
         if clash.cross_session:   # ends on its landing, or after the drift limit (tasks._release_cross_waits)
@@ -1032,8 +1033,11 @@ async def handoff(
     worktree in that repo, that repo's own checks and review, and merges into
     that repo's branch. Default: this repo.
 
-    agent_profile is an optional worker id (dev.* or review.*; old ids remain
-    aliases). When empty, the current unverified milestone's worker is used,
+    agent_profile is optional: an agent (who does the task, e.g. developer or
+    qa; see list_agent_profiles), which with `weight` runs on the model
+    routing picks for that size, or a model id (dev.* or review.*; old ids
+    remain aliases) or custom profile with its own model, which runs as
+    itself. When empty, the current unverified milestone's worker is used,
     else `weight` routes to an available worker, else the repo's default agent.
 
     weight is brindle's job size: "light", "medium", "heavy" or "advanced".
@@ -1130,7 +1134,7 @@ async def handoff(
             t = req.enqueue(
                 db, caller, ws, profile, task,"handoff", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-                weight=effective_weight, milestone=ms_title,
+                weight=effective_weight, milestone=ms_title, agent=decision.get("agent"),
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
             return _remind_goal(db, caller,
@@ -1148,7 +1152,7 @@ async def handoff(
         t = req.enqueue(
             db, caller, ws, profile, task, "handoff", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-            weight=effective_weight, milestone=ms_title, start=True,
+            weight=effective_weight, milestone=ms_title, agent=decision.get("agent"), start=True,
         )
         savings.record(db, ws.repo_root, decision, task_id=t.id)
         notes = "".join(f"\nrouting: {w}" for w in why)
@@ -1213,8 +1217,11 @@ async def assign(
     that repo's branch. depends_on may name a task in any repo of the session.
     Default: this repo.
 
-    agent_profile is an optional worker id (dev.* or review.*; old ids remain
-    aliases). When empty, the current unverified milestone's worker is used,
+    agent_profile is optional: an agent (who does the task, e.g. developer or
+    qa; see list_agent_profiles), which with `weight` runs on the model
+    routing picks for that size, or a model id (dev.* or review.*; old ids
+    remain aliases) or custom profile with its own model, which runs as
+    itself. When empty, the current unverified milestone's worker is used,
     else `weight` routes to an available worker, else the repo's default agent.
 
     weight is brindle's job size: "light", "medium", "heavy" or "advanced".
@@ -1277,12 +1284,14 @@ async def assign(
             if not (done_when or "").strip():
                 return ("Not started: a fast-path task needs done_when, the targeted tests that "
                         "prove it done.")
-            tier = autopilot.profile_weight(agent_profile.strip(), None, ws.repo_root) if agent_profile.strip() else None
+            # An agent has no model of its own: like no profile, it is routed by the weight.
+            pinned = agent_profile.strip() if not autopilot.routed_agent(agent_profile.strip(), ws.repo_root) else ""
+            tier = autopilot.profile_weight(pinned, None, ws.repo_root) if pinned else None
             if tier and tier not in FAST_PATH_WEIGHTS:
                 return (f"Not started: the fast path runs one light or medium worker, and "
                         f"{agent_profile.strip()} is {tier}. Pass weight light or medium, or assign "
                         "it without fast_path.")
-            fast, route_weight = True, weight or (None if agent_profile.strip() else "medium")
+            fast, route_weight = True, weight or (None if pinned else "medium")
         why: list[str] = []
         decision: dict = {}
         try:
@@ -1323,7 +1332,7 @@ async def assign(
             t = req.enqueue(
                 db, caller, ws, profile, task,"assign", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-                weight=effective_weight, milestone=ms_title, fast_path=fast,
+                weight=effective_weight, milestone=ms_title, agent=decision.get("agent"), fast_path=fast,
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
             return _remind_goal(db, caller,
@@ -1340,7 +1349,7 @@ async def assign(
             t = req.enqueue(
                 db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-                weight=effective_weight, milestone=ms_title, start=True, fast_path=fast,
+                weight=effective_weight, milestone=ms_title, agent=decision.get("agent"), start=True, fast_path=fast,
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
             behind = (f"behind plan {plan['id']}: it starts when the person approves the plan" if "id" in plan
@@ -1361,7 +1370,7 @@ async def assign(
         t = req.enqueue(
             db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-            weight=effective_weight, milestone=ms_title, start=True, fast_path=fast,
+            weight=effective_weight, milestone=ms_title, agent=decision.get("agent"), start=True, fast_path=fast,
         )
         savings.record(db, ws.repo_root, decision, task_id=t.id)
         notes = "".join(f"\nrouting: {w}" for w in why)
@@ -1803,22 +1812,30 @@ def propose_decision(topic: str, decision: str, rationale: str,
 
 @mcp.tool()
 def list_agent_profiles() -> str:
-    """Workers available to handoff/assign, identified by dev.* or review.* ids.
-    Old built-in profile ids remain aliases; custom worker ids are also accepted."""
+    """Workers available to handoff/assign: agents (who does a task, routed
+    to a model by its weight) apart from models (dev.* or review.* ids and
+    custom profiles with their own model, which run as themselves). Old
+    built-in profile ids remain aliases."""
     db = DB()
     _, here = _caller(db)
     from brindle.providers import unusable
 
     usable = {}
-    lines = []
+    agent_lines, model_lines = [], []
     for p in list_profiles(here.repo_root):
+        if autopilot.routed_agent(p.name, here.repo_root):
+            agent_lines.append(f"{p.name}: {p.description}")
+            continue
         # A profile's env can carry the CLI's key, so one on a signed-out CLI can still run.
         key = (p.provider, tuple(sorted(p.env.items())))
         if key not in usable:
             usable[key] = unusable(p.provider, p.env) is None
         if usable[key]:
-            lines.append(f"{p.name} ({p.provider}): {p.description}")
-    return "\n".join(lines)
+            model_lines.append(f"{p.name} ({p.provider}): {p.description}")
+    return "\n".join([
+        "Agents (pass as agent_profile with a weight; it runs on the model routing picks for that size):",
+        *agent_lines, "",
+        "Models (pass as agent_profile to run that exact one):", *model_lines])
 
 
 @mcp.tool()

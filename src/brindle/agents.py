@@ -4639,6 +4639,7 @@ def delegate(
     admit: bool = True,
     detached: bool = False,
     milestone: str | None = None,
+    agent_name: str | None = None,
 ) -> tuple[Agent, Workspace]:
     """Start a worker, or raise ``NoRoom`` (nothing created) when the machine
     has no room for it (``admission``); ``admit`` False skips that, for a
@@ -4649,7 +4650,9 @@ def delegate(
     branch starts from the caller's current branch, so it sees the caller's
     committed work, and nobody edits the same files; ``start`` names another
     commit to start it from (it still merges into the caller's branch).
-    Refuses beyond the repo's ``max_agents`` workers running at once."""
+    ``agent_name``: the agent it works as, joined to ``profile`` (its model)
+    at launch (``spawn``). Refuses beyond the repo's ``max_agents`` workers
+    running at once."""
     from brindle import autopilot as pilot
     from brindle import repos
     from brindle.config import load_repo_config
@@ -4688,6 +4691,7 @@ def delegate(
                 done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
                 weight=weight, milestone=milestone,
                 **({"detached": True} if detached else {}),
+                **({"agent_name": agent_name} if agent_name else {}),
             )
 
         if not fair:
