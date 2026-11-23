@@ -129,6 +129,7 @@ def _profile_fields(profile: str | None, repo_root: str, *,
     if not profile:
         return None, None
     try:
+        from brindle.model_catalog import default_model
         from brindle.profiles import load_profile
 
         p = load_profile(profile, None if user_library else repo_root)
@@ -141,30 +142,22 @@ def _profile_fields(profile: str | None, repo_root: str, *,
             from brindle import company_login
 
             model = company_login.claude_model(model, repo_root)
-        if p.provider == "codex" and not model and env is not None:
-            from brindle.providers import codex_default_model
+        if not model and default_model(p.provider):
+            from brindle.providers import default_launch_model
 
-            # The launch has no --model: ask its CLI, rather than infer one
-            # from the supervisor's model environment or managed settings.
-            return p.provider, codex_default_model(cwd or repo_root, env=env)
+            model = default_launch_model(p, cwd or repo_root, env=env)
+            if p.provider == "claude":
+                from brindle.autopilot import effective_profile_model
+
+                # Legacy managed routes can also supply the unpinned model.
+                model = effective_profile_model(p, repo_root, model) or None
+            return p.provider, model
         if not model:
             try:
                 from brindle.autopilot import effective_profile_model
-                from brindle.model_catalog import default_model
-
-                # A concrete launch flag wins over ambient model variables.
-                default = default_model(p.provider)
-                model = effective_profile_model(p, repo_root if default or not user_library else None, default) or None
+                model = effective_profile_model(p, None if user_library else repo_root) or None
             except Exception:
                 pass
-        if not model:
-            if p.provider == "codex":
-                from brindle.providers import codex_default_model
-
-                model = codex_default_model(cwd or repo_root, env=env)
-            # Other unpinned CLIs choose their own account/config default.
-            # Without evidence of that selection, keep it unknown so an org
-            # allowlist cannot authorize a model the worker may never run.
         return p.provider, model
     except Exception:
         return None, None

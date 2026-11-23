@@ -1080,7 +1080,8 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
         profile = managed_models.apply_profile(m, profile)
     if review_launch := getattr(agent, "_review_launch", None):
         return replace(profile, model=review_launch.model)
-    return _with_newest_model(profile, ws, agent=agent, m=m)
+    profile = _with_newest_model(profile, ws, agent=agent, m=m)
+    return _with_default_model(profile, ws, agent, m)
 
 
 def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str],
@@ -1129,7 +1130,7 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
                                      **({"deny": deny} if deny else {}),
                                      **({"agent_env": agent_env} if agent_env else {}),
                                      **({"enforce": True} if enforce else {}))
-            if agent.provider in VERSION_DISCOVERY_PROVIDERS:
+            if agent.provider in (*VERSION_DISCOVERY_PROVIDERS, "claude"):
                 agent._opening_pane = target
             if review:
                 db.set_mark(agent.id, _REVIEW_STARTUP_FAILURE, _review_startup_record(target, server))
@@ -1353,9 +1354,21 @@ def routing_model(profile, repo_root: str, *, cwd: str | None = None,
     return _with_newest_model(profile, ws, effective=env).model
 
 
+def _with_default_model(profile, ws: Workspace, agent: Agent, m=_UNREAD):
+    from dataclasses import replace
+
+    from brindle.model_catalog import default_model
+
+    if profile.model or not default_model(agent.provider):
+        return profile
+    profile = replace(profile, provider=agent.provider)
+    model = providers.default_launch_model(profile, ws.path, env=_effective_window_env(agent, ws, m))
+    return replace(profile, model=model)
+
+
 def resolve_review_launch(profile, ws: Workspace, parent_id: str | None) -> ReviewLaunch | None:
     """Use the reviewer role, caller session and CLI home the pane will use."""
-    if profile.provider not in VERSION_DISCOVERY_PROVIDERS or not profile.model:
+    if profile.provider not in VERSION_DISCOVERY_PROVIDERS:
         return None
     from brindle import preflight, provider_homes
 
@@ -1370,12 +1383,15 @@ def resolve_review_launch(profile, ws: Workspace, parent_id: str | None) -> Revi
                       "starting", "", None, time.time(), config_home=config_home, agent="reviewer")
     with provider_homes.using(profile.provider, config_home):
         resolved = _with_newest_model(profile, ws, agent=candidate)
+        resolved = _with_default_model(resolved, ws, candidate)
+    if not resolved.model:
+        return None
     return ReviewLaunch(resolved.model, config_home)
 
 
 def _check_launch_model(repo_root: str, provider: str, model: str | None) -> None:
-    """Recheck the model that will be passed to the version-aware CLI."""
-    if provider not in VERSION_DISCOVERY_PROVIDERS or not model:
+    """Recheck the model that will be passed to the CLI."""
+    if provider not in (*VERSION_DISCOVERY_PROVIDERS, "claude") or not model:
         return
     from brindle.policy import Decision
     from brindle.pro import team_policy
@@ -1384,8 +1400,10 @@ def _check_launch_model(repo_root: str, provider: str, model: str | None) -> Non
     if isinstance(org, Decision):
         if not org.allowed:
             raise AgentError(org.reason)
-    elif not team_policy.model_allowed(org.allowed_models, model):
-        raise AgentError(f"model {model!r} refused by org {org.org_id}'s model policy")
+    else:
+        route = team_policy.claude_route(org.org_id, org.agent_setup, provider)
+        if not team_policy.model_allowed(org.allowed_models, model, team_policy.pinned_model(route, model)):
+            raise AgentError(f"model {model!r} refused by org {org.org_id}'s model policy")
 
 
 def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = None,
@@ -1897,7 +1915,10 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         m = _shared_managed(ws.repo_root)   # read once for this launch (per repo in a recovery)
         profile = _profile_for(db, agent, ws, m)
         _airgap_check(profile, ws.repo_root)
-        _check_launch_model(ws.repo_root, agent.provider, profile.model)
+        model = (company_login.claude_model(profile.model, ws.path)
+                 if agent.provider == "claude" else profile.model)
+        if agent.provider != "claude" or agent.mode in REPORTING_MODES:
+            _check_launch_model(ws.repo_root, agent.provider, model)
     provider = get_provider(agent.provider)
     if not model_checked:
         with _launch_step("model_check_s"):
@@ -2001,7 +2022,8 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         with _launch_step("command_s"):
             argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
                                                   mode=agent.mode, plan_first=bool(agent.plan_first),
-                                                  mcp_recovery=mcp_recovery, chrome_chosen=chrome_chosen))
+                                                  mcp_recovery=mcp_recovery, chrome_chosen=chrome_chosen,
+                                                  resolved_model=model))
     except providers.CodexSandboxRefused as e:
         raise AgentError(str(e)) from e
     from brindle import wake
@@ -2031,11 +2053,11 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         db.conn.execute("DELETE FROM launch_health WHERE agent_id=?", (agent.id,))
     opening = time.monotonic()
     with _launch_step("window_s"):
-        record_model = agent.provider in VERSION_DISCOVERY_PROVIDERS
+        record_model = agent.provider in (*VERSION_DISCOVERY_PROVIDERS, "claude")
         agent.__dict__.pop("_opening_pane", None)
         previous_model = db.agent_launch_model(agent.id) if record_model else None
         if record_model:
-            db.record_agent_launch_model(agent.id, profile.model)
+            db.record_agent_launch_model(agent.id, model)
         try:
             target = _open_window(db, agent, ws, f"{profile.name}-{agent.id[:4]}", argv, watch_pane,
                                   **({"m": m} if m is not None else {}))
@@ -5313,7 +5335,7 @@ def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig, *, launch: Revi
         raise AgentError(f"reviewer profile {name!r} can't run now: {health.reason}")
     try:
         from brindle import policy as pol
-        if chosen.provider == "codex" and not chosen.model:
+        if chosen.provider == "codex" and not chosen.model and launch is None:
             candidate = Agent("preflight", ws.id, name, chosen.provider, None,
                               "review", "starting", "", None, time.time())
             d = pol.check_launch(cfg, ws, candidate, _effective_window_env(candidate, ws))

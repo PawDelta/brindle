@@ -322,12 +322,13 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
         entry["milestone"] = milestone
     if u and u.total:
         entry["tokens"] = usage_mod.short_summary(u)
-    if u and u.model:
-        entry["model"] = u.model
+    model = (u.model if u else None) or db.agent_launch_model(a.id)
+    if model:
+        entry["model"] = model
     # How a person reads the worker: its job size, and its model as brindle.model_names names it.
     if a.weight:
         entry["weight"] = a.weight
-    entry["model_display"] = model_names.model_name(u.model if u else None, a.provider).display
+    entry["model_display"] = model_names.model_name(model, a.provider).display
     unread = db.unread_count(a.id)
     if unread:
         entry["unread"] = unread

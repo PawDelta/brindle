@@ -69,10 +69,11 @@ def test_audit_respects_policy_and_reviewer_fallbacks(db, repo, monkeypatch, org
     (None, "gpt-6.1-terra"),
     pytest.param("gpt-configured", "gpt-6.1-terra", marks=pytest.mark.variant(
         "An explicit CLI config model must take precedence over the catalog default")),
-    (None, None),
+    pytest.param(None, None, marks=pytest.mark.variant(
+        "An empty CLI catalog must use the built-in fallback without bypassing the allowlist")),
 ])
-def test_unpinned_codex_uses_installed_default_and_fails_closed(repo, monkeypatch, org_policy, real_codex_default_model,
-                                                              configured, cli_default):
+def test_unpinned_codex_uses_the_configured_or_catalog_model(repo, monkeypatch, org_policy, real_codex_default_model,
+                                                            configured, cli_default):
     class AppServer:
         def __init__(self, *a, **kw):
             pass
@@ -96,11 +97,10 @@ def test_unpinned_codex_uses_installed_default_and_fails_closed(repo, monkeypatc
     cfg = RepoConfig()
     assert not policy.assign_decision(cfg, str(repo), profile.name, "audit", "review").allowed
     assert not policy.assign_decision(cfg, str(repo), profile.name, "audit", "review", cwd=str(repo), env={}).allowed
-    expected = configured or cli_default
+    expected = configured or cli_default or "gpt-6.2-sol"
     assert policy._profile_fields(profile.name, str(repo)) == ("codex", expected)
-    if expected:
-        org_policy[0] = replace(org_policy[0], allowed_models=(expected,))
-        assert policy.assign_decision(cfg, str(repo), profile.name, "audit", "review").allowed
+    org_policy[0] = replace(org_policy[0], allowed_models=(expected,))
+    assert policy.assign_decision(cfg, str(repo), profile.name, "audit", "review").allowed
 
 
 @pytest.mark.parametrize("context", ["worktree", "profile_home"])

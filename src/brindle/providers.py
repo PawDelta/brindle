@@ -89,6 +89,7 @@ class LaunchContext:
     plan_first: bool = False    # its edits are gated on plan approval (the hook watches edit tools too)
     mcp_recovery: bool = False  # a fresh reviewer after a failed MCP connection
     chrome_chosen: bool | None = None  # claude_chrome_chosen of the pane's environment, where it's known
+    resolved_model: str | None = None  # Claude model already checked in the launch context
 
 
 def _uv_cache_env(ctx: LaunchContext) -> dict[str, str]:
@@ -102,33 +103,40 @@ def _uv_cache_env(ctx: LaunchContext) -> dict[str, str]:
     return {"UV_CACHE_DIR": build_caches.uv_cache_dir()}
 
 
-def _codex_config() -> dict:
+def _codex_config(home: str | None = None) -> dict:
     """The person's Codex config.toml (in the home brindle runs Codex with), or {}."""
     import tomllib
 
     try:
-        with open(os.path.join(codex_home(), "config.toml"), "rb") as f:
+        with open(os.path.join(home or codex_home(), "config.toml"), "rb") as f:
             return tomllib.load(f)
     except (OSError, ValueError):
         return {}
 
 
-def codex_default_model(cwd: str, *, env: dict[str, str] | None = None) -> str | None:
-    """Ask the installed CLI for its configured model, else its catalog default.
+def _active_codex_profile(config: dict) -> dict:
+    profiles = config.get("profiles")
+    name = config.get("profile")
+    active = profiles.get(name) if isinstance(profiles, dict) and isinstance(name, str) else None
+    return active if isinstance(active, dict) else {}
 
-    No guessed fallback: an unavailable CLI or an unrecognized response leaves
-    policy with an unknown model, refused by a restrictive model allowlist.
-    """
-    from brindle import codex_hook
+
+def _codex_configured_model(config: dict, active: dict) -> str | None:
+    model = active.get("model") or config.get("model")
+    return model.strip() if isinstance(model, str) and model.strip() else None
+
+
+def codex_default_model(cwd: str, *, env: dict[str, str] | None = None) -> str | None:
+    """Select the effective config model, the CLI's marked default, or our catalog model."""
+    from brindle import codex_hook, model_catalog
 
     try:
         server = codex_hook._AppServer(codex_binary(), [], cwd=cwd, **({"env": env} if env is not None else {}))
         try:
             cfg = server.call("config/read", {"includeLayers": False, "cwd": cwd})["config"]
-            active = (cfg.get("profiles") or {}).get(cfg.get("profile"), {})
-            model = active.get("model") or cfg.get("model")
-            if isinstance(model, str) and model.strip():
-                return model.strip()
+            active = _active_codex_profile(cfg)
+            if model := _codex_configured_model(cfg, active):
+                return model
             params = {"includeHidden": True}
             provider = active.get("model_provider") or cfg.get("model_provider")
             if provider:
@@ -142,13 +150,45 @@ def codex_default_model(cwd: str, *, env: dict[str, str] | None = None) -> str |
                         return model.strip()
                 cursor = result.get("nextCursor")
                 if not cursor or cursor in seen:
-                    return None
+                    break
                 seen.add(cursor)
                 params["cursor"] = cursor
         finally:
             server.close()
-    except Exception:  # noqa: BLE001 - unknown defaults must never become an allowed guess
+    except Exception:  # noqa: BLE001 - an unavailable app server leaves local config and catalog defaults
+        cfg = _codex_config(env.get("CODEX_HOME") if env is not None else None)
+        active = _active_codex_profile(cfg)
+        if model := _codex_configured_model(cfg, active):
+            return model
+    return model_catalog.default_model("codex")
+
+
+def default_launch_model(profile: Profile, cwd: str, *, env: dict[str, str] | None = None) -> str | None:
+    """Resolve an unpinned CLI profile to the model Brindle can pass explicitly."""
+    from brindle import company_login, model_catalog
+
+    provider = profile.provider
+    fallback = model_catalog.default_model(provider)
+    if not fallback:
         return None
+    effective = env if env is not None else {**os.environ, **profile.env}
+    if provider == "codex":
+        # Codex reads effective (possibly worktree-local) configuration itself.
+        if env is None:
+            effective["CODEX_HOME"] = profile.env.get("CODEX_HOME") or codex_home()
+        return codex_default_model(cwd, env=effective)
+    if provider == "opencode":
+        from brindle import opencode
+
+        return opencode.configured_model(cwd, effective) or fallback
+    if model := company_login.claude_model(None, cwd):
+        return model
+    model = _claude_configured_model(profile, cwd, effective)
+    if not model:
+        return effective.get("ANTHROPIC_DEFAULT_SONNET_MODEL") or fallback
+    if model in ("haiku", "sonnet", "opus"):
+        return effective.get(f"ANTHROPIC_DEFAULT_{model.upper()}_MODEL") or model_catalog.ALIASES.get(model, model)
+    return model
 
 
 def _worktree_git_dirs(cwd: str) -> list[str]:
@@ -1377,9 +1417,12 @@ class ClaudeCode(Provider):
             argv += ["--add-dir", directory]
         argv += ["--append-system-prompt",
                  "\n\n".join(filter(None, [ctx.profile.prompt, DELIVERY_NOTE]))]
-        from brindle import company_login, model_catalog
+        from brindle import company_login
 
-        model = company_login.claude_model(p.model, ctx.cwd) or model_catalog.default_model(self.name)
+        model = ctx.resolved_model
+        if model is None:
+            model = (company_login.claude_model(p.model, ctx.cwd) if p.model else
+                     default_launch_model(p, ctx.cwd or os.getcwd()))
         if model:
             argv += ["--model", model]
         argv += ["--permission-mode", start_mode]
@@ -2816,6 +2859,29 @@ def _own_status_line(project_dir: str | None) -> str | None:
             continue
         if isinstance(line, dict) and line.get("type") == "command" and line.get("command"):
             return str(line["command"])
+    return None
+
+
+def _claude_configured_model(profile: Profile, cwd: str, env: dict[str, str]) -> str | None:
+    if model := env.get("ANTHROPIC_MODEL", "").strip():
+        return model
+    directory = env.get("CLAUDE_CONFIG_DIR") or claude_config_dir()
+    sources = profile.setting_sources
+    candidates = {
+        "local": os.path.join(cwd, ".claude", "settings.local.json"),
+        "project": os.path.join(cwd, ".claude", "settings.json"),
+        "user": os.path.join(directory, "settings.json"),
+    }
+    for source, path in candidates.items():
+        if sources and source not in sources:
+            continue
+        try:
+            with open(path, encoding="utf-8") as file:
+                model = json.load(file).get("model")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(model, str) and model.strip():
+            return model.strip()
     return None
 
 

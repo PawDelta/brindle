@@ -187,6 +187,22 @@ def binary() -> str:
     return providers_install.found("opencode") or "opencode"
 
 
+def configured_model(cwd: str, env: dict[str, str]) -> str | None:
+    """Read the model from OpenCode's merged config without loading plugins."""
+    from subprocess import TimeoutExpired
+
+    from brindle import spawn
+    from brindle.model_availability import PROVISIONING_TIMEOUT
+
+    try:
+        result = spawn.read([binary(), "debug", "config", "--pure"], cwd=cwd, env=env,
+                            timeout=PROVISIONING_TIMEOUT)
+        model = json.loads(result.stdout).get("model") if result.returncode == 0 else None
+    except (OSError, ValueError, AttributeError, TimeoutExpired, spawn.Busy):
+        return None
+    return model.strip() if isinstance(model, str) and model.strip() else None
+
+
 def home() -> Path:
     from brindle.config import brindle_home
 
