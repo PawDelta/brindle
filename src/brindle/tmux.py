@@ -588,11 +588,8 @@ def launch_pane_gone(pane: str, launch: str, server: str | None) -> bool:
     match = f"#{{m:*{AGENT_TAG} * {launch} *,#{{pane_start_command}}}}" if launch else "1"
     try:
         panes = _tmux("list-panes", "-a", "-F", "#{pane_id}\t#{pane_dead}\t" + match, server=server)
-    except TmuxError as exc:
-        message = str(exc)
-        missing = "no server running" in message or "No such file or directory" in message
-        return missing and abandoned(server or DEFAULT_SOCKET)
-    except OSError:
+    except (OSError, TmuxError):
+        # A live server can lose its socket and keep running the pane.
         return False
     for line in panes.stdout.splitlines():
         target, *state = line.split("\t")

@@ -1,6 +1,7 @@
 """Route and launch pinned profiles against the user's model catalog."""
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -287,9 +288,17 @@ def test_review_dispatch_surfaces_unconfirmed_gate_on_later_requests(
         if not pane_gone:
             raise OSError("gate signal did not reach tmux")
 
-    def confirm_gone(pane, launch, server):
-        assert (pane, launch, server) == (original, original.launch, "review-server")
-        return pane_gone
+    run_tmux = tmux._tmux
+
+    def probe(*args, **kwargs):
+        if args[:3] != ("list-panes", "-a", "-F") or "#{pane_start_command}" not in args[-1]:
+            return run_tmux(*args, **kwargs)
+        assert kwargs["server"] == "review-server" and original.launch in args[-1]
+        if pane_gone:
+            return SimpleNamespace(stdout="")
+        if during_registration:
+            return SimpleNamespace(stdout=f"{original}\t0\t1\n")
+        raise tmux.TmuxError("error connecting to tmux socket (No such file or directory)")
 
     update_agent = db.update_agent
 
@@ -305,7 +314,8 @@ def test_review_dispatch_surfaces_unconfirmed_gate_on_later_requests(
     monkeypatch.setattr(tmux, "new_window", new_window)
     monkeypatch.setattr(tmux, "open_gate", fail_signal)
     monkeypatch.setattr(tmux, "current_server", lambda: "review-server")
-    monkeypatch.setattr(tmux, "launch_pane_gone", confirm_gone)
+    monkeypatch.setattr(tmux, "_tmux", probe)
+    monkeypatch.setattr(tmux, "abandoned", lambda server: server == "review-server")
     monkeypatch.setattr(tmux, "apply_theme", lambda *a: None)
     monkeypatch.setattr(tmux, "mark_launched", lambda *a: None)
     monkeypatch.setattr(agents, "alive_or_starting", lambda agent: agent.tmux_window == original and not pane_gone)
@@ -322,6 +332,7 @@ def test_review_dispatch_surfaces_unconfirmed_gate_on_later_requests(
 
     with pytest.raises(agents.AgentError):
         agents.request_review(db, None, routing, "pinned")
+    assert opened == [agent_id]
     with pytest.raises(agents.AgentError):
         agents.start_review(db, None, routing, "pinned", cfg=RepoConfig(checks=["suite"]))
     with pytest.raises(agents.AgentError):
