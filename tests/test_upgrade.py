@@ -80,7 +80,7 @@ def test_an_upgrade_under_the_mcp_server_leaves_it_serving_the_version_it_starte
     for result in asyncio.run(session()):
         assert not result.is_error
         assert "dev.claude-opus (claude)" in result.content[0].text
-        assert "developer (claude)" in result.content[0].text
+        assert "\ndeveloper: " in result.content[0].text     # an agent: listed apart from the models
     assert exits == []
 
 

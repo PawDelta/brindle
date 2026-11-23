@@ -103,6 +103,11 @@ CREATE TABLE IF NOT EXISTS agent_milestones (
     agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
     title TEXT NOT NULL
 );
+-- Optional role layer composed onto agents.profile. Released tables stay unchanged.
+CREATE TABLE IF NOT EXISTS agent_roles (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    agent TEXT
+);
 -- The goal milestone a queued task's worker is assigned to (assign/handoff's milestone); a table of its
 -- own so no released table gains a column.
 CREATE TABLE IF NOT EXISTS task_milestones (
@@ -725,6 +730,12 @@ CREATE TABLE IF NOT EXISTS routing_decisions (
 );
 CREATE INDEX IF NOT EXISTS routing_decisions_repo_root ON routing_decisions(repo_root, ts);
 CREATE INDEX IF NOT EXISTS routing_decisions_agent ON routing_decisions(agent_id);
+-- Keep the role layer with the historical decision, even after its worker is pruned.
+-- Released tables never gain columns.
+CREATE TABLE IF NOT EXISTS routing_decision_agents (
+    decision_id INTEGER PRIMARY KEY REFERENCES routing_decisions(id) ON DELETE CASCADE,
+    agent TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS launch_health (
     agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
     token TEXT NOT NULL DEFAULT '',
@@ -1530,6 +1541,7 @@ class Agent:
     review_slot: str | None = None         # the review claim slot it was started in (gates.standing_reviews)
     failed_why: str | None = None          # why it is 'failed': auth | model | delivery; None from an older brindle
     name: str | None = None                # a session root's name from the person; None: listed by its goal
+    agent: str | None = None               # role layer composed onto profile; None keeps legacy loading
 
 @dataclass
 class Autopilot:
@@ -1714,6 +1726,7 @@ class RoutingDecision:
     demoted_from: str | None = None
     budget_state: str | None = None
     seeded_at: float | None = None
+    agent: str | None = None
 
 
 @dataclass
@@ -2191,6 +2204,7 @@ class DB:
                 self.conn.execute(f"ALTER TABLE permission_requests ADD COLUMN {col} {kind}")
         self._move_session_repo_branches()
         self._move_task_wait_noted()
+        self._move_agent_roles()
         if "merged_at" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(session_prs)")}:
             self.conn.execute("ALTER TABLE session_prs ADD COLUMN merged_at REAL")
         health_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(launch_health)")}
@@ -2235,6 +2249,20 @@ class DB:
             c.execute("INSERT OR IGNORE INTO session_repo_branches (root_id, alias, branch) "
                       "SELECT root_id, alias, branch FROM session_repos WHERE branch IS NOT NULL")
             c.execute("ALTER TABLE session_repos DROP COLUMN branch")
+
+    def _move_agent_roles(self) -> None:
+        """Move the development-only agents.agent column without changing released tables."""
+        def has_col(c: sqlite3.Connection) -> bool:
+            return "agent" in {r["name"] for r in c.execute("PRAGMA table_info(agents)")}
+
+        if not has_col(self.conn):
+            return
+        with self.tx() as c:
+            if not has_col(c):
+                return
+            c.execute("INSERT OR IGNORE INTO agent_roles (agent_id, agent) "
+                      "SELECT id, agent FROM agents WHERE agent IS NOT NULL")
+            c.execute("ALTER TABLE agents DROP COLUMN agent")
 
     def _move_task_wait_noted(self) -> None:
         """A development build kept the long-wait note on tasks.wait_noted:
@@ -2580,6 +2608,8 @@ class DB:
                  a.transcript_path, a.done_when, a.inbox_socket, a.inbox_token, a.review_sha,
                  a.tmux_server, a.config_home),
             )
+            if a.agent is not None:
+                c.execute("INSERT INTO agent_roles (agent_id, agent) VALUES (?,?)", (a.id, a.agent))
 
     def data_version(self) -> int:
         """Changes whenever another connection commits to the database: a
@@ -2587,21 +2617,26 @@ class DB:
         return self.conn.execute("PRAGMA data_version").fetchone()[0]
 
     def get_agent(self, agent_id: str) -> Agent | None:
-        row = self.conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
+        row = self.conn.execute("SELECT a.*, r.agent FROM agents a "
+                                "LEFT JOIN agent_roles r ON r.agent_id=a.id WHERE a.id=?",
+                                (agent_id,)).fetchone()
         return _load(Agent, row) if row else None
 
     def list_agents(self, workspace_id: str | None = None) -> list[Agent]:
         if workspace_id:
             rows = self.conn.execute(
-                "SELECT * FROM agents WHERE workspace_id=? ORDER BY created_at", (workspace_id,)
+                "SELECT a.*, r.agent FROM agents a LEFT JOIN agent_roles r ON r.agent_id=a.id "
+                "WHERE a.workspace_id=? ORDER BY a.created_at", (workspace_id,)
             )
         else:
-            rows = self.conn.execute("SELECT * FROM agents ORDER BY created_at")
+            rows = self.conn.execute("SELECT a.*, r.agent FROM agents a "
+                                     "LEFT JOIN agent_roles r ON r.agent_id=a.id ORDER BY a.created_at")
         return [_load(Agent, r) for r in rows]
 
     def children(self, parent_id: str) -> list[Agent]:
         rows = self.conn.execute(
-            "SELECT * FROM agents WHERE parent_id=? ORDER BY created_at", (parent_id,)
+            "SELECT a.*, r.agent FROM agents a LEFT JOIN agent_roles r ON r.agent_id=a.id "
+            "WHERE a.parent_id=? ORDER BY a.created_at", (parent_id,)
         )
         return [_load(Agent, r) for r in rows]
 
@@ -2611,9 +2646,19 @@ class DB:
             self.set_status(agent_id, str(status))
             if not fields:
                 return
+        has_agent = "agent" in fields
+        agent = fields.pop("agent", None)
         cols = ", ".join(f"{k}=?" for k in fields)
         with self.tx() as c:
-            c.execute(f"UPDATE agents SET {cols} WHERE id=?", (*fields.values(), agent_id))
+            if has_agent:
+                if agent is None:
+                    c.execute("DELETE FROM agent_roles WHERE agent_id=?", (agent_id,))
+                else:
+                    c.execute("INSERT INTO agent_roles (agent_id, agent) "
+                              "SELECT id, ? FROM agents WHERE id=? "
+                              "ON CONFLICT(agent_id) DO UPDATE SET agent=excluded.agent", (agent, agent_id))
+            if fields:
+                c.execute(f"UPDATE agents SET {cols} WHERE id=?", (*fields.values(), agent_id))
         if "pipeline" in fields:   # the review / merge pipeline's step for this worker
             bus.publish_agent(self, "agent.pipeline", agent_id, pipeline=fields["pipeline"],
                               merge_failed=bool(fields.get("merge_failed")))
@@ -4379,14 +4424,18 @@ class DB:
     def add_routing_decision(self, repo_root: str, *, task_id: str | None, agent_id: str | None,
                              weight: str | None, baseline_profile: str, profile: str,
                              learned: bool, prior: bool = False,
-                             ts: float | None = None, demoted_from: str | None = None) -> None:
+                             ts: float | None = None, demoted_from: str | None = None,
+                             agent: str | None = None) -> None:
         with self.tx() as c:
-            c.execute(
+            inserted = c.execute(
                 "INSERT INTO routing_decisions (repo_root, ts, task_id, agent_id, weight, "
                 "baseline_profile, profile, learned, prior, demoted_from) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (repo_root, time.time() if ts is None else ts, task_id, agent_id, weight,
                  baseline_profile, profile, int(learned), int(learned and prior), demoted_from),
             )
+            if agent is not None:
+                c.execute("INSERT INTO routing_decision_agents (decision_id, agent) VALUES (?,?)",
+                          (inserted.lastrowid, agent))
 
     def set_budget_state(self, agent_id: str, state: str | None) -> None:
         with self.tx() as c:
@@ -4395,6 +4444,11 @@ class DB:
     def set_routing_agent(self, task_id: str, agent_id: str) -> None:
         with self.tx() as c:
             c.execute("UPDATE routing_decisions SET agent_id=? WHERE task_id=?", (agent_id, task_id))
+            c.execute("INSERT INTO routing_decision_agents (decision_id, agent) "
+                      "SELECT rd.id, r.agent FROM routing_decisions rd "
+                      "JOIN agent_roles r ON r.agent_id=rd.agent_id "
+                      "WHERE rd.task_id=? AND r.agent IS NOT NULL "
+                      "ON CONFLICT(decision_id) DO UPDATE SET agent=excluded.agent", (task_id,))
 
     def note_routing_outcome(self, agent_id: str, *, review: bool = False, escalated: bool = False,
                              outcome: str | None = None) -> None:
@@ -4407,13 +4461,17 @@ class DB:
             )
 
     def routing_decision_for_agent(self, agent_id: str) -> RoutingDecision | None:
-        row = self.conn.execute("SELECT * FROM routing_decisions WHERE agent_id=? ORDER BY id DESC LIMIT 1",
+        row = self.conn.execute("SELECT rd.*, r.agent FROM routing_decisions rd "
+                                "LEFT JOIN routing_decision_agents r ON r.decision_id=rd.id "
+                                "WHERE rd.agent_id=? ORDER BY rd.id DESC LIMIT 1",
                                 (agent_id,)).fetchone()
         return _load(RoutingDecision, row) if row else None
 
     def list_routing_decisions(self, repo_root: str | None = None) -> list[RoutingDecision]:
         where, args = ("WHERE repo_root=?", (repo_root,)) if repo_root else ("", ())
-        rows = self.conn.execute(f"SELECT * FROM routing_decisions {where} ORDER BY id", args)
+        rows = self.conn.execute("SELECT rd.*, r.agent FROM routing_decisions rd "
+                                 "LEFT JOIN routing_decision_agents r ON r.decision_id=rd.id "
+                                 f"{where} ORDER BY rd.id", args)
         return [_load(RoutingDecision, r) for r in rows]
 
     def unseeded_finished_decisions(self, repo_root: str) -> list[tuple[RoutingDecision, str, str | None]]:
@@ -4421,8 +4479,9 @@ class DB:
         `brindle learning seed`, each with its task's text and files JSON ('' / None when the
         decision has no task row)."""
         rows = self.conn.execute(
-            "SELECT rd.*, t.task_text AS _text, t.files AS _files, t.weight AS _tweight "
+            "SELECT rd.*, r.agent, t.task_text AS _text, t.files AS _files, t.weight AS _tweight "
             "FROM routing_decisions rd LEFT JOIN tasks t ON t.id = rd.task_id "
+            "LEFT JOIN routing_decision_agents r ON r.decision_id=rd.id "
             "WHERE rd.repo_root=? AND rd.seeded_at IS NULL "
             "AND rd.outcome IN ('merged', 'removed_unmerged') ORDER BY rd.id", (repo_root,))
         out = []
@@ -4447,7 +4506,8 @@ class DB:
     def list_routing_decisions_for_live_agents(self) -> list[RoutingDecision]:
         """Return routing decisions for agents that are currently running (not dismissed or done)."""
         rows = self.conn.execute(
-            "SELECT rd.* FROM routing_decisions rd "
+            "SELECT rd.*, r.agent FROM routing_decisions rd "
+            "LEFT JOIN routing_decision_agents r ON r.decision_id=rd.id "
             "JOIN agents a ON rd.agent_id = a.id "
             "WHERE a.dismissed_at IS NULL AND a.status != 'done' "
             "ORDER BY rd.id"

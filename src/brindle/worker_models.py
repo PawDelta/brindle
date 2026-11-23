@@ -17,14 +17,16 @@ import threading
 import time
 from dataclasses import dataclass
 
+from brindle import model_catalog, model_names
+
 TIERS = ("light", "medium", "heavy")
 CLI, LOCAL, KEY = "cli", "local", "key"
 HOW = {CLI: "a signed-in CLI", LOCAL: "local (Ollama)", KEY: "hosted, with an API key (OpenRouter)"}
 OPENROUTER_KEY = "OPENROUTER_API_KEY"
 OPENROUTER_URL = "https://openrouter.ai/api/v1"
 
-# Ranked worker profiles for each tier. Availability checks fall through this
-# order; the learner may choose another eligible candidate when enabled.
+# Ranked profile routing policy, not model facts. Availability checks fall
+# through this order; model metadata and suitability live in model_catalog.
 TIER_PREFERENCES: dict[str, tuple[str, ...]] = {
     "light": ("dev.gpt", "dev.claude-haiku", "dev.claude-sonnet", "developer", "dev.qwen3-coder",
               "dev.gpt-luna", "dev.gpt-terra"),
@@ -48,28 +50,44 @@ class Model:
     key_env: str | None = None
 
 
+def model_tiers(model: str) -> tuple[str, ...]:
+    found = model_catalog.lookup(model)
+    return found.tiers if found else ()
+
+
+def _pick(pick_id: str, model: str, how: str, provider: str, profile: str,
+          tiers: tuple[str, ...] = ()) -> Model:
+    return Model(pick_id, model_names.model_name(model, provider).display, how, provider, profile,
+                 model_tiers(model) or tiers, model, OPENROUTER_KEY if how == KEY else None)
+
+
+# These are existing profile bindings. Adding model facts never requires
+# another name, price or tier table here; CLI-default choices have no model.
 CATALOG: tuple[Model, ...] = (
-    Model("claude-haiku", "Claude Haiku", CLI, "claude", "dev.claude-haiku", ("light",)),
-    Model("claude-sonnet", "Claude Sonnet", CLI, "claude", "dev.claude-sonnet", ("light", "medium")),
-    Model("claude-opus", "Claude Opus", CLI, "claude", "dev.claude-opus", ("medium", "heavy")),
+    _pick("claude-haiku", "haiku", CLI, "claude", "dev.claude-haiku"),
+    _pick("claude-sonnet", "sonnet", CLI, "claude", "dev.claude-sonnet"),
+    _pick("claude-opus", "opus", CLI, "claude", "dev.claude-opus"),
+    _pick("claude-fable", "fable", CLI, "claude", "dev.claude-fable"),
     Model("codex", "Codex", CLI, "codex", "dev.gpt"),
-    Model("gpt-6-luna", "GPT-6-Luna", CLI, "codex", "dev.gpt-luna", ("light",)),
-    Model("gpt-6.1-terra", "GPT-6.1-Terra", CLI, "codex", "dev.gpt-terra", ("light", "medium")),
-    Model("gpt-6.1-sol", "GPT-6.1-Sol", CLI, "codex", "dev.gpt-sol", ("medium", "heavy")),
-    Model("gpt-6-astra", "GPT-6-Astra", CLI, "codex", "dev.gpt-astra", ("heavy",)),
-    Model("antigravity", "Gemini (Antigravity)", CLI, "antigravity", "dev.gemini", ("medium", "heavy")),
-    Model("local-qwen3-coder", "Qwen3 Coder 30B", LOCAL, "native", "dev.qwen3-coder", ("light", "medium"),
-          "qwen3-coder:30b"),
-    Model("or-qwen3-coder", "Qwen3 Coder", KEY, "native", "developer-or-qwen3-coder", ("light", "medium"),
-          "qwen/qwen3-coder", OPENROUTER_KEY),
-    Model("or-glm-4.6", "GLM 4.6", KEY, "native", "developer-or-glm-4.6", ("medium", "heavy"),
-          "z-ai/glm-4.6", OPENROUTER_KEY),
-    Model("or-kimi-k2", "Kimi K2", KEY, "native", "developer-or-kimi-k2", ("medium", "heavy"),
-          "moonshotai/kimi-k2", OPENROUTER_KEY),
+    _pick("gpt-6-luna", "gpt-6-luna", CLI, "codex", "dev.gpt-luna"),
+    _pick("gpt-6.1-terra", "gpt-6.1-terra", CLI, "codex", "dev.gpt-terra"),
+    _pick("gpt-6.2-sol", "gpt-6.2-sol", CLI, "codex", "dev.gpt-sol"),
+    _pick("gpt-6.2-astra", "gpt-6.2-astra", CLI, "codex", "dev.gpt-astra"),
+    _pick("antigravity", "gemini-4-argon", CLI, "antigravity", "dev.gemini"),
+    _pick("local-qwen3-coder", "qwen3-coder:30b", LOCAL, "native", "dev.qwen3-coder"),
+    _pick("or-qwen3-coder", "qwen/qwen3-coder", KEY, "native", "developer-or-qwen3-coder", ("light", "medium")),
+    _pick("or-glm-4.6", "z-ai/glm-4.6", KEY, "native", "developer-or-glm-4.6", ("medium", "heavy")),
+    _pick("or-kimi-k2", "moonshotai/kimi-k2", KEY, "native", "developer-or-kimi-k2", ("medium", "heavy")),
 )
 
 
+# Saved routing choices follow the upgraded built-in profiles.
+_PICK_ALIASES = {"gpt-6.1-sol": "gpt-6.2-sol", "gpt-6-astra": "gpt-6.2-astra"}
+
+
 def find(model_id: object) -> Model | None:
+    if isinstance(model_id, str):
+        model_id = _PICK_ALIASES.get(model_id, model_id)
     return next((m for m in CATALOG if m.id == model_id), None)
 
 

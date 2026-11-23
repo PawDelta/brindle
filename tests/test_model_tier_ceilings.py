@@ -91,7 +91,7 @@ def test_max_weight_medium_filters_heavy_candidate_from_medium_routing(db, repo,
     monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
 
     candidates_seen = []
-    def fake_choose_why(db_arg, cfg_arg, repo_arg, task_arg, files_arg, candidates, weight, default):
+    def fake_choose_why(db_arg, cfg_arg, repo_arg, task_arg, files_arg, candidates, weight, default, **options):
         candidates_seen.extend(candidates)
         return candidates[0], "first"
 

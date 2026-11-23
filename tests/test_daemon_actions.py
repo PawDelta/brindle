@@ -489,6 +489,8 @@ def test_a_locked_kind_is_never_overridden_by_learning_and_an_unlocked_one_repor
     monkeypatch.setattr(pro_learning, "CloudLearner", lambda repo_root: Prefers())
     monkeypatch.setattr("shutil.which", lambda cli: f"/usr/bin/{cli}")
     monkeypatch.setattr(quota, "headroom", lambda provider, cfg=None, repo_root=None: 100.0)
+    # Routing checks each candidate's launch environment via git and tmux.
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
     config.set_repo(str(repo), "learning", "cloud")
     code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "repo", "kinds": {
         "medium": {"model": "developer", "fallbacks": ["developer-codex"]},      # a choice locks it

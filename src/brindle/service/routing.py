@@ -9,12 +9,88 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from brindle import config, profiles
 from brindle.pro import managed_models, team_policy
-from brindle.service.dto import RoutingLockDTO, RoutingPolicyDTO
+from brindle.service.dto import RoutingLockDTO, RoutingModelOrderDTO, RoutingPolicyDTO
+from brindle.service.errors import ServiceError
 
 
 def provider_name(provider: str | None) -> str | None:
     return team_policy.CLI_NAMES.get(provider, provider) if provider else None
+
+
+def legacy_medium_override(cfg: config.RepoConfig, name: str, *, pinned: bool) -> list[str] | None:
+    """The destination's explicit Medium order when the effective row uses it."""
+    if name == "reviewer" and (pinned or cfg.reviewer_models_inherited):
+        return None
+    return cfg.agent_models.get(name, {}).get("medium")
+
+
+def shadows_legacy_medium(settings: dict, name: str, *, inherits_medium: bool) -> bool:
+    models = settings.get("agent_models")
+    sizes = models.get(name) if isinstance(models, dict) else None
+    # An empty map resets all inherited overrides for this role.
+    return isinstance(sizes, dict) and ((inherits_medium and not sizes) or any(
+        config.normalize_weight(size) == "medium" and isinstance(order, list) for size, order in sizes.items()))
+
+
+def agent_model_orders(cfg: config.RepoConfig, name: str, legacy: RoutingModelOrderDTO | None
+                       ) -> dict[str, RoutingModelOrderDTO]:
+    if name == "reviewer" and cfg.review_profile and legacy:
+        order = RoutingModelOrderDTO(model=legacy.model, fallbacks=legacy.fallbacks, locked=legacy.locked)
+        return dict.fromkeys(config.WEIGHTS, order)
+    pools = cfg.agent_models.get(name)
+    if pools is None and name == "supervisor" and legacy and (legacy.model or legacy.fallbacks):
+        return {size: RoutingModelOrderDTO(model=legacy.model, fallbacks=legacy.fallbacks, locked=legacy.locked)
+                for size in config.WEIGHTS}
+    inherited = legacy if name == "reviewer" and cfg.reviewer_models_inherited else None
+    return {size: RoutingModelOrderDTO(
+        model=names[0] if names else None, fallbacks=names[1:], locked=inherited.locked if inherited else True,
+        learned=inherited.learned if inherited and size != "light" else None,
+    ) for size, names in (pools or {}).items()}
+
+
+def parse_agent_model_changes(agents: dict, known: set[str], library: str | None
+                              ) -> dict[str, dict[str, list[str] | None]]:
+    changes = {}
+    for name, spec in agents.items():
+        try:
+            is_agent = name in known and profiles.kind_of(name, library) == "agent"
+        except (KeyError, profiles.ProfileError):
+            is_agent = False
+        if not is_agent:
+            raise ServiceError("invalid", f"no routable agent named {name!r}")
+        models = spec.get("models") if isinstance(spec, dict) else None
+        if not isinstance(models, dict):
+            raise ServiceError("invalid", f"{name}: models must map sizes to overrides")
+        for size, order in models.items():
+            if size not in config.WEIGHTS:
+                raise ServiceError("invalid", f"{name}: size must be one of {', '.join(config.WEIGHTS)}")
+            names = None
+            if order is not None:
+                model = order.get("model") if isinstance(order, dict) else None
+                if not isinstance(model, str) or not model:
+                    raise ServiceError("invalid", f"{name} {size}: model must be a profile name")
+                fallbacks = order.get("fallbacks", [])
+                if not isinstance(fallbacks, list) or not all(isinstance(n, str) and n for n in fallbacks):
+                    raise ServiceError("invalid", f"{name} {size}: fallbacks must be a list of profile names")
+                names = list(dict.fromkeys([model, *fallbacks]))
+            changes.setdefault(name, {})[size] = names
+    return changes
+
+
+def merge_agent_model_changes(value, changes: dict[str, dict[str, list[str] | None]]) -> dict:
+    stored = dict(value) if isinstance(value, dict) else {}
+    for agent, sizes in changes.items():
+        old = stored.pop(agent, None)
+        pools = dict(old) if isinstance(old, dict) else {}
+        for size, names in sizes.items():
+            pools = {k: v for k, v in pools.items() if config.normalize_weight(k) != size}
+            if names is not None:
+                pools[size] = names
+        if pools:
+            stored[agent] = pools
+    return stored
 
 
 @dataclass

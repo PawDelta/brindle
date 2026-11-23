@@ -2306,7 +2306,7 @@ def learning_seed() -> None:
         except (TypeError, ValueError):
             files = ()
         info = learning_mod.TaskInfo(repo_root=repo_root, task=text, files=files, weight=d.weight,
-                                     agent_id=d.agent_id, profile=d.profile)
+                                     agent_id=d.agent_id, profile=d.profile, agent=d.agent)
         items.append((d.id, info, learning_mod.Outcome(d.outcome, checks_passed=d.outcome == "merged"), d))
     sent = learner.seed(items)
     if sent:

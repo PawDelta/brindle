@@ -357,6 +357,7 @@ def _bool(value: str) -> bool:
 
 
 _BLOCK_ITEM = re.compile(r"^\s+-\s*(.*)$")
+_FRONTMATTER = re.compile(r"---[^\n]*\n(.*?)^---[ \t]*$(.*)", re.S | re.M)
 
 
 def _frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -368,7 +369,7 @@ def _frontmatter(text: str) -> tuple[dict[str, str], str]:
     if not text.startswith("---"):
         return meta, body
     # the closing fence is a line of its own: a value may contain "---"
-    m = re.match(r"---[^\n]*\n(.*?)^---[ \t]*$(.*)", text, re.S | re.M)
+    m = _FRONTMATTER.match(text)
     if m is None:
         raise ProfileError("frontmatter opened with '---' is never closed with another '---' line")
     header, body = m.groups()
@@ -680,6 +681,17 @@ def _merge_rules(parent: str | None, child: str | None) -> str:
     return "\n" + "\n".join(merged) if merged else ""
 
 
+def _merge(parent_meta: dict[str, str], parent_body: str,
+           meta: dict[str, str], body: str) -> tuple[dict[str, str], str]:
+    merged = {**parent_meta, **meta}
+    rules = _merge_rules(parent_meta.get("rules"), meta.get("rules"))
+    if rules:
+        merged["rules"] = rules
+    else:
+        merged.pop("rules", None)
+    return merged, "\n\n".join(p for p in (parent_body.strip(), body.strip()) if p)
+
+
 def _resolve(name: str, repo_root: str | None, chain: tuple[str, ...] = ()) -> tuple[dict[str, str], str]:
     """``name``'s frontmatter and body with its ``extends`` chain folded in:
     the child's fields override the parent's, ``rules`` packs accumulate, and
@@ -703,13 +715,99 @@ def _resolve(name: str, repo_root: str | None, chain: tuple[str, ...] = ()) -> t
             + " -> ".join((*chain, name, parent))
         )
     parent_meta, parent_body = _resolve(parent, repo_root, (*chain, name))
-    merged = {**parent_meta, **meta, "extends": parent}
-    rules = _merge_rules(parent_meta.get("rules"), meta.get("rules"))
-    if rules:
-        merged["rules"] = rules
+    return _merge(parent_meta, parent_body, {**meta, "extends": parent}, body)
+
+
+_ROLE_ROOTS = {"developer", "reviewer", "supervisor"}
+_MODEL_FIELDS = {"provider", "model", "effort", "api", "base_url", "api_key_env",
+                 "context_tokens", "local", "fallback", "auth", "headless", "strict_mcp",
+                 "setting_sources", "tool_search"}
+_PROVIDER_BASES = {"codex": "gpt", "antigravity": "gemini", "opencode": "opencode",
+                   "native": "qwen3-coder"}
+
+
+def _agent_layer(name: str, repo_root: str | None, *, stop_at: str | None = None
+                 ) -> tuple[str, dict[str, str], str]:
+    """The role root and layers above it (or a provider base), merged as usual."""
+    _resolve(name, repo_root)  # validate missing parents, cycles and depth first
+    layers = []
+    current = current_name(name, repo_root)
+    root = "developer"
+    while current not in _ROLE_ROOTS and current != stop_at:
+        meta, body = _frontmatter(_read(current, repo_root)[0])
+        layers.append((meta, body))
+        parent = meta.get("extends")
+        if not parent:
+            if meta.get("role") in _ROLE_ROOTS:
+                root = meta["role"]
+            break
+        current = current_name(parent, repo_root)
     else:
-        merged.pop("rules", None)
-    return merged, "\n\n".join(p for p in (parent_body.strip(), body.strip()) if p)
+        root = current
+    merged, prompt = {}, ""
+    for meta, body in reversed(layers):
+        merged, prompt = _merge(merged, prompt, meta, body)
+    return root, merged, prompt
+
+
+def kind_of(name: str, repo_root: str | None = None) -> str:
+    """Classify an existing profile without changing how legacy profiles load."""
+    current = current_name(name, repo_root)
+    canonical = model_names.canonical(current)
+    if current == canonical and canonical.startswith(("dev.", "review.")) and canonical in builtin_names():
+        return "model"
+    _, meta, _ = _agent_layer(current, repo_root)
+    return "pinned" if any(key in meta for key in ("provider", "model", "effort")) else "agent"
+
+
+def agent_root(name: str, repo_root: str | None = None) -> str:
+    """The role root (developer, reviewer or supervisor) ``compose`` builds
+    agent ``name`` on."""
+    return _agent_layer(name, repo_root)[0]
+
+
+def compose(agent: str, model: str, repo_root: str | None = None) -> Profile:
+    """Join an agent's role layer to a model, retaining the provider's tool ceiling.
+
+    Keep same-role model layers above the provider base. Across roles, take only
+    runtime fields so a reviewer never inherits developer tools or instructions.
+    """
+    if kind_of(agent, repo_root) != "agent":
+        raise ProfileError(f"profile {agent!r} pins a model; use it directly")
+    root, layer, prompt = _agent_layer(agent, repo_root)
+    model = current_name(model, repo_root)
+    model_meta, _ = _resolve(model, repo_root)
+    provider = model_meta.get("provider", "claude")
+    base = root
+    if root in ("developer", "reviewer") and provider != "claude":
+        suffix = _PROVIDER_BASES.get(provider)
+        if suffix is None:
+            raise ProfileError(f"no {root} base for provider {provider!r}")
+        base = f"{'dev' if root == 'developer' else 'review'}.{suffix}"
+    base_meta, base_body = _resolve(base, repo_root)
+    if base_role(model, repo_root) == root:
+        _, model_layer, model_prompt = _agent_layer(model, repo_root, stop_at=base)
+        meta, body = _merge(base_meta, base_body, model_layer, model_prompt)
+    else:
+        meta, body = base_meta, base_body
+    # Only the selected model supplies runtime fields, including their absence:
+    # a hosted native model must not inherit the local role base's Ollama endpoint.
+    runtime = {key: value for key, value in model_meta.items()
+               if key in _MODEL_FIELDS or key.startswith("env.")}
+    meta = {key: value for key, value in meta.items()
+            if key not in _MODEL_FIELDS and not key.startswith("env.")}
+    meta.update(runtime)
+    layer = {key: value for key, value in layer.items()
+             if key not in _MODEL_FIELDS and key not in ("name", "extends", "role")}
+    meta, body = _merge(meta, body, layer, prompt)
+    tools = _list(base_meta.get("allowed_tools"))
+    requested = _list(meta.get("allowed_tools")) or []
+    if tools is not None:
+        tools = [tool for tool in tools if tool in requested]
+    else:
+        tools = _list(meta.get("allowed_tools"))
+    profile = replace(_resolved_profile(meta, body, model, repo_root), allowed_tools=tools)
+    return _with_catalog_model(_with_repo_add_dirs(profile, repo_root))
 
 
 @_request_cached
@@ -717,6 +815,10 @@ def _load(name: str, repo_root: str | None) -> Profile:
     if name in model_names.ALIASES and _read_exact(name, repo_root) is None:
         name = model_names.ALIASES[name]     # an old built-in id: load the renamed profile
     meta, body = _resolve(name, repo_root)
+    return _resolved_profile(meta, body, name, repo_root)
+
+
+def _resolved_profile(meta: dict[str, str], body: str, name: str, repo_root: str | None) -> Profile:
     profile = replace(_build(meta, body, name), name=name)
     if "auth" in meta:
         return profile
@@ -934,6 +1036,25 @@ def profile_text(name: str, description: str, prompt: str, *, extends: str | Non
     return PROFILE_TEMPLATE.format(
         name=name, description=" ".join(description.split()) or f"A {name} agent", head=head,
         rules=f"rules: {', '.join(rules)}\n" if rules else "", prompt=prompt)
+
+
+def edit_profile_text(text: str, fields: dict[str, str], prompt: str | None) -> str:
+    """Replace selected frontmatter fields, retaining the other lines as written."""
+    _, body = _frontmatter(text)  # report an unclosed header before editing
+    header = _FRONTMATTER.match(text) if text.startswith("---") else None
+    lines = []
+    replacing = False
+    for line in header[1].splitlines(keepends=True) if header else []:
+        if not line.strip() or line.lstrip().startswith("#"):
+            lines.append(line)
+            continue
+        if not line.startswith((" ", "\t")):
+            replacing = line.partition(":")[0].strip() in fields
+        if not replacing:
+            lines.append(line)
+    lines.extend(f"{key}: {value}\n" for key, value in fields.items())
+    tail = (body if header else f"\n{body}") if prompt is None else f"\n{prompt}\n"
+    return "---\n" + "".join(lines) + "---" + tail
 
 
 def _mechanical_lines(pack: RulePack) -> list[str]:

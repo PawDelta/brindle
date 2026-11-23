@@ -748,7 +748,8 @@ def retry_reviewer(db, agent, ws):
         # Preserve the exact task (focus and check results included), profile,
         # parent and commit, but start a new conversation and MCP connection.
         replacement = agents.spawn(db, ws, agent.profile, prompt=agent.task, parent_id=agent.parent_id,
-                                   mode="review", background_setup=True, review_sha=agent.review_sha)
+                                   mode="review", background_setup=True, review_sha=agent.review_sha,
+                                   agent_name=agent.agent)
         if agent.review_slot is not None:
             db.update_agent(replacement.id, review_slot=agent.review_slot)
     except Exception as exc:

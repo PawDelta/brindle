@@ -259,6 +259,10 @@ class RepoConfig:
     airgap: bool = False
     # Weight routing: task weight -> profiles to try, in order (see autopilot.choose_profile).
     routing: dict[str, list[str]] = field(default_factory=lambda: {k: list(v) for k, v in DEFAULT_ROUTING.items()})
+    # Per agent and weight, an explicit model order over the shared routing table.
+    agent_models: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+    # Derived on load: keep legacy sizing/learning until the reviewer opts into a size table.
+    reviewer_models_inherited: bool = False
     fable_for_design_only: bool = True
     # Effective tier's origin for doctor and routing-skip diagnostics; not a setting.
     routing_sources: dict[str, str] = field(default_factory=lambda: {k: "DEFAULT_ROUTING" for k in WEIGHTS})
@@ -480,14 +484,16 @@ def kind_overrides(found: object) -> dict[str, dict[str, str]]:
     return out
 
 
-def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: str | None = None) -> RepoConfig:
+def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: str | None = None,
+                     include_local: bool = True) -> RepoConfig:
     """The settings for ``repo_root``: its local file over its shared one over
     the person's ~/.brindle/config.json. ``user_only``: the person's file
     alone, as every repo starts from it (the app's Agents tab). ``branch``:
-    read the shared file as committed there (see ``_read_shared``)."""
+    read the shared file as committed there (see ``_read_shared``).
+    ``include_local=False`` reads through the shared layer for a shared edit."""
     base = config_root(repo_root) / CONFIG_DIR
     shared = {} if user_only else _read_shared(base.parent, branch)
-    local = {} if user_only else _read_json(base / LOCAL_CONFIG_FILE)
+    local = _read_json(base / LOCAL_CONFIG_FILE) if include_local and not user_only else {}
     user = user_settings()
 
     cfg = RepoConfig()
@@ -518,7 +524,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
     from brindle.profiles import current_name
 
     def current(n: str) -> str:
-        return current_name(n, str(repo_root))
+        return current_name(n, None if user_only else str(repo_root))
 
     for key in ("default_agent", "reviewer", "review_profile"):
         if isinstance(getattr(cfg, key, None), str):
@@ -563,6 +569,18 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 if norm_tier in WEIGHTS and isinstance(names, list):
                     cfg.routing[norm_tier] = [current(n) for n in names if isinstance(n, str)]
                     cfg.routing_sources[norm_tier] = str(path)
+        agent_models = source.get("agent_models")
+        if isinstance(agent_models, dict):
+            for agent, tiers in agent_models.items():
+                if not isinstance(agent, str) or not isinstance(tiers, dict):
+                    continue
+                if not tiers:
+                    cfg.agent_models[current(agent)] = {}
+                for tier, names in tiers.items():
+                    norm_tier = normalize_weight(tier)
+                    if norm_tier in WEIGHTS and isinstance(names, list):
+                        cfg.agent_models.setdefault(current(agent), {})[norm_tier] = [
+                            current(n) for n in names if isinstance(n, str)]
     for source in (user, shared, local):  # per kind, a later scope overriding an earlier one
         cfg.routing_locked.update(locked_kinds(source.get("routing_locked")))
     for source in (user, shared, local):
@@ -572,6 +590,17 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
 
     # The models picked on the picker's workers screen (the person's own profiles, for user_only).
     worker_models.apply(cfg, user, str(repo_root), user_library=user_only)
+    if "reviewer" not in cfg.agent_models:
+        from brindle.review_scope import CODEX_LIGHT_PROFILE, LIGHT_PROFILE
+
+        normal = list(dict.fromkeys([cfg.reviewer, *cfg.reviewer_fallbacks]))
+        light = [LIGHT_PROFILE, CODEX_LIGHT_PROFILE]
+        if not cfg.review_sizing or cfg.reviewer != "review.claude-sonnet.high":
+            light = normal
+        if cfg.review_profile:
+            normal = light = [cfg.review_profile]
+        cfg.agent_models["reviewer"] = {size: list(light if size == "light" else normal) for size in WEIGHTS}
+        cfg.reviewer_models_inherited = True
     for source in (shared, local):  # per weight, so a repo can override one and keep the rest
         second = source.get("second_review")
         if isinstance(second, dict):
@@ -749,10 +778,14 @@ def _change_json(path: Path, change) -> None:
 def set_local(repo_root: str | Path, key: str, value: object) -> Path:
     """Set one key in ``.brindle/config.local.json`` (gitignored: this person's
     own settings; other keys are kept)."""
+    return update_local(repo_root, key, lambda _: value)
+
+
+def update_local(repo_root: str | Path, key: str, change) -> Path:
     base = config_root(repo_root) / CONFIG_DIR
     base.mkdir(parents=True, exist_ok=True)
     path = base / LOCAL_CONFIG_FILE
-    _change_json(path, lambda data: data.__setitem__(key, value))
+    _change_json(path, lambda data: data.__setitem__(key, change(data.get(key))))
     ignore = base / ".gitignore"
     if not ignore.exists():
         ignore.write_text(f"{LOCAL_CONFIG_FILE}\n", encoding="utf-8")
@@ -762,9 +795,13 @@ def set_local(repo_root: str | Path, key: str, value: object) -> Path:
 def set_repo(repo_root: str | Path, key: str, value: object) -> Path:
     """Set one key in the repo's shared ``.brindle/config.json`` (committed:
     everyone's settings; other keys are kept)."""
+    return update_repo(repo_root, key, lambda _: value)
+
+
+def update_repo(repo_root: str | Path, key: str, change) -> Path:
     path = scope_paths(repo_root)["repo"]
     path.parent.mkdir(parents=True, exist_ok=True)
-    _change_json(path, lambda data: data.__setitem__(key, value))
+    _change_json(path, lambda data: data.__setitem__(key, change(data.get(key))))
     return path
 
 

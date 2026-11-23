@@ -252,6 +252,8 @@ def statuses() -> list[dict[str, Any]]:
 def install(provider: str, progress: Callable[[str], None]) -> dict[str, Any]:
     """Run the maker's install command, each line of its output to
     ``progress``, then find the CLI again. Turns the provider back on."""
+    from brindle.pro import auth
+
     _check(provider)
     command = OFFICIAL[provider]
     progress(f"$ {command}")
@@ -276,6 +278,7 @@ def install(provider: str, progress: Callable[[str], None]) -> dict[str, Any]:
         raise InstallError(f"{NAMES[provider]}'s installer finished, but brindle doesn't find {CLI[provider]}")
     if turned_off(provider):
         _set(provider, {})
+    auth.refresh_after_provider_update()
     return status(provider)
 
 

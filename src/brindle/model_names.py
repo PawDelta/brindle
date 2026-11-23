@@ -9,33 +9,17 @@ profile to all of that. A profile that pins no model is shown by its family
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from brindle import model_catalog
+from brindle.model_catalog import ModelName
 
 if TYPE_CHECKING:
     from brindle.profiles import Profile
 
 
-@dataclass(frozen=True)
-class ModelName:
-    family: str            # "Claude", "GPT", "Gemini", "Qwen"
-    display: str           # family and model: "Claude Opus", "GPT‑6.1 Sol"
-    maker: str             # "Anthropic", "OpenAI", "Google", "Local"
-
-
-# U+2011 (non-breaking hyphen) keeps "GPT‑6.1" on one line wherever it wraps.
-MODELS: dict[str, ModelName] = {
-    "haiku": ModelName("Claude", "Claude Haiku", "Anthropic"),
-    "sonnet": ModelName("Claude", "Claude Sonnet", "Anthropic"),
-    "opus": ModelName("Claude", "Claude Opus", "Anthropic"),
-    "fable": ModelName("Claude", "Claude Fable", "Anthropic"),
-    "gpt-6-luna": ModelName("GPT", "GPT‑6 Luna", "OpenAI"),
-    "gpt-6-astra": ModelName("GPT", "GPT‑6 Astra", "OpenAI"),
-    "gpt-6.1-sol": ModelName("GPT", "GPT‑6.1 Sol", "OpenAI"),
-    "gpt-6.1-terra": ModelName("GPT", "GPT‑6.1 Terra", "OpenAI"),
-    "gemini-4-argon": ModelName("Gemini", "Gemini 4 Argon", "Google"),
-    "qwen3-coder:30b": ModelName("Qwen", "Qwen3 Coder", "Local"),
-}
+MODELS: dict[str, ModelName] = {key: model.name for key, model in model_catalog.CATALOG.items()}
+MODELS.update({alias: MODELS[key] for alias, key in model_catalog.ALIASES.items()})
 
 # Per provider: the family a profile with no model pinned is shown as, its
 # maker, and the tool that runs it.
@@ -48,24 +32,17 @@ PROVIDERS: dict[str, tuple[ModelName, str]] = {
     "native": (ModelName("Local", "Local model", "Local"), "brindle"),
 }
 
-# A full Claude id (``claude-opus-5-5``, ``opus[1m]``) names its model by one of these.
-_CLAUDE_MODELS = ("haiku", "sonnet", "opus", "fable")
-
 
 def model_name(model: str | None, provider: str | None = None) -> ModelName:
     """The display name of ``model`` run by ``provider``; with no model, the
-    provider's family. An id this table doesn't know is shown as written."""
+    provider's family. New IDs retain their family and version."""
     fallback, _ = PROVIDERS.get(provider or "claude", PROVIDERS["claude"])
     if not model:
         return fallback
-    key = model.strip().lower()
-    if key in MODELS:
-        return MODELS[key]
-    if provider in (None, "claude", "subagent") or key.startswith("claude"):
-        for name in _CLAUDE_MODELS:
-            if name in key:
-                return MODELS[name]
-    return ModelName(fallback.family, model, fallback.maker)
+    found = model_catalog.lookup(model)
+    if found:
+        return found.name
+    return model_catalog.inferred_name(model, fallback)
 
 
 def tool_name(profile: Profile) -> str:
@@ -146,6 +123,8 @@ def rename_in_config(data: dict, keep: frozenset = frozenset()) -> tuple[dict, d
 def describe(profile: Profile, model: str | None = None) -> dict[str, str | None]:
     """``{display, maker, tool, effort}`` for ``profile``; ``model`` is its
     effective model when known (an env override), else the profile's own."""
-    name = model_name(model or profile.model, profile.provider)
+    selected = model or profile.model
+    name = model_name(selected, profile.provider)
+    _, effort = model_catalog.split_effort(selected) if selected else (None, None)
     return {"display": name.display, "maker": name.maker,
-            "tool": tool_name(profile), "effort": profile.effort or None}
+            "tool": tool_name(profile), "effort": effort or profile.effort or None}

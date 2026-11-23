@@ -31,120 +31,19 @@ data residency or fast mode makes it higher.
 from __future__ import annotations
 
 import datetime as _dt
-import re
-from dataclasses import dataclass
+from brindle.model_catalog import ALIASES, CATALOG, FREE, MTOK, Price, normalize
 
-AS_OF = _dt.date(2026, 10, 6)
+AS_OF = _dt.date(2026, 10, 6)  # oldest retained rates; new entries carry sources in model_catalog
 STALE_DAYS = 90
-MTOK = 1_000_000
+FREE_LABEL = "Free"
 
-
-@dataclass(frozen=True)
-class Price:
-    """US dollars per million tokens."""
-    input: float
-    output: float
-    cache_write: float
-    cache_read: float
-
-    def cost(self, input_tokens: int = 0, output_tokens: int = 0, cache_write_tokens: int = 0,
-             cache_read_tokens: int = 0) -> float:
-        return (input_tokens * self.input + output_tokens * self.output
-                + cache_write_tokens * self.cache_write + cache_read_tokens * self.cache_read) / MTOK
-
-
-FREE = Price(0.0, 0.0, 0.0, 0.0)
-FREE_LABEL = "Free"   # what a known-free model's spend reads as, instead of "$0.00"
-
-
-def _anthropic(inp: float, out: float, read: float | None = None) -> Price:
-    """Anthropic: a 5-minute cache write is 1.25x input; a read 0.1x unless the page says otherwise."""
-    return Price(inp, out, inp * 1.25, inp * 0.1 if read is None else read)
-
-
-def _openai(inp: float, cached: float, out: float, write: float | None = None) -> Price:
-    """OpenAI: ``write`` where the page lists a cache-write price, else the input rate."""
-    return Price(inp, out, inp if write is None else write, cached)
-
-
-PRICES: dict[str, Price] = {
-    "gemini-4-argon": Price(4, 20, 4, 0.2),   # after PROMOS' launch rate ends
-    # Anthropic
-    "claude-fable-5-1": _anthropic(10, 50, read=0.25),
-    "claude-mythos-5-1": _anthropic(10, 50, read=0.25),
-    "claude-fable-5": _anthropic(10, 50),
-    "claude-mythos-5": _anthropic(10, 50),
-    "claude-opus-5-5": _anthropic(4, 20, read=0.20),
-    "claude-opus-5": _anthropic(5, 25),
-    "claude-opus-4-8": _anthropic(5, 25),
-    "claude-opus-4-7": _anthropic(5, 25),
-    "claude-opus-4-6": _anthropic(5, 25),
-    "claude-opus-4-5": _anthropic(5, 25),
-    "claude-opus-4-1": _anthropic(15, 75),
-    "claude-opus-4": _anthropic(15, 75),
-    "claude-opus-4-0": _anthropic(15, 75),
-    # Cache reads are 0.05x input for the 5.5 Sonnet/Opus models, i.e. $0.10 per M here
-    # (https://platform.claude.com/docs/en/about-claude/pricing, checked 2026-11-17;
-    # Opus 5.5 above is $0.20 and Haiku 5.5 below $0.01, both matching the table).
-    "claude-sonnet-5-5": _anthropic(2, 10, read=0.10),
-    "claude-sonnet-5": _anthropic(2, 10),
-    "claude-sonnet-4-6": _anthropic(3, 15),
-    "claude-sonnet-4-5": _anthropic(3, 15),
-    "claude-sonnet-4": _anthropic(3, 15),
-    "claude-sonnet-4-0": _anthropic(3, 15),
-    "claude-haiku-5-5": _anthropic(0.10, 0.50),   # prompts up to 100K tokens
-    "claude-haiku-4-5": _anthropic(1, 5),
-    "claude-3-5-haiku": _anthropic(0.80, 4),
-    # OpenAI (Standard tier)
-    "gpt-6-astra": _openai(10, 1, 50, write=12.50),
-    "gpt-6.1-sol": _openai(2, 0.10, 10, write=2.50),
-    "gpt-6.1-terra": _openai(1, 0.05, 5, write=1.25),
-    "gpt-6-sol": _openai(2, 0.20, 10, write=2.50),
-    "gpt-6-luna": _openai(0.10, 0.01, 0.50, write=0.125),
-    "gpt-5.6-sol": _openai(4, 0.40, 20, write=5.00),
-    "gpt-5.6-terra": _openai(2, 0.20, 12, write=2.50),
-    "gpt-5.6-luna": _openai(0.20, 0.02, 1.20, write=0.25),
-    "gpt-5.5": _openai(5, 0.50, 30),
-    "gpt-5.4": _openai(2.50, 0.25, 15),
-    "gpt-5.4-mini": _openai(0.75, 0.075, 4.50),
-    "gpt-5.4-nano": _openai(0.20, 0.02, 1.25),
-    "gpt-5.3-codex": _openai(1.75, 0.175, 14),
-    "gpt-5.2": _openai(1.75, 0.175, 14),
-    "gpt-5.1": _openai(1.25, 0.125, 10),
-    "gpt-5": _openai(1.25, 0.125, 10),
-    "gpt-5-mini": _openai(0.25, 0.025, 2),
-    "gpt-5-nano": _openai(0.05, 0.005, 0.40),
-    "o3": _openai(2, 0.50, 8),
-    "o4-mini": _openai(1.10, 0.275, 4.40),
-}
-
-# Claude Code's model aliases, as profiles write them: each names the latest of its family.
-# Launch rates: model -> (first day the PRICES rate applies, launch price).
-# Verified 2026-11-16: Argon's launch rates end on November 30.
+# Compatibility views for callers that inspect the tables. Model facts live in
+# model_catalog; adding a row there supplies both the regular and launch rates.
+PRICES: dict[str, Price] = {key: model.price for key, model in CATALOG.items()}
+PRICES.update({alias: PRICES[key] for alias, key in ALIASES.items()})
 PROMOS: dict[str, tuple[_dt.date, Price]] = {
-    "gemini-4-argon": (_dt.date(2026, 12, 1), Price(2, 10, 2, 0.1)),
+    key: model.promo for key, model in CATALOG.items() if model.promo is not None
 }
-
-ALIASES = {
-    "fable": "claude-fable-5-1",
-    "opus": "claude-opus-5-5",
-    "sonnet": "claude-sonnet-5-5",
-    "haiku": "claude-haiku-5-5",
-}
-
-_PREFIXES = re.compile(r"^(?:(?:us|eu|apac|global)\.)?(?:anthropic|openai)[./]")
-_DATE = re.compile(r"(?:-|@)\d{8}$")
-_SUFFIX = re.compile(r"\[[^\]]*\]$")
-
-
-def normalize(model: str) -> str:
-    """``model`` as a key of ``PRICES``: lower case, without a provider prefix
-    (``anthropic/``, ``us.anthropic.``), a context tag (``[1m]``) or a date
-    suffix (``-20251001``)."""
-    m = _SUFFIX.sub("", model.strip().lower())
-    m = _PREFIXES.sub("", m)
-    m = _DATE.sub("", m)
-    return ALIASES.get(m, m)
 
 
 def _parse_override(value: object) -> Price | None:

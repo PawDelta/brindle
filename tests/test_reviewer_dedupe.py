@@ -96,6 +96,8 @@ def run_helper(ws, argv):
     pytest.param(["suite"], marks=pytest.mark.variant("#262: real MCP requests with a live holder of a different profile")),
 ], ids=["direct", "checks"])
 def test_second_request_for_the_same_commit_reuses_the_running_reviewer(db, ws, boss, monkeypatch, checks):
+    # Fake provider availability along with spawn so both reviewer slots can run in CI.
+    monkeypatch.setattr(agents, "unusable", lambda provider, env=None: None)
     if checks is None:
         started = fake_spawn(monkeypatch)
         first = agents.request_review(db, None, ws, "reviewer")
@@ -215,7 +217,10 @@ def mcp_review(db, tmp_path, monkeypatch):
                  None, time.time())
     db.add_agent(boss)
     monkeypatch.setattr(gates, "head", lambda ws: "old-sha")
-    started = fake_spawn(monkeypatch)
+    started = []
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws_, **kw: started.append(a))
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
+    monkeypatch.setattr(agents, "close", lambda db_, aid, *a, **k: db_.update_agent(aid, status="done"))
     reports = []
     monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append(to))
     monkeypatch.setattr(launch_health, "mcp_failed", lambda *a: True)
@@ -237,17 +242,19 @@ def mcp_review(db, tmp_path, monkeypatch):
 ])
 def test_mcp_failure_replaces_reviewer_once_per_commit(db, mcp_review, monkeypatch, trigger, outcome):
     ws, boss, started, reports, arm = mcp_review
-    old = arm(agents.request_review(db, boss, ws, "reviewer"))
+    profile = "dev.claude-opus"
+    old = arm(agents.request_review(db, boss, ws, profile))
     if trigger == "hook":
         launch_health.check_mcp(db, old)
-    new = agents.request_review(db, boss, ws, "reviewer")
+    new = agents.request_review(db, boss, ws, profile)
+    assert db.get_agent(new.id).agent == old.agent == "reviewer"
     assert new.id != old.id and new.review_sha == old.review_sha
     assert db.get_agent(new.id).review_slot == "" == old.review_slot   # its verdict replaces in the same slot
-    assert new.task == old.task and new.parent_id == old.parent_id
+    assert new.task.startswith(old.task) and new.parent_id == old.parent_id
     assert db.get_agent(old.id).status == "done"
     launch_health.check_mcp(db, old)  # stale hook must respect the replacement
     launch_health.recover_reviewer(db, old.id)  # a queued helper lost to an explicit request
-    assert agents.request_review(db, boss, ws, "reviewer").id == new.id
+    assert agents.request_review(db, boss, ws, profile).id == new.id
     assert len(started) == 2
 
     if outcome == "completed":
@@ -255,7 +262,7 @@ def test_mcp_failure_replaces_reviewer_once_per_commit(db, mcp_review, monkeypat
         agents.submit_review(db, new.id, True, "review complete")
         launch_health.recover_reviewer(db, old.id)
         assert len(started) == 2 and reports == []
-        requested = agents.request_review(db, boss, ws, "reviewer")
+        requested = agents.request_review(db, boss, ws, profile)
         assert requested.id not in (old.id, new.id) and len(started) == 3
         return
 
@@ -263,11 +270,11 @@ def test_mcp_failure_replaces_reviewer_once_per_commit(db, mcp_review, monkeypat
     launch_health.check_mcp(db, db.get_agent(new.id))
     assert db.get_agent(new.id).status == "done"
     with pytest.raises(agents.AgentError):
-        agents.request_review(db, boss, ws, "reviewer")
+        agents.request_review(db, boss, ws, profile)
     assert len(started) == 2 and reports == [boss.id]
     # A new commit gets its own recovery budget; no real git process is needed.
     monkeypatch.setattr(gates, "head", lambda ws: "new-sha")
-    next_review = arm(agents.request_review(db, boss, ws, "reviewer"))
+    next_review = arm(agents.request_review(db, boss, ws, profile))
     launch_health.check_mcp(db, next_review)
     assert len(started) == 4 and started[-1].review_sha == "new-sha"
 

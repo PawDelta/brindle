@@ -628,6 +628,7 @@ def spawn(
     milestone: str | None = None,
     defer_launch: bool = False,
     launched: Callable[[], None] | None = None,
+    agent_name: str | None = None,
 ) -> Agent:
     """Start an agent in ``ws``. ``defer_launch``: return once the agent's row
     exists and start its CLI on a thread of its own (a launch that fails marks
@@ -646,19 +647,23 @@ def spawn(
     with ``claim_goals`` it claims a hand-written ``.brindle/goals.md``."""
     from brindle import autopilot as pilot
     from brindle import identity_lock
+    from brindle.profiles import compose
 
     identity_lock.ensure_workspace(db, ws)   # no new agent in another identity's worktree
     session_root = pilot.root_of(db, parent_id) if parent_id else None
     if session_root:
         db.set_workspace_session_root(ws.id, session_root)
-    profile = load_profile(profile_name, ws.repo_root)
+    profile = (compose(agent_name, profile_name, ws.repo_root) if agent_name
+               else load_profile(profile_name, ws.repo_root))
     if (profile.name == "coordinator") != (mode == "coordinator"):
         # Only the sweep starts a coordinator (brindle.coordinator.wake).
         raise AgentError("the coordinator profile only runs as the repo's coordinator, which "
                          "brindle starts itself; pick another profile")
     hosted = local_fallback(profile, ws.repo_root)   # its local model isn't up
     if hosted:
-        profile_name, profile = hosted, load_profile(hosted, ws.repo_root)
+        profile_name = hosted
+        profile = (compose(agent_name, hosted, ws.repo_root) if agent_name
+                   else load_profile(hosted, ws.repo_root))
     provider = get_provider(provider_name or profile.provider)
     agent_id = new_id()
     # Headless is a Claude Code mode; other CLIs ignore the profile field.
@@ -716,9 +721,11 @@ def spawn(
         # pane and a resume use this one, whatever a sign-in changes meanwhile.
         config_home=provider_homes.decide(provider.name),
         weight=_weight_kind(weight) if mode in ("handoff", "assign") else None,
+        agent=agent_name,
     )
     with provider_homes.using(agent.provider, agent.config_home):
-        why = model_problem(profile_name, ws, agent=agent)
+        composed = {"profile": _profile_for(db, agent, ws)} if agent_name else {}
+        why = model_problem(profile_name, ws, agent=agent, **composed)
     if why:
         raise AgentError(why)
     db.add_agent(agent)
@@ -936,9 +943,11 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     from brindle.config import load_repo_config
 
     from brindle import guardrails
-    from brindle.profiles import load_rule_packs, rules_prompt
+    from brindle.profiles import compose, load_rule_packs, rules_prompt
 
-    profile = guardrails.effective(load_profile(agent.profile, ws.repo_root))
+    profile = (compose(agent.agent, agent.profile, ws.repo_root) if agent.agent
+               else load_profile(agent.profile, ws.repo_root))
+    profile = guardrails.effective(profile)
     if agent.mode == "doc_question":
         return replace(profile, provider=agent.provider, permission_mode="plan", headless=False,
                        strict_mcp=True, add_dirs=[], read_dirs=[], allowed_tools=[],
@@ -4630,6 +4639,7 @@ def delegate(
     admit: bool = True,
     detached: bool = False,
     milestone: str | None = None,
+    agent_name: str | None = None,
 ) -> tuple[Agent, Workspace]:
     """Start a worker, or raise ``NoRoom`` (nothing created) when the machine
     has no room for it (``admission``); ``admit`` False skips that, for a
@@ -4640,7 +4650,9 @@ def delegate(
     branch starts from the caller's current branch, so it sees the caller's
     committed work, and nobody edits the same files; ``start`` names another
     commit to start it from (it still merges into the caller's branch).
-    Refuses beyond the repo's ``max_agents`` workers running at once."""
+    ``agent_name``: the agent it works as, joined to ``profile`` (its model)
+    at launch (``spawn``). Refuses beyond the repo's ``max_agents`` workers
+    running at once."""
     from brindle import autopilot as pilot
     from brindle import repos
     from brindle.config import load_repo_config
@@ -4679,6 +4691,7 @@ def delegate(
                 done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
                 weight=weight, milestone=milestone,
                 **({"detached": True} if detached else {}),
+                **({"agent_name": agent_name} if agent_name else {}),
             )
 
         if not fair:
@@ -4865,14 +4878,23 @@ def _hand_edited_merges(ws: Workspace, prev_sha: str) -> list[str]:
 
 def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None = None,
                            repo_root: str | None = None, task: str | None = None) -> str:
-    """The reviewer profile to use when none was asked for explicitly:
-    ``cfg.review_profile`` if set, else ``cfg.reviewer``, unless brindle Pro's
-    learner picks one of the other built-in reviewers that can run here
-    (Codex installed; the local model served) because its evidence says it
-    reviews this kind of work better. The default is Sonnet at high effort;
-    a Claude worker reviewed by a Claude reviewer is fine."""
+    """Use an explicit size pool when configured, otherwise the legacy reviewer.
+
+    Existing configurations retain Sonnet-high and the optional learner. An
+    explicit reviewer map follows the shared table for its missing sizes.
+    """
     if cfg.review_profile:
         return cfg.review_profile
+    if "reviewer" in cfg.agent_models and not cfg.reviewer_models_inherited:
+        from brindle import review_scope
+
+        ws = db.get_workspace(worker.workspace_id) if db is not None and worker else None
+        if ws is not None:
+            return _review_choice(db, ws, None, cfg)[0]
+        size = review_scope.review_size(worker, db, repo_root or "", None, cfg)
+        pool = review_scope.model_order(cfg, size)
+        names, _ = review_scope.writer_model_last(pool, worker, repo_root or "")
+        return names[0] if names else cfg.reviewer
     if cfg.reviewer and cfg.reviewer != "review.claude-sonnet.high":
         return cfg.reviewer
     if db is None or not repo_root or cfg.routing_locked.get("reviewer"):
@@ -4898,6 +4920,8 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
         candidates.append("review.qwen3-coder")
     candidates = list(dict.fromkeys(candidates))
     files, weight = learning._task_files(db, worker, repo_root) if worker else ((), None)
+    if worker and worker.weight:
+        weight = worker.weight
     pick, _ = learning.choose_why(db, cfg, repo_root, task, candidates=candidates,
                                   default=cfg.reviewer, files=list(files) or None,
                                   weight=weight)
@@ -4951,11 +4975,11 @@ def _review_profile(db: DB, ws: Workspace, profile: str | None, cfg: RepoConfig)
 
 
 def _sized_review_profile(pick: str, worker: Agent | None, repo_root: str) -> str | None:
-    """A cheaper profile that preserves an existing cross-vendor pairing.
+    """A cheaper profile for a legacy reviewer configuration.
 
-    This is the selection point for a future org review-policy hook. Native
-    and third-party providers can serve several vendors: without a known
-    relationship, keep the current reviewer rather than guess.
+    Keep its existing pairing and safety checks on upgrade. Explicit size
+    pools instead use same-model avoidance, independent of the writer's vendor.
+    An org review-policy hook can enforce a different provider separately.
     """
     from brindle import review_scope
 
@@ -4999,13 +5023,23 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
     (brindle.cascade) goes on to the other built-in reviewers (unless the
     owner pinned the reviewer), ordered by the measured table; the first
     candidate keeps its place while it can run."""
-    from brindle import cascade
+    from brindle import cascade, review_scope
 
     pinned = profile is not None or bool(cfg.routing_locked.get("reviewer"))
+    worker = workspace_worker(db, ws) if profile is None else None
+    size_pool = None
+    if profile is None and not cfg.review_profile and "reviewer" in cfg.agent_models and not cfg.reviewer_models_inherited:
+        size = review_scope.review_size(worker, db, ws.repo_root, ws, cfg)
+        overrides = cfg.agent_models["reviewer"]
+        size_pool = review_scope.model_order(cfg, size)
+        pinned = size in overrides or bool(cfg.routing_locked.get(size))
     if profile is not None:
         candidates = [profile]
+    elif size_pool is not None:
+        candidates = list(dict.fromkeys(size_pool))
+        if not candidates:
+            raise AgentError("No reviewer models configured for this task size")
     else:
-        worker = workspace_worker(db, ws)
         pick = default_review_profile(cfg, worker, db, ws.repo_root, worker.task if worker else None)
         candidates = list(dict.fromkeys([pick, *cfg.reviewer_fallbacks]))
         if pick == "review.claude-sonnet.high" and not cfg.review_profile and not cfg.routing_locked.get("reviewer"):
@@ -5018,6 +5052,12 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
                 cheap = _sized_review_profile(pick, worker, ws.repo_root)
                 if cheap:
                     candidates.insert(0, cheap)
+    pool = candidates if pinned or size_pool is not None else [*candidates, *cascade.REVIEWERS]
+    same_model = set()
+    # Keep the legacy selection and cascade order for inherited reviewer settings.
+    if size_pool is not None:
+        pool, same_model = review_scope.writer_model_last(pool, worker, ws.repo_root)
+    preferred = pool[0]
     errors: dict[str, AgentError] = {}
 
     def why_not(name: str) -> str | None:
@@ -5030,21 +5070,27 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
             return str(e)
         return None
 
-    if why_not(candidates[0]) is None:
-        return candidates[0], None   # the pick runs: nothing to cascade over
+    def same_model_note(name: str) -> str | None:
+        if name in same_model:
+            return (f"Review of {ws.branch}: using {name}, the writer's model, "
+                    "because no different model in the reviewer pool can run.")
+        return None
+
+    if why_not(preferred) is None:
+        return preferred, same_model_note(preferred)
     if cfg.review_profile and not pinned:
         try:
             load_profile(cfg.review_profile, ws.repo_root)
         except KeyError as e:
             raise AgentError(str(e)) from e   # a misnamed setting is reported, never replaced silently
-    pool = candidates if pinned else [*candidates, *cascade.REVIEWERS]
-    found = cascade.run("reviewer", pool, why_not, repo_root=ws.repo_root, lead=candidates[0], pinned=pinned,
-                        beyond=len(candidates))
+    found = cascade.run("reviewer", pool, why_not, repo_root=ws.repo_root, lead=preferred, pinned=pinned,
+                        beyond=None if size_pool is not None else len(candidates))
+    found.order = [n for n in found.order if n not in same_model] + [n for n in found.order if n in same_model]
     first = next((errors[n] for n in found.pool if n in errors), None)
     if found.first is None:
         raise first
     name = found.first
-    return name, (f"Review of {ws.branch}: {first}; reviewing with {name} instead."
+    return name, same_model_note(name) or (f"Review of {ws.branch}: {first}; reviewing with {name} instead."
                   if first is not None and found.pool.index(name) > 0 else None)
 
 
@@ -5053,9 +5099,11 @@ def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig) -> None:
     provider can't run an agent here (with the profile's own environment),
     can't take work now (``provider_health``: limited, refused, ...) or
     policy refuses it."""
+    from brindle.profiles import ProfileError, compose
+
     try:
-        chosen = load_profile(name, ws.repo_root)
-    except KeyError as e:
+        chosen = compose("reviewer", name, ws.repo_root)
+    except (KeyError, ProfileError) as e:
         raise AgentError(str(e)) from e
     _airgap_check(chosen, ws.repo_root)   # before any of the branch is read for the brief
     from brindle.local_setup import memory_problem
@@ -5632,7 +5680,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     reviewer = None
     try:
         reviewer = spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
-                         mode="review", background_setup=True, review_sha=sha)
+                         mode="review", background_setup=True, review_sha=sha, agent_name="reviewer")
     finally:
         db.hold_review(ws.id, sha, slot, token, reviewer.id if reviewer else None)
     # Verdict slots remain primary/second even when an explicit profile has
