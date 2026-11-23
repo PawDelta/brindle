@@ -59,7 +59,7 @@ def test_custom_agent_composes_at_launch_on_its_recorded_model(tmp_path, db, mon
 
     base = load_profile("dev.gpt-sol", root)
     joined = compose("mine", "dev.gpt-sol", root)
-    assert (joined.provider, joined.model, joined.name) == ("codex", "gpt-6.1-sol", "dev.gpt-sol")
+    assert (joined.provider, joined.model, joined.name) == ("codex", "gpt-6.2-sol", "dev.gpt-sol")
     assert joined.allowed_tools == base.allowed_tools
     assert joined.prompt.startswith(base.prompt + "\n\n")
     assert joined.prompt.endswith("Check database invariants.")
@@ -72,7 +72,7 @@ def test_custom_agent_composes_at_launch_on_its_recorded_model(tmp_path, db, mon
     assert launched.rules == joined.rules
     monkeypatch.setattr(providers, "_codex_layers", lambda cwd: [])
     argv = Codex().command(LaunchContext(row.id, launched, None, cwd=root))
-    assert argv[argv.index("--model") + 1] == "gpt-6.1-sol"
+    assert argv[argv.index("--model") + 1] == "gpt-6.2-sol"
 
 
 @pytest.mark.parametrize("agent, model", [
@@ -105,7 +105,7 @@ def test_custom_agent_cannot_widen_the_provider_tools(tmp_path, monkeypatch):
         "dev.qwen3-coder", root).allowed_tools
     # A reviewer on a developer model keeps the provider's reviewer permissions.
     reviewer = compose("reviewer", "dev.gpt-sol", root)
-    assert (reviewer.provider, reviewer.model) == ("codex", "gpt-6.1-sol")
+    assert (reviewer.provider, reviewer.model) == ("codex", "gpt-6.2-sol")
     assert reviewer.allowed_tools == load_profile("review.gpt", root).allowed_tools
     assert reviewer.permission_mode == load_profile("review.gpt", root).permission_mode
     # The native role base supplies permissions, not Ollama runtime defaults.

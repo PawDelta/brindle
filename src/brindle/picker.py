@@ -253,6 +253,7 @@ def workers_screen(acc=None, *, key: Callable[[], str] | None = None, is_ready=N
                 return
             continue
         tier = worker_models.TIERS[int(k) - 1]
+        current = worker_models.find(picks.get(f"routing_{tier}"))
         models = worker_models.offered(acc, tier, os.getcwd())
         echo(f"Models for {tier} tasks:")
         n = 0
@@ -263,7 +264,7 @@ def workers_screen(acc=None, *, key: Callable[[], str] | None = None, is_ready=N
             for m in group:
                 n += 1
                 state = "" if is_ready(m) else "  (needs setting up)"
-                echo(f"  {n}) {m.label}{'  (current)' if picks.get(f'routing_{tier}') == m.id else ''}{state}")
+                echo(f"  {n}) {m.label}{'  (current)' if current == m else ''}{state}")
         echo("  0) built-in · q back")
         ordered = [m for how in worker_models.HOW for m in models if m.how == how]
         k = key()
