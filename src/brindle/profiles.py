@@ -782,11 +782,14 @@ def compose(agent: str, model: str, repo_root: str | None = None) -> Profile:
         _, model_layer, model_prompt = _agent_layer(model, repo_root, stop_at=base)
         meta, body = _merge(base_meta, base_body, model_layer, model_prompt)
     else:
-        runtime = {key: value for key, value in model_meta.items()
-                   if key in _MODEL_FIELDS or key.startswith("env.")}
-        # Absent runtime fields use the chosen model's defaults and connection.
-        role_meta = {key: value for key, value in base_meta.items() if key not in _MODEL_FIELDS}
-        meta, body = _merge(role_meta, base_body, runtime, "")
+        meta, body = base_meta, base_body
+    # Only the selected model supplies runtime fields, including their absence:
+    # a hosted native model must not inherit the local role base's Ollama endpoint.
+    runtime = {key: value for key, value in model_meta.items()
+               if key in _MODEL_FIELDS or key.startswith("env.")}
+    meta = {key: value for key, value in meta.items()
+            if key not in _MODEL_FIELDS and not key.startswith("env.")}
+    meta.update(runtime)
     layer = {key: value for key, value in layer.items()
              if key not in _MODEL_FIELDS and key not in ("name", "extends", "role")}
     meta, body = _merge(meta, body, layer, prompt)

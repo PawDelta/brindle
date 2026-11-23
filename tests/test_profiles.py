@@ -87,7 +87,7 @@ def test_default_agent_composition_preserves_the_existing_profile(agent, model):
     assert compose(agent, model) == load_profile(model)
 
 
-def test_custom_agent_cannot_widen_the_provider_tools(tmp_path):
+def test_custom_agent_cannot_widen_the_provider_tools(tmp_path, monkeypatch):
     library = tmp_path / ".brindle" / "agents"
     library.mkdir(parents=True)
     (library / "mine.md").write_text(
@@ -108,6 +108,25 @@ def test_custom_agent_cannot_widen_the_provider_tools(tmp_path):
     assert (reviewer.provider, reviewer.model) == ("codex", "gpt-6.1-sol")
     assert reviewer.allowed_tools == load_profile("review.gpt", root).allowed_tools
     assert reviewer.permission_mode == load_profile("review.gpt", root).permission_mode
+    # The native role base supplies permissions, not Ollama runtime defaults.
+    from brindle.native import catalog
+
+    table = {"example": {
+        "api": "https://example.test/v1", "env": ["EXAMPLE_API_KEY"], "npm": "@ai-sdk/anthropic",
+        "models": {"cloud-coder": {"limit": {"context": 128000, "output": 8000}}}}}
+    monkeypatch.setattr(catalog, "refresh_async", lambda: None)
+    monkeypatch.setattr(catalog, "_read_cache", lambda: table)
+    (library / "hosted.md").write_text(
+        "---\nextends: developer\nprovider: native\nmodel: example/cloud-coder\n---\nCloud task.")
+    selected = load_profile("hosted", root)
+    hosted = compose("developer", "hosted", root)
+    runtime = ("base_url", "model", "api_key_env", "api", "context_tokens", "fallback")
+    assert tuple(getattr(hosted, key) for key in runtime) == tuple(
+        getattr(selected, key) for key in runtime) == (
+            "https://example.test/v1", "cloud-coder", "EXAMPLE_API_KEY", "anthropic", 120000, [])
+    native_base = load_profile("dev.qwen3-coder", root)
+    assert hosted.allowed_tools == native_base.allowed_tools
+    assert hosted.prompt == native_base.prompt + "\n\nCloud task."
 
 
 def test_agent_model_orders_merge_by_agent_and_size_across_config_scopes(tmp_path, brindle_home):
