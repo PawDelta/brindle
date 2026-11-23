@@ -332,7 +332,7 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
   const status = cliStatus(a, node.workspace, alive);
   const key = `agent:${a.id}`;
   const role = roleOf(a, root);
-  // A sized worker leads with its job size (brindle's word); the model is the quieter second word.
+  // Every row leads with its role; a worker's job size lives in the title and on data-size, not the label.
   const size = a.id === root ? null : sizeOf(a.weight);
   const model = modelOf(a);
   const tone = dotTone(status, a.status);
@@ -347,7 +347,7 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
         current={active ? "page" : undefined}
         treeAgent={a.id}
         row={key}
-        title={`${a.id} · ${status.glyph} ${status.label} · ${role} · ${a.profile} · ${a.model || model || "no model"} · ${node.workspace.branch}${a.milestone ? ` · milestone: ${a.milestone}` : ""} (double-click to copy its info)`}
+        title={`${a.id} · ${status.glyph} ${status.label} · ${role} · ${a.profile} · ${a.model || model || "no model"} · ${node.workspace.branch}${size ? ` · job size: ${a.weight}` : ""}${a.milestone ? ` · milestone: ${a.milestone}` : ""} (double-click to copy its info)`}
         className={`flex w-full items-center gap-s1 rounded-r-md py-[3px] pr-s1 text-left hover:bg-surface ${active ? "bg-branch-soft" : ""} ${cursor === key ? CURSOR : ""}`}
         onOpen={() => {
           setCursor(key);
@@ -356,8 +356,8 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
       >
         <Dot tone={tone} className={stage ? `st-${STAGE_CLASS[stage]}` : ""} />
         <span className="min-w-0 flex-1 truncate text-xs text-ink">
-          <span className="text-ink-3" data-testid="agent-role" data-size={size ? a.weight! : undefined} data-model-name={model || undefined}>
-            {size ? <span className="text-ink-2">{size}</span> : role}
+          <span className="text-ink-3" data-testid="agent-role" data-role={role} data-size={size ? a.weight! : undefined} data-model-name={model || undefined}>
+            {role}
             {model && <span className="text-ink-3">{` · ${model}`}</span>}
           </span>
         </span>
