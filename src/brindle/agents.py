@@ -4639,6 +4639,7 @@ def delegate(
     admit: bool = True,
     detached: bool = False,
     milestone: str | None = None,
+    agent_name: str | None = None,
 ) -> tuple[Agent, Workspace]:
     """Start a worker, or raise ``NoRoom`` (nothing created) when the machine
     has no room for it (``admission``); ``admit`` False skips that, for a
@@ -4649,7 +4650,9 @@ def delegate(
     branch starts from the caller's current branch, so it sees the caller's
     committed work, and nobody edits the same files; ``start`` names another
     commit to start it from (it still merges into the caller's branch).
-    Refuses beyond the repo's ``max_agents`` workers running at once."""
+    ``agent_name``: the agent it works as, joined to ``profile`` (its model)
+    at launch (``spawn``). Refuses beyond the repo's ``max_agents`` workers
+    running at once."""
     from brindle import autopilot as pilot
     from brindle import repos
     from brindle.config import load_repo_config
@@ -4688,6 +4691,7 @@ def delegate(
                 done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
                 weight=weight, milestone=milestone,
                 **({"detached": True} if detached else {}),
+                **({"agent_name": agent_name} if agent_name else {}),
             )
 
         if not fair:
@@ -5050,7 +5054,8 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
                     candidates.insert(0, cheap)
     pool = candidates if pinned or size_pool is not None else [*candidates, *cascade.REVIEWERS]
     same_model = set()
-    if profile is None and not cfg.review_profile:
+    # Keep the legacy selection and cascade order for inherited reviewer settings.
+    if size_pool is not None:
         pool, same_model = review_scope.writer_model_last(pool, worker, ws.repo_root)
     preferred = pool[0]
     errors: dict[str, AgentError] = {}
@@ -5079,7 +5084,7 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
         except KeyError as e:
             raise AgentError(str(e)) from e   # a misnamed setting is reported, never replaced silently
     found = cascade.run("reviewer", pool, why_not, repo_root=ws.repo_root, lead=preferred, pinned=pinned,
-                        beyond=None if same_model or size_pool is not None else len(candidates))
+                        beyond=None if size_pool is not None else len(candidates))
     found.order = [n for n in found.order if n not in same_model] + [n for n in found.order if n in same_model]
     first = next((errors[n] for n in found.pool if n in errors), None)
     if found.first is None:
