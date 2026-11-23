@@ -1366,6 +1366,23 @@ def _with_default_model(profile, ws: Workspace, agent: Agent, m=_UNREAD):
     return replace(profile, model=model)
 
 
+def workspace_default_model(profile, ws: Workspace, mode: str, parent_id: str | None) -> str | None:
+    """Resolve the default using the CLI home and environment of an upcoming launch."""
+    from brindle import provider_homes
+    from brindle.pro import managed_models
+
+    m = managed(ws.repo_root)
+    if m is not None:
+        profile = managed_models.apply_profile(m, profile)
+        if profile.model:
+            return profile.model
+    home = provider_homes.decide(profile.provider)
+    candidate = Agent("preflight", ws.id, profile.name, profile.provider, parent_id, mode,
+                      "starting", "", None, time.time(), config_home=home)
+    with provider_homes.using(profile.provider, home), reading_launch_environment():
+        return _with_default_model(profile, ws, candidate, m).model
+
+
 def resolve_review_launch(profile, ws: Workspace, parent_id: str | None) -> ReviewLaunch | None:
     """Use the reviewer role, caller session and CLI home the pane will use."""
     if profile.provider not in VERSION_DISCOVERY_PROVIDERS:
@@ -4817,6 +4834,16 @@ def delegation_base(db: DB, caller: Agent | None, caller_ws: Workspace) -> str:
     return merge_into if merge_into and not (caller and caller.parent_id) else caller_ws.branch
 
 
+def delegation_workspace(db: DB, source: Workspace, isolate: bool, branch: str | None) -> Workspace | None:
+    """The checkout a delegation can resolve before a new worktree is created."""
+    if not isolate:
+        return source
+    if not branch:
+        return None
+    registered = db.workspaces_sharing(source.repo_root, branch=workspaces.branch_name(source.repo_root, branch))
+    return registered[0] if registered and os.path.isdir(registered[0].path) else None
+
+
 def delegate(
     db: DB,
     caller: Agent | None,
@@ -4865,7 +4892,8 @@ def delegate(
     from brindle import identity_lock
 
     identity_lock.ensure_workspace(db, caller_ws)
-    why = model_problem(profile, caller_ws)
+    target = delegation_workspace(db, caller_ws, isolate, branch)
+    why = model_problem(profile, target or caller_ws)
     if why:
         raise AgentError(why)
     from brindle import fair_share
@@ -5335,13 +5363,15 @@ def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig, *, launch: Revi
         raise AgentError(f"reviewer profile {name!r} can't run now: {health.reason}")
     try:
         from brindle import policy as pol
-        if chosen.provider == "codex" and not chosen.model and launch is None:
+        if launch or (chosen.provider == "codex" and not chosen.model):
             candidate = Agent("preflight", ws.id, name, chosen.provider, None,
-                              "review", "starting", "", None, time.time())
-            d = pol.check_launch(cfg, ws, candidate, _effective_window_env(candidate, ws))
+                              "review", "starting", "", None, time.time(), task="code review")
+            if launch:
+                d = pol.check_launch(cfg, ws, candidate, resolved=(chosen.provider, launch.model))
+            else:
+                d = pol.check_launch(cfg, ws, candidate, _effective_window_env(candidate, ws))
         else:
-            d = pol.check_assign(cfg, ws.repo_root, name, "code review", "review",
-                                 **({"resolved": (chosen.provider, launch.model)} if launch else {}))
+            d = pol.check_assign(cfg, ws.repo_root, name, "code review", "review")
     except Exception:  # noqa: BLE001 - an unreadable policy doesn't stop a review
         if chosen.provider == "codex" and not chosen.model:
             raise AgentError(f"reviewer profile {name!r}: couldn't resolve its model policy in the launch context") from None

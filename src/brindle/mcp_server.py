@@ -604,12 +604,16 @@ def _running_workers(db: DB, repo_root: str) -> int | None:
 
 
 def _policy_refusal(db: DB, caller: Agent | None, ws: Workspace, profile: str, task: str, mode: str,
-                    files: list[str] | None, weight: str | None, branch: str | None) -> str | None:
+                    files: list[str] | None, weight: str | None, branch: str | None, *,
+                    resolved: tuple[str, str | None] | None = None,
+                    launch_ws: Workspace | None = None) -> str | None:
     """The reply when the repo's policy plugin refuses this delegation, else None."""
+    if resolved is None and launch_ws is not None:
+        resolved = policy.workspace_models(launch_ws, mode=mode, parent_id=caller.id if caller else None)(profile)
     verdict = policy.check_assign(
         load_repo_config(ws.repo_root), ws.repo_root, profile, task, mode,
         files=files, weight=weight, branch=branch, actor=caller,
-        running_workers=_running_workers(db, ws.repo_root),
+        running_workers=_running_workers(db, ws.repo_root), **({"resolved": resolved} if resolved else {}),
     )
     if verdict.allowed:
         return None
@@ -1099,17 +1103,19 @@ async def handoff(
             return f"Not started: {e}"
         why: list[str] = []
         decision: dict = {}
+        launch_ws = agents.delegation_workspace(db, ws, isolate, branch)
         try:
             profile, _ = autopilot.choose_profile(
                 db, caller.id, ws.repo_root, agent_profile, task, files, weight, why, decision,
-                policy={"mode": "handoff", "branch": branch},
+                policy={"mode": "handoff", "branch": branch, "workspace": launch_ws},
                 **({"goal": goal} if goal is not None else {}))
         except autopilot.AutopilotError as e:
             return str(e)
         except routing_goal.GoalError as e:
             return f"Not started: {e}"
         profile = load_profile(profile, ws.repo_root).name
-        refused = _policy_refusal(db, caller, ws, profile, task, "handoff", files, weight, branch)
+        refused = _policy_refusal(db, caller, ws, profile, task, "handoff", files, weight, branch,
+                                  resolved=decision.get("resolved"))
         if refused:
             return refused
         if dry_run:
@@ -1294,11 +1300,12 @@ async def assign(
             fast, route_weight = True, weight or (None if pinned else "medium")
         why: list[str] = []
         decision: dict = {}
+        launch_ws = agents.delegation_workspace(db, ws, isolate, branch)
         try:
             # A fast-path task's routing, fallbacks and final pick all stay at or under medium.
             profile, learned = autopilot.choose_profile(
                 db, caller.id, ws.repo_root, agent_profile, task, files, route_weight, why, decision,
-                policy={"mode": "assign", "branch": branch},
+                policy={"mode": "assign", "branch": branch, "workspace": launch_ws},
                 **({"design_heavy": True} if design_heavy else {}),
                 **({"max_tier": FAST_PATH_WEIGHTS[-1]} if fast else {}),
                 **({"goal": goal} if goal is not None else {}))
@@ -1307,7 +1314,8 @@ async def assign(
         except routing_goal.GoalError as e:
             return f"Not started: {e}"
         profile = load_profile(profile, ws.repo_root).name
-        refused = _policy_refusal(db, caller, ws, profile, task, "assign", files, route_weight, branch)
+        refused = _policy_refusal(db, caller, ws, profile, task, "assign", files, route_weight, branch,
+                                  resolved=decision.get("resolved"))
         if refused:
             return refused
         if dry_run:
@@ -1704,7 +1712,8 @@ def requeue(task_id: str, depends_on: list[str] | None = None) -> str:
             return f"Error: No task {task_id}. list_tasks shows what's queued."
         old_ws = db.get_workspace(old.caller_ws_id) or here
         refused = _policy_refusal(db, caller, old_ws, old.profile, old.task_text, old.mode,
-                                  tasks._loads(old.files) or None, old.weight, old.branch)
+                                  tasks._loads(old.files) or None, old.weight, old.branch,
+                                  launch_ws=agents.delegation_workspace(db, old_ws, bool(old.isolate), old.branch))
         if refused:
             return refused
     try:

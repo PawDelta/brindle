@@ -150,3 +150,23 @@ def test_unpinned_codex_policy_checks_the_launch_context(db, repo, tmp_path, mon
     org_policy[0] = replace(org_policy[0], allowed_models=("gpt-disallowed",))
     agents._reviewer_can_run(profile.name, ws, RepoConfig())
     assert agents.model_problem(profile.name, ws, agent=worker, profile=profile, m=None) is None
+
+
+def test_resolved_codex_reviewer_can_run_under_the_worker_cap(db, repo, monkeypatch, org_policy):
+    ws = workspaces.adopt_root(db, str(repo))
+    caller = Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "idle", "", None, 1)
+    writer = Agent("writer", ws.id, "dev.gpt", "codex", caller.id, "assign", "done", "", None, 2)
+    db.add_agent(caller)
+    db.add_agent(writer)
+    db.record_agent_launch_model(writer.id, "gpt-writer")
+    cfg = RepoConfig(agent_models={"reviewer": {"medium": ["review.gpt"]}}, review_sizing=False)
+    monkeypatch.setattr(agents, "unusable", lambda *args: None)
+    monkeypatch.setattr(agents, "_effective_window_env", lambda *args: {})
+    org_policy[0] = replace(org_policy[0], allowed_models=("gpt-5.3-codex",), max_parallel_workers=1)
+
+    launches = {}
+    assert agents._review_profile(db, ws, None, cfg, parent_id=caller.id, launches=launches) == "review.gpt"
+    assert launches["review.gpt"].model == "gpt-5.3-codex"
+    db.set_status(writer.id, "processing")
+    with pytest.raises(agents.AgentError):
+        agents._review_profile(db, ws, None, cfg, parent_id=caller.id)

@@ -10,6 +10,7 @@ import time
 
 import pytest
 
+from brindle import mcp_server
 from brindle.events import Event
 from brindle.policy import AssignInfo, MergeInfo
 from brindle.pro import account, auth, credentials
@@ -178,6 +179,50 @@ def test_unpinned_model_policy_and_launch(db, repo, team, monkeypatch, launches,
     assert models["developer"] == ("claude-sonnet-5-5", expected == "developer")
     row = next(row for row in reply["profiles"] if row["name"] == "developer")
     assert (row["model"], row["allowed"]) == models["developer"]
+
+
+def test_unpinned_claude_routing_uses_the_target_worktree(db, repo, team, monkeypatch, launches, detached):
+    import asyncio
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    from brindle import agents, config, doctor, policy, provider_health, workspaces
+    from brindle.daemon.routes_read import _routing
+    from brindle.db import Agent
+    from brindle.pro import team_policy
+
+    root = str(repo)
+    source = workspaces.adopt_root(db, root)
+    ws = workspaces.create(db, root, "worker").workspace
+    caller = Agent("boss", source.id, "supervisor", "claude", None, "interactive", "idle", "", None, 1)
+    db.add_agent(caller)
+    monkeypatch.setattr(mcp_server, "_caller", lambda db: (caller, source))
+    for directory, filename, model in ((repo, "settings.json", "sonnet"),
+                                       (ws.path, "settings.local.json", "opus")):
+        settings = Path(directory) / ".claude" / filename
+        settings.parent.mkdir(exist_ok=True)
+        settings.write_text(json.dumps({"model": model}))
+    config.set_local(root, "routing", {"medium": ["developer"]})
+    config.set_local(root, "routing_locked", ["medium"])
+    team.policy_body["policy"]["allowed_models"] = ["claude-opus-5-5"]
+    org_plugin = plugin(team)
+    monkeypatch.setattr(policy, "plugin", lambda cfg, root: org_plugin)
+    monkeypatch.setattr(team_policy, "access", lambda root: team_policy.Access(
+        org_id=ORG, allowed_models=("claude-opus-5-5",)))
+    monkeypatch.setattr(provider_health, "check", lambda *a, **kw: provider_health.Health("ok"))
+    monkeypatch.setattr("brindle.providers.signed_out", lambda *a, **kw: None)
+    monkeypatch.setattr("brindle.quota.known_headroom", lambda *a, **kw: None)
+    monkeypatch.setattr("shutil.which", lambda cli: f"/usr/bin/{cli}")
+    monkeypatch.setattr(doctor, "signin_providers", lambda: ["claude"])
+    monkeypatch.setattr(agents, "_effective_window_env", lambda *args: {})
+    dry_run = asyncio.run(mcp_server.assign(task="change it", branch=ws.branch, weight="medium", dry_run=True))
+    assert "profile: developer" in dry_run and "claude-opus-5-5" in dry_run
+    reply = _routing(db, SimpleNamespace(query_params={"repo": ws.path}), learn=False)
+    [row] = reply["tiers"]["medium"]["models"]
+    assert (row["profile"], row["model"], row["allowed"]) == ("developer", "claude-opus-5-5", True)
+    agents.spawn(db, ws, row["profile"], mode="assign", background_setup=True)
+    [argv] = launches
+    assert flag(argv, "--model") == row["model"]
 
 
 @pytest.mark.variant("unpinned CLI defaults must not borrow permission from the old hard-coded Gemini model")

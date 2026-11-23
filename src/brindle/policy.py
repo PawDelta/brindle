@@ -168,7 +168,7 @@ def check_assign(cfg: RepoConfig, repo_root: str, profile: str, task: str, mode:
                  branch: str | None = None, actor: Agent | None = None,
                  running_workers: int | None = None, cwd: str | None = None,
                  env: dict[str, str] | None = None,
-                 resolved: tuple[str, str] | None = None) -> Decision:
+                 resolved: tuple[str, str | None] | None = None) -> Decision:
     """The plugin's decision on starting ``task`` with ``profile`` (allow
     without a plugin). In air-gap mode (``brindle.airgap``) only a local
     profile gets as far as the plugin. A denial is audited."""
@@ -189,7 +189,7 @@ def assign_decision(cfg: RepoConfig, repo_root: str, profile: str, task: str, mo
                     branch: str | None = None, actor: Agent | None = None,
                     running_workers: int | None = None, cwd: str | None = None,
                     env: dict[str, str] | None = None,
-                    resolved: tuple[str, str] | None = None) -> Decision:
+                    resolved: tuple[str, str | None] | None = None) -> Decision:
     """``check_assign``'s decision without auditing it: routing asks it of
     each candidate it weighs (brindle.cascade), and only the delegation that
     actually starts (or is refused) is audited."""
@@ -208,7 +208,8 @@ def assign_decision(cfg: RepoConfig, repo_root: str, profile: str, task: str, mo
     return _decide("delegation", cfg, repo_root, lambda p: p.check_assign(info))
 
 
-def check_launch(cfg: RepoConfig, ws: Workspace, agent: Agent, env: dict[str, str]) -> Decision:
+def check_launch(cfg: RepoConfig, ws: Workspace, agent: Agent, env: dict[str, str] | None = None, *,
+                 resolved: tuple[str, str | None] | None = None) -> Decision:
     """Recheck delegation in the actual pane context before dispatch.
 
     A queued worker may not have had its target worktree at admission. A
@@ -222,7 +223,35 @@ def check_launch(cfg: RepoConfig, ws: Workspace, agent: Agent, env: dict[str, st
     finally:
         db.conn.close()
     return check_assign(cfg, ws.repo_root, agent.profile, agent.task or "", agent.mode,
-                        branch=ws.branch, running_workers=running, cwd=ws.path, env=env)
+                        branch=ws.branch, running_workers=running, cwd=ws.path, env=env,
+                        **({"resolved": resolved} if resolved is not None else {}))
+
+
+def workspace_models(ws: Workspace, *, mode: str = "assign", parent_id: str | None = None,
+                     user_library: bool = False):
+    """Resolve unpinned launch defaults once for a decision about an existing checkout."""
+    from functools import cache
+
+    from brindle import agents, model_catalog, profiles
+
+    @cache
+    def resolve(name: str) -> tuple[str, str | None] | None:
+        try:
+            profile = profiles.load_profile(name, None if user_library else ws.repo_root)
+        except (KeyError, profiles.ProfileError):
+            return None
+        if profile.model or not model_catalog.default_model(profile.provider):
+            return None
+        if user_library:
+            _, model = _profile_fields(name, ws.repo_root, user_library=True, cwd=ws.path)
+        else:
+            try:
+                model = agents.workspace_default_model(profile, ws, mode, parent_id)
+            except agents.AgentError:
+                model = None
+        return profile.provider, model
+
+    return resolve
 
 
 def worker_agents(db: DB, repo_root: str) -> list[Agent]:
