@@ -40,6 +40,28 @@ def test_catalog_models_reach_pricing_display_and_worker_tiers():
             assert (pick.label, pick.tiers) == (found.name.display, found.tiers)
 
 
+@pytest.mark.variant("a GPT version bump must preserve tier priority and saved worker picks")
+def test_gpt_worker_routes_upgrade_in_place():
+    from brindle.config import DEFAULT_ROUTING
+    from brindle.worker_models import find, runs
+
+    assert DEFAULT_ROUTING["medium"] == [
+        "dev.gpt", "dev.claude-sonnet", "developer", "dev.claude-opus", "dev.gpt-terra", "dev.gpt-sol",
+    ]
+    assert DEFAULT_ROUTING["heavy"] == [
+        "dev.claude-opus", "dev.gemini", "developer", "dev.gpt", "dev.gpt-sol", "dev.gpt-astra",
+    ]
+    for profile, old_id, model in (
+        ("dev.gpt-sol", "gpt-6.1-sol", "gpt-6.2-sol"),
+        ("dev.gpt-astra", "gpt-6-astra", "gpt-6.2-astra"),
+    ):
+        assert profiles.load_profile(profile).model == model
+        pick = find(model)
+        assert pick is not None and pick.profile == profile
+        assert find(old_id) == pick
+        assert runs(pick) == ("codex", model)
+
+
 @pytest.mark.parametrize("model, provider, family, display", [
     ("claude-opus-5-7", "claude", "Claude", "Claude Opus 5.7"),
     pytest.param("gpt-6.2-unlisted", "codex", "GPT", "GPT‑6.2 Unlisted", marks=pytest.mark.variant(
