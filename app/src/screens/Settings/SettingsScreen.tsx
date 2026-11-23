@@ -74,6 +74,7 @@
 
 import { useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, KeyInfo, Meta, OpenCodePermissionMode, ProviderConnection, ProviderInstalled, UserSettings } from "../../api/client";
+import { ProviderUpdatesSetting } from "./ProviderUpdatesSetting";
 import { debugState } from "../../api/debug";
 import { connected, factsOf, settingsNote, turnedOff } from "../../api/providers";
 import { VisualsSetting } from "./VisualsSetting";
@@ -1447,6 +1448,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         )}
       </Pane>
       <Pane id="general" {...panes}>
+        {tab === "general" && <ProviderUpdatesSetting key={account?.org_id ?? ""} client={client} />}
         <VisualsSetting client={client} field="visuals_enabled" />
         <VisualsSetting client={client} />
       <div className="border-t border-line">

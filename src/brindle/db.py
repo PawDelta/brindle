@@ -840,6 +840,12 @@ CREATE TABLE IF NOT EXISTS inbox_occurrences (
     source TEXT PRIMARY KEY,
     generation INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS provider_updates (
+    provider TEXT PRIMARY KEY,
+    checked_at REAL NOT NULL,
+    target TEXT,
+    state TEXT NOT NULL DEFAULT 'pending'
+);
 -- Inbox's Not now choice: only hides a ready PR at this branch head.
 -- Separate from preparation so rechecking the same head preserves the choice.
 CREATE TABLE IF NOT EXISTS session_pr_declined (

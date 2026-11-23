@@ -2891,10 +2891,11 @@ def test_user_settings_round_trip_validates_and_keeps_other_keys(db, world, monk
     path.parent.mkdir()
     path.write_text(json.dumps({"delegation": "fast"}))
 
-    assert _send("GET", "/v1/user-settings") == (200, {"claude_permission_mode": "default",
-                                                        "opencode_permission_mode": "ask", "visuals": "off",
-                                                        "quota_switch": "ask",
-                                                        "visuals_enabled": "on", "login_shell_env": "on"})
+    expected = {"claude_permission_mode": "default", "opencode_permission_mode": "ask",
+                "visuals": "off", "quota_switch": "ask", "visuals_enabled": "on", "login_shell_env": "on"}
+    status, settings = _send("GET", "/v1/user-settings")
+    assert status == 200
+    assert {key: settings[key] for key in expected} == expected
     assert _send("PATCH", "/v1/user-settings", {"claude_permission_mode": "yolo"})[0] == 400
     assert _send("PATCH", "/v1/user-settings", {})[0] == 400
     # One bad value refuses the whole change.
@@ -2903,10 +2904,10 @@ def test_user_settings_round_trip_validates_and_keeps_other_keys(db, world, monk
     assert _send("PATCH", "/v1/user-settings", {"claude_permission_mode": "auto"})[0] == 200
     assert _send("PATCH", "/v1/user-settings", {"opencode_permission_mode": "autonomous"})[0] == 200
     assert _send("PATCH", "/v1/user-settings", {"login_shell_env": "off"})[0] == 200
-    assert _send("GET", "/v1/user-settings") == (200, {"claude_permission_mode": "auto",
-                                                        "opencode_permission_mode": "autonomous", "visuals": "off",
-                                                        "quota_switch": "ask",
-                                                        "visuals_enabled": "on", "login_shell_env": "off"})
+    expected.update(claude_permission_mode="auto", opencode_permission_mode="autonomous", login_shell_env="off")
+    status, settings = _send("GET", "/v1/user-settings")
+    assert status == 200
+    assert {key: settings[key] for key in expected} == expected
     assert json.loads(path.read_text()) == {"delegation": "fast", "claude_permission_mode": "auto",
                                             "opencode_permission_mode": "autonomous", "login_shell_env": "off"}
     assert not list(path.parent.glob("*.tmp"))

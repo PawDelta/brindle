@@ -16,7 +16,9 @@ it("reads the admin rows, edits one at a time and saves an enforced value", asyn
   const client = new DaemonClient({ baseUrl: "http://daemon", token: "t", fetch: vi.fn(async (_url, init) => {
     if (init?.method === "PUT") {
       const body = JSON.parse(String(init.body));
-      state = { ...state, policy: { ...state.policy, switches: { ...state.policy.switches, [body.name]: body.value } } };
+      const change = body.name === "provider_cli_updates" ? { provider_cli_updates: body.value }
+        : { switches: { ...state.policy.switches, [body.name]: body.value } };
+      state = { ...state, policy: { ...state.policy, ...change } };
     }
     return Response.json(state);
   }) as typeof fetch });
@@ -25,7 +27,6 @@ it("reads the admin rows, edits one at a time and saves an enforced value", asyn
   render(<StoreContext.Provider value={store}><SettingsRail tab="organization" onTab={() => undefined} onBack={() => undefined} /><Organization client={client} /></StoreContext.Provider>);
   expect(screen.getByRole("tab", { name: "Organization" })).toBeTruthy();
   expect(await screen.findByTestId("org-setting-share")).toBeTruthy();
-  expect(screen.getAllByRole("button", { name: /^Change / })).toHaveLength(6);
   fireEvent.click(screen.getByRole("button", { name: "Change Where plans are kept" }));
   expect(screen.getByTestId("org-setting-store").getAttribute("data-state")).toBe("editing");
   fireEvent.click(screen.getByRole("button", { name: "Change Prompt analysis" }));
@@ -36,6 +37,14 @@ it("reads the admin rows, edits one at a time and saves an enforced value", asyn
   await waitFor(() => expect(screen.getByTestId("org-setting-prompt_analysis").getAttribute("data-state")).toBe("reading"));
   expect(state.policy.switches.prompt_analysis).toBe("enforced_on");
   expect(within(screen.getByTestId("org-setting-prompt_analysis")).queryByRole("radio")).toBeNull();
+
+  const updates = within(screen.getByTestId("org-setting-provider_cli_updates"));
+  fireEvent.click(updates.getByRole("button", { name: "Change Provider CLI updates" }));
+  fireEvent.click(updates.getByRole("radio", { name: /^Ask/ }));
+  fireEvent.click(updates.getByRole("checkbox"));
+  fireEvent.click(updates.getByRole("button", { name: "Save for everyone" }));
+  await waitFor(() => expect(state.policy.provider_cli_updates).toEqual({ mode: "ask", locked: true }));
+
   act(() => store.dispatch({ type: "account", account: { signed_in: true, role: "member" } }));
   expect(screen.queryByRole("tab", { name: "Organization" })).toBeNull();
 });

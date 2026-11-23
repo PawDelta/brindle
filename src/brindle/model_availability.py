@@ -127,9 +127,11 @@ class ModelAvailabilityChecker:
         self._salt = os.urandom(32)
         self._cache: dict[bytes, tuple[float, Catalog | Availability]] = {}
         self._lock = threading.Lock()
+        self._generation = 0
 
     def clear(self) -> None:
         with self._lock:
+            self._generation += 1
             self._cache.clear()
 
     def check(self, profile: Profile, *, effective_env: Mapping[str, str],
@@ -189,6 +191,7 @@ class ModelAvailabilityChecker:
                                        or catalog_context is not None))
         now = self._clock()
         with self._lock:
+            generation = self._generation
             self._cache = {k: v for k, v in self._cache.items() if v[0] > now}
             if cacheable and key in self._cache:
                 return self._cache[key][1]
@@ -202,9 +205,10 @@ class ModelAvailabilityChecker:
             result = Availability("unverified", _FAILURES["failed"])
         if cacheable:
             with self._lock:
-                if len(self._cache) >= 128:
-                    self._cache.pop(next(iter(self._cache)))
-                self._cache[key] = (self._clock() + self._ttl, result)
+                if generation == self._generation:
+                    if len(self._cache) >= 128:
+                        self._cache.pop(next(iter(self._cache)))
+                    self._cache[key] = (self._clock() + self._ttl, result)
         return result
 
 
@@ -257,6 +261,12 @@ def provisioning_context(provider: str, cwd: str, env: Mapping[str, str]) -> str
         return os.path.abspath(cwd)
     settings = (".codex/config.toml",) if provider == "codex" else (".gemini/settings.json",)
     digest = hashlib.sha256()
+    from brindle import providers_install
+
+    if provider in providers_install.UPDATE_PROVIDERS:
+        # Worker launchers in other processes also need a new cache key when
+        # the daemon selects the verified install.
+        digest.update(json.dumps(providers_install.selected(provider)).encode())
     path = Path(cwd).absolute()
     for parent in (*reversed(path.parents), path):
         for name in settings:
