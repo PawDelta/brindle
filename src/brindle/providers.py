@@ -127,9 +127,10 @@ def _codex_configured_model(config: dict, active: dict) -> str | None:
 
 
 def codex_default_model(cwd: str, *, env: dict[str, str] | None = None) -> str | None:
-    """Select the effective config model, the CLI's marked default, or our catalog model."""
+    """Select the effective config model, then apply the default precedence."""
     from brindle import codex_hook, model_catalog
 
+    fallback = model_catalog.default_model("codex")
     try:
         server = codex_hook._AppServer(codex_binary(), [], cwd=cwd, **({"env": env} if env is not None else {}))
         try:
@@ -137,6 +138,8 @@ def codex_default_model(cwd: str, *, env: dict[str, str] | None = None) -> str |
             active = _active_codex_profile(cfg)
             if model := _codex_configured_model(cfg, active):
                 return model
+            if not model_catalog.PREFER_CLI_DEFAULTS:
+                return fallback
             params = {"includeHidden": True}
             provider = active.get("model_provider") or cfg.get("model_provider")
             if provider:
@@ -160,7 +163,7 @@ def codex_default_model(cwd: str, *, env: dict[str, str] | None = None) -> str |
         active = _active_codex_profile(cfg)
         if model := _codex_configured_model(cfg, active):
             return model
-    return model_catalog.default_model("codex")
+    return fallback
 
 
 def default_launch_model(profile: Profile, cwd: str, *, env: dict[str, str] | None = None) -> str | None:
@@ -183,6 +186,8 @@ def default_launch_model(profile: Profile, cwd: str, *, env: dict[str, str] | No
         return opencode.configured_model(cwd, effective) or fallback
     if model := company_login.claude_model(None, cwd):
         return model
+    if not model_catalog.PREFER_CLI_DEFAULTS:
+        return fallback
     model = _claude_configured_model(profile, cwd, effective)
     if not model:
         return effective.get("ANTHROPIC_DEFAULT_SONNET_MODEL") or fallback

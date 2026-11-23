@@ -65,15 +65,21 @@ def test_audit_respects_policy_and_reviewer_fallbacks(db, repo, monkeypatch, org
     assert all(policy.assign_decision(cfg, str(repo), name, "audit", "review").allowed for name in spawned)
 
 
-@pytest.mark.parametrize("configured,cli_default", [
-    (None, "gpt-6.1-terra"),
-    pytest.param("gpt-configured", "gpt-6.1-terra", marks=pytest.mark.variant(
+@pytest.mark.parametrize("configured,cli_default,prefer_cli,expected", [
+    (None, "gpt-6.1-terra", True, "gpt-6.1-terra"),
+    pytest.param("gpt-configured", "gpt-6.1-terra", True, "gpt-configured", marks=pytest.mark.variant(
         "An explicit CLI config model must take precedence over the catalog default")),
-    pytest.param(None, None, marks=pytest.mark.variant(
+    pytest.param(None, None, True, "gpt-6.2-sol", marks=pytest.mark.variant(
         "An empty CLI catalog must use the built-in fallback without bypassing the allowlist")),
+    pytest.param(None, "gpt-6.1-terra", False, "gpt-6.2-sol", marks=pytest.mark.variant(
+        "Catalog precedence can select the research model over the CLI's marked default")),
+    pytest.param("gpt-configured", "gpt-6.1-terra", False, "gpt-configured", marks=pytest.mark.variant(
+        "An explicit Codex model still wins under catalog precedence")),
 ])
 def test_unpinned_codex_uses_the_configured_or_catalog_model(repo, monkeypatch, org_policy, real_codex_default_model,
-                                                            configured, cli_default):
+                                                            configured, cli_default, prefer_cli, expected):
+    from brindle import model_catalog
+
     class AppServer:
         def __init__(self, *a, **kw):
             pass
@@ -90,6 +96,7 @@ def test_unpinned_codex_uses_the_configured_or_catalog_model(repo, monkeypatch, 
             pass
 
     monkeypatch.setattr(codex_hook, "_AppServer", AppServer)
+    monkeypatch.setattr(model_catalog, "PREFER_CLI_DEFAULTS", prefer_cli)
     profile = replace(profiles.load_profile("reviewer-codex", str(repo)), model=None, env={})
     monkeypatch.setattr(profiles, "load_profile", lambda *a: profile)
     monkeypatch.setattr(autopilot, "effective_profile_model", lambda *a: "")
@@ -97,7 +104,6 @@ def test_unpinned_codex_uses_the_configured_or_catalog_model(repo, monkeypatch, 
     cfg = RepoConfig()
     assert not policy.assign_decision(cfg, str(repo), profile.name, "audit", "review").allowed
     assert not policy.assign_decision(cfg, str(repo), profile.name, "audit", "review", cwd=str(repo), env={}).allowed
-    expected = configured or cli_default or "gpt-6.2-sol"
     assert policy._profile_fields(profile.name, str(repo)) == ("codex", expected)
     org_policy[0] = replace(org_policy[0], allowed_models=(expected,))
     assert policy.assign_decision(cfg, str(repo), profile.name, "audit", "review").allowed
