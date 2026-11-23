@@ -96,6 +96,8 @@ def run_helper(ws, argv):
     pytest.param(["suite"], marks=pytest.mark.variant("#262: real MCP requests with a live holder of a different profile")),
 ], ids=["direct", "checks"])
 def test_second_request_for_the_same_commit_reuses_the_running_reviewer(db, ws, boss, monkeypatch, checks):
+    # Fake provider availability along with spawn so both reviewer slots can run in CI.
+    monkeypatch.setattr(agents, "unusable", lambda provider, env=None: None)
     if checks is None:
         started = fake_spawn(monkeypatch)
         first = agents.request_review(db, None, ws, "reviewer")

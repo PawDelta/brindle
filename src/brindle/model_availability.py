@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     from brindle.profiles import Profile
 
 Status = Literal["available", "unavailable", "unverified"]
-Source = Literal["codex", "antigravity", "ollama", "openai", "anthropic", "compatible"]
+Source = Literal["codex", "antigravity", "ollama", "opencode", "openai", "anthropic", "compatible"]
 TIMEOUT = 5.0
 # Leave room in the foreground launch's three-second budget for provisioning
 # and the discovery helper's bounded process-group cleanup.
@@ -67,6 +67,8 @@ PROVISIONING_TIMEOUT = 1.0
 CACHE_TTL = 30.0
 MAX_BYTES = 1024 * 1024
 MAX_PAGES = 10
+_MODEL_ID = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9._-]*/)*[A-Za-z0-9][A-Za-z0-9._-]*"
+                       r"(?::[A-Za-z0-9][A-Za-z0-9._-]*)*")
 
 
 @dataclass(frozen=True)
@@ -187,6 +189,40 @@ class ModelAvailabilityChecker:
                     self._cache.pop(next(iter(self._cache)))
                 self._cache[key] = (self._clock() + self._ttl, result)
         return result
+
+
+def reportable_models(signed_in: list[str]) -> dict[str, list[str]] | None:
+    """A machine-level snapshot for an org entitlement refresh.
+
+    None leaves the previous report alone when the result is inconclusive.
+    An empty snapshot requires a complete, empty answer from every probe.
+    """
+    from brindle import provider_homes, providers, providers_install
+
+    requests = {
+        name: Request(name, env={**os.environ, **provider_homes.launch_env(name)}, cwd=str(Path.home()))
+        for name in ("codex", "antigravity", "opencode")
+        if name in signed_in and not providers_install.turned_off(name)
+    }
+    if providers.which_cli("ollama"):
+        requests["ollama"] = Request("native", base_url="http://127.0.0.1:11434", env=os.environ)
+
+    # The static Claude catalog has no current-model marker, and discovery
+    # cannot determine the account's models.
+    report = {}
+    empty_snapshot = bool(requests)
+    for name, request in requests.items():
+        try:
+            catalog = _isolated_discovery(request, PROVISIONING_TIMEOUT)
+        except Exception:  # A provider's catalog must never break entitlement refresh.
+            empty_snapshot = False
+            continue
+        ids = sorted(model for model in catalog.models if len(model) <= 128 and _MODEL_ID.fullmatch(model))
+        if ids:
+            report[name] = ids[:64]
+        if not catalog.complete or catalog.models:
+            empty_snapshot = False
+    return report if report or empty_snapshot else None
 
 
 def provisioning_context(provider: str, cwd: str, env: Mapping[str, str]) -> str:
@@ -373,11 +409,10 @@ def _codex_catalog() -> Catalog:
             proc.wait(timeout=1)
 
 
-def _antigravity_catalog() -> Catalog:
+def _cli_models(binary: str) -> str:
     from brindle import spawn
-    from brindle.antigravity import binary
 
-    with spawn.start([binary(), "models"], write=False, stdin=subprocess.DEVNULL,
+    with spawn.start([binary, "models"], write=False, stdin=subprocess.DEVNULL,
                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
         try:
             output = proc.stdout.read(MAX_BYTES + 1)
@@ -387,7 +422,24 @@ def _antigravity_catalog() -> Catalog:
             if proc.poll() is None:
                 proc.kill()
             proc.wait(timeout=1)
-    return _parse_antigravity(output.decode("utf-8"))
+    return output.decode("utf-8")
+
+
+def _antigravity_catalog() -> Catalog:
+    from brindle.antigravity import binary
+
+    return _parse_antigravity(_cli_models(binary()))
+
+
+def _opencode_catalog() -> Catalog:
+    from brindle.opencode import binary
+
+    # The command prints one provider/model ID per line.
+    models = frozenset(line for line in _cli_models(binary()).splitlines()
+                       if "/" in line and _MODEL_ID.fullmatch(line))
+    if not models:
+        raise _DiscoveryError("failed")
+    return Catalog(models, "opencode")
 
 
 def _parse_antigravity(output: str) -> Catalog:
@@ -496,6 +548,8 @@ def _worker() -> None:
             catalog = _codex_catalog()
         elif request.provider == "antigravity":
             catalog = _antigravity_catalog()
+        elif request.provider == "opencode":
+            catalog = _opencode_catalog()
         elif request.provider == "native":
             catalog = _native_catalog(request, args["timeout"])
         else:

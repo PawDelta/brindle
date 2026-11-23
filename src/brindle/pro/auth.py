@@ -385,6 +385,15 @@ def _fetch_entitlement(client: Client, access: str, now: float | None, org_id: s
     names = _signed_in_providers()
     if names:
         params["providers"] = ",".join(names)
+    if org_id is not None and not airgap.enabled():
+        from brindle.model_availability import reportable_models
+
+        try:
+            models = reportable_models(names)
+            if models is not None:
+                params["available_models"] = json.dumps(models, separators=(",", ":"))
+        except Exception:  # noqa: BLE001 - reporting models must never break a refresh
+            pass
     path = "/entitlement" + ("?" + urllib.parse.urlencode(params, safe=",") if params else "")
     status, body = client.get(path, token=access)
     if status == 401:
@@ -650,33 +659,41 @@ def refresh(client: Client, store, seen: dict | None = None, *, now: float | Non
     read before deciding to refresh: if another process rotated them since,
     its result is used instead of spending a refresh token again."""
     with refresh_lock():
-        t = time.time() if now is None else now
         cur = store.load() or {}
         if not cur.get("refresh_token"):
             raise AuthError("not logged in to brindle Pro", code="invalid_grant", revoked=True)
         elsewhere = seen is not None and cur.get("refresh_token") != seen.get("refresh_token")
         if elsewhere:
+            t = time.time() if now is None else now
             ent = _usable_entitlement(cur, client.base, t)
             if ent is not None:
                 license.clear_cache()
                 return ent
-        fresh_access = bool(cur.get("access_token")) and \
-            float(cur.get("access_expires_at") or 0) > t + ACCESS_SLACK
-        rotated = False
-        if not fresh_access or (force and not elsewhere):
-            cur, rotated = _rotate(client, store, cur, t, adopt=True), True
-        org = cur.get("org_id")
-        got = _fetch_entitlement(client, cur["access_token"], now, org)
-        if got == 401 and not rotated:
-            cur = _rotate(client, store, cur, time.time() if now is None else now, adopt=True)
-            got = _fetch_entitlement(client, cur["access_token"], now, org)
-        if got == 401:
-            raise AuthError("backend refused a fresh access token", code="invalid_token")
-        if license.paid(cur.get("entitlement")) and not license.paid(got[0]):
-            cur["subscription_ended"] = True     # told once, by license.take_ended_notice
-        cur["entitlement"] = got[0]
-        store.save(cur)
+        ent = _refresh_locked(client, store, cur, now, force=force and not elsewhere, adopt=True)
     license.clear_cache()
+    return ent
+
+
+def _refresh_locked(client: Client, store, cur: dict, now: float | None, *,
+                    force: bool = False, adopt: bool = False) -> license.Entitlement:
+    """Fetch and save an entitlement for the credentials selected under the refresh lock."""
+    t = time.time() if now is None else now
+    fresh_access = bool(cur.get("access_token")) and \
+        float(cur.get("access_expires_at") or 0) > t + ACCESS_SLACK
+    rotated = force or not fresh_access
+    if rotated:
+        cur = _rotate(client, store, cur, t, adopt=adopt)
+    org = cur.get("org_id")
+    got = _fetch_entitlement(client, cur["access_token"], now, org)
+    if got == 401 and not rotated:
+        cur = _rotate(client, store, cur, time.time() if now is None else now, adopt=adopt)
+        got = _fetch_entitlement(client, cur["access_token"], now, org)
+    if got == 401:
+        raise AuthError("backend refused a fresh access token", code="invalid_token")
+    if license.paid(cur.get("entitlement")) and not license.paid(got[0]):
+        cur["subscription_ended"] = True     # told once, by license.take_ended_notice
+    cur["entitlement"] = got[0]
+    store.save(cur)
     return got[1]
 
 
@@ -700,6 +717,26 @@ def refresh_captured(store, record: dict, transport: Transport | None = None, *,
         store.save(new)
     license.clear_cache()
     return new
+
+
+def refresh_after_provider_update() -> None:
+    """Send the new catalogs without waiting for the next entitlement sweep."""
+    from brindle.pro import credentials
+
+    if airgap.enabled():
+        return
+    try:
+        store = credentials.default_store()
+        with refresh_lock():
+            record = store.load() or {}
+            if not record.get("org_id") or not record.get("refresh_token"):
+                return
+            client = Client(record.get("base_url"))
+            # Keep the fetch bound to this issuer if an older client writes outside the lock.
+            _refresh_locked(client, store, record, None)
+        license.clear_cache()
+    except Exception:  # noqa: BLE001 - an optional report must not fail an install
+        log.debug("couldn't refresh the entitlement after the provider update")
 
 
 def switch_org(client: Client, store, org_id: str | None, *,
