@@ -1,77 +1,74 @@
-/* Agents: which model runs each kind of work, and what takes over at a
-   limit (design/agents-2, option A, as the owner approved it). Two cards:
+/* Agents (A1, "separate layers", as the owner approved it on 2026-11-23):
+   two choices, kept apart.
 
-   - "How a task gets run": the four steps, automatic.
-   - "Who does each kind of work": a row per kind (the four sizes the
-     supervisor gives tasks, then the reviewer and the supervisor), each with
-     what it runs on (a model, or one of the person's custom agents, picked
-     from a list of the connected providers' models with cost and speed),
-     "If it's at its limit: X, then Y" with the ordered fallbacks behind it
-     (↑ ↓ ✕, + Add a fallback), a Lock against hosted learning, and More
-     (effort and instructions); the reviewer and the supervisor are rows like
-     the sizes. Whether an agent can run is its own: installed, its own
-     sign-in, its provider not excluded, no problems, each with why. When learning runs something else for a
-     kind, the row runs it, tagged "learned", and says only "brindle learned
-     X does better here · use mine instead" (its basis stays internal);
-     "use mine instead" locks the row.
+   - "Needs you": what stops a size's first pick (the org refuses it, its
+     check found problems, its provider is signed out or isn't connected),
+     each with the one action that fixes it.
+   - "Who does the work": the agents. An agent is how to work (what it's
+     for, instructions, rules), never which model: its model follows the job
+     size, except where it keeps one of its own for a size. A custom profile
+     that pins a model runs its own. "New agent" opens the add-an-agent form
+     above the list (one column: Name, What it's for, Instructions, Rules,
+     then "Works like a Developer, and its model follows the job size ·
+     Change"); Edit opens the same form under a custom agent, or a built-in
+     agent's own models per size.
+   - "What model runs it": one shared table by job size (Light, Medium,
+     Heavy, Advanced): what runs it, then the ordered fallbacks at its limit.
+     Clicking the model picks another, the fallbacks edit the order, Edit
+     holds the lock against hosted learning, the effort and instructions.
+     When learning runs something else, the row runs it, tagged "learned",
+     with "use mine instead"; when the first pick can't run, the one that
+     does is shown "standing in".
 
-   "Make a custom agent…" at the foot of a row's list opens the guided path
-   under that row: what it's for → provider and model → how it works
-   (effort, instructions, rules) → what it's used for → a checked summary,
-   and Create. Every agent's automatic check (profile lint, in GET /routing)
-   shows as "N problems" where it's used; there is no lint button.
-
-   Nothing opens over the page: lists, panels and the builder are all inline
-   under the row they change. No <select>. Every change goes straight to the
-   engine (PUT /v1/routing `kinds`, into the person's ~/.brindle/config.json:
-   agents are theirs, one list whatever the repos) and the page reads GET
-   /v1/routing again: the rows at once, what learning runs instead after. */
+   Nothing opens over the page: lists, panels and the form are inline. No
+   <select>. Every change goes straight to the engine (PUT /v1/routing
+   `kinds` and `agents`, POST and PUT /v1/profiles, into the person's
+   ~/.brindle: agents are theirs, one list whatever the repos) and the page
+   reads GET /v1/routing again: the rows at once, what learning runs after. */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { DaemonClient, KindPut, RulePackInfo } from "../../api/client";
-import type { RoutingDTO, RoutingProfileDTO } from "../../api/schema";
+import type { DaemonClient, KindPut, RulePackInfo, RoutingPut, WorksLike } from "../../api/client";
+import type { RoutingDTO } from "../../api/schema";
 import { openExternal } from "../../api/open";
 import { plain } from "../../api/wording";
 import { PageHeader } from "../../components/PageHeader";
 import { NO_REPO } from "../../components/RepoSelect";
-import { alert, button, card, chip, field, h2, label, main, mono, pill, quiet } from "../../components/ui";
+import { alert, button, card, field, h2, label, main, mono, pill, quiet, softCheck, softField } from "../../components/ui";
 import { useSessions } from "../../store/sessions";
 import {
   COST_MARK,
   COST_WORDS,
   EFFORT,
-  FLOW,
-  KINDS,
   KIND_INFO,
   SIZES,
-  STEPS,
+  WORKS_LIKE,
+  agentLabel,
+  agentRows,
   choiceOf,
   cleanName,
   connectedProviders,
   draftProblem,
-  isCustom,
   kindsOf,
   missingChoice,
-  modelsOf,
   move,
   newDraft,
   offeredFor,
-  displayOf,
-  madeBy,
   problemCount,
   productName,
   providersOf,
   runOrder,
+  type AgentRow,
   type Choice,
   type Draft,
   type Kind,
   type KindState,
+  type Size,
 } from "./agents";
 import { Mark } from "./Mark";
 
 export interface AgentsScreenProps {
   client: DaemonClient;
-  /* Where a link on the page goes: Settings › Providers ("Connect Codex"), Knowledge's rules ("See all rules"). */
+  /* Where a link on the page goes: Settings › Providers ("Sign in"), Knowledge's rules ("See all rules"). */
   onNavigate?(to: "providers" | "knowledge"): void;
 }
 
@@ -98,30 +95,33 @@ function withLinks(text: string): ReactNode[] {
   );
 }
 
-/* What is open under a row: its list, its fallbacks, its More, or the builder. */
-type Panel = "pick" | "fb" | "more" | "make";
+/* A link-like action in running text. */
+const link = "text-branch underline underline-offset-2";
+
+/* What is open under a size row: its list, its fallbacks, or its Edit. */
+type Panel = "pick" | "fb" | "edit";
 
 function CostTag({ cost }: { cost: string | null }) {
   if (!cost) return null;
   return (
-    <span className={`${mono} text-ink-3`} title={COST_WORDS[cost]} aria-label={COST_WORDS[cost] ?? cost}>
+    <span className={`${mono} text-xs text-ink-3`} title={COST_WORDS[cost]} aria-label={COST_WORDS[cost] ?? cost}>
       {COST_MARK[cost] ?? cost}
     </span>
   );
 }
 
-/* A model's effort, as a small chip beside its name. */
+/* A model's effort, as a small boxed tag beside its name. */
 function EffortChip({ effort }: { effort: string | null }) {
   if (!effort) return null;
   return (
-    <span className={`${pill} text-ink-3`} data-effort={effort}>
+    <span className="inline-flex items-center rounded-sm border border-line-strong px-[5px] text-[11px] font-medium leading-[15px] text-ink-2" data-effort={effort}>
       {effort}
     </span>
   );
 }
 
 /* A worker named by its model: the engine's display name ("Claude Opus"), or
-   a custom agent's own name with its model quieter beside it. */
+   a custom profile's own name with its model quieter beside it. */
 function ChoiceName({ c }: { c: Choice }) {
   return (
     <>
@@ -135,11 +135,11 @@ function ChoiceName({ c }: { c: Choice }) {
   );
 }
 
-/* The second line: "<maker> · runs in <tool>", then the cost. */
-function MadeBy({ c }: { c: Choice }) {
+/* The second line: "<maker> · runs in <tool> · <cost>". */
+function MadeBy({ c, indent }: { c: Choice; indent?: boolean }) {
   if (!c.madeBy && !c.cost) return null;
   return (
-    <span className="flex items-baseline gap-1 text-xs text-ink-3" data-made-by>
+    <span className={`flex items-baseline gap-1 whitespace-nowrap text-xs text-ink-3 ${indent ? "pl-[22px]" : ""}`} data-made-by>
       {c.madeBy}
       {c.madeBy && c.cost && <span aria-hidden>·</span>}
       <CostTag cost={c.cost} />
@@ -170,25 +170,25 @@ function Seg<T extends string>({ name, options, value, onPick, disabled, labelOf
 /* The link every "isn't connected" carries: Settings › Providers. */
 function ConnectLink({ provider, onNavigate, children }: { provider: string; onNavigate?: AgentsScreenProps["onNavigate"]; children?: ReactNode }) {
   return (
-    <button type="button" className="text-sm text-pass underline" data-connect={provider} onClick={() => onNavigate?.("providers")}>
+    <button type="button" className={`text-sm ${link}`} data-connect={provider} onClick={() => onNavigate?.("providers")}>
       {children ?? `Connect ${productName(provider)}`}
     </button>
   );
 }
 
-/* The choices for a slot, grouped: the person's custom agents, each
-   connected provider's models (cost, speed, what it's good at), then one
-   quiet line per provider that isn't connected. Inline, under the row. */
-function Choices({ name, choices, current, skip = [], fresh, onPick, onMake, missing, onNavigate }: {
+/* The models for a slot, grouped: the person's custom profiles that pin a
+   model, each connected provider's models (cost, speed, what it's good at),
+   then one quiet line per provider that isn't connected. Inline, under the row. */
+function Choices({ name, choices, current, skip = [], onPick, missing, onNavigate, extra }: {
   name: string;
   choices: Choice[];
   current?: string | null;
   skip?: string[];
-  fresh?: string | null;
   onPick(id: string): void;
-  onMake?(): void;
   missing: string[];
   onNavigate?: AgentsScreenProps["onNavigate"];
+  /* A first line before the models (an agent's "Follow the job size"). */
+  extra?: ReactNode;
 }) {
   /* What can run is offered; one of a connected provider's that can't (its
      own sign-in is out, its provider is excluded, a check found problems)
@@ -201,7 +201,7 @@ function Choices({ name, choices, current, skip = [], fresh, onPick, onMake, mis
       {!c.ok ? (
         <span className="grid w-full grid-cols-[minmax(0,18rem)_minmax(0,1fr)] items-baseline gap-x-s2 px-s1 py-0.5 text-sm text-ink-3" data-choice-off={c.id}>
           <span className="flex min-w-0 flex-col">
-            <span className="flex min-w-0 items-center gap-1">
+            <span className="flex min-w-0 items-center gap-1.5">
               <ChoiceName c={c} />
             </span>
             <MadeBy c={c} />
@@ -209,22 +209,21 @@ function Choices({ name, choices, current, skip = [], fresh, onPick, onMake, mis
           <span className="truncate text-xs text-sap">{c.why}</span>
         </span>
       ) : (
-      <button
-        type="button"
-        className={`grid w-full grid-cols-[minmax(0,18rem)_minmax(0,1fr)] items-baseline gap-x-s2 rounded-md px-s1 py-0.5 text-left text-sm hover:bg-surface-2 ${c.id === current ? "bg-pass-soft" : ""}`}
-        aria-current={c.id === current ? "true" : undefined}
-        data-choice={c.id}
-        onClick={() => onPick(c.id)}
-      >
-        <span className="flex min-w-0 flex-col">
-          <span className="flex min-w-0 items-center gap-1">
-            <ChoiceName c={c} />
-            {fresh === c.id && <span className={`${pill} text-pass`}>new</span>}
+        <button
+          type="button"
+          className={`grid w-full grid-cols-[minmax(0,18rem)_minmax(0,1fr)] items-baseline gap-x-s2 rounded-md px-s1 py-0.5 text-left text-sm hover:bg-surface-2 ${c.id === current ? "bg-pass-soft" : ""}`}
+          aria-current={c.id === current ? "true" : undefined}
+          data-choice={c.id}
+          onClick={() => onPick(c.id)}
+        >
+          <span className="flex min-w-0 flex-col">
+            <span className="flex min-w-0 items-center gap-1.5">
+              <ChoiceName c={c} />
+            </span>
+            <MadeBy c={c} />
           </span>
-          <MadeBy c={c} />
-        </span>
-        <span className="truncate text-xs text-ink-2">{c.good}</span>
-      </button>
+          <span className="truncate text-xs text-ink-2">{c.good}</span>
+        </button>
       )}
     </li>
   );
@@ -236,15 +235,10 @@ function Choices({ name, choices, current, skip = [], fresh, onPick, onMake, mis
       </div>
     );
   return (
-    <div className="flex flex-col gap-s1 px-s1 py-s1" role="group" aria-label={`Choices for ${name}`} data-testid="choices">
-      {group("Your custom agents", own, "own")}
+    <div className="flex flex-col gap-s1 py-s1" role="group" aria-label={`Choices for ${name}`} data-testid="choices">
+      {extra}
+      {group("Your own", own, "own")}
       {byProvider.map((p) => group(<><Mark provider={p} />{productName(p)}</>, shown.filter((c) => !c.custom && c.provider === p), p))}
-      {onMake && (
-        <button type="button" className="flex items-baseline gap-s2 rounded-md px-s1 py-0.5 text-left text-sm hover:bg-surface-2" onClick={onMake}>
-          <span className="font-medium text-pass">+ Make a custom agent…</span>
-          <span className="text-xs text-ink-3">A model plus your effort, instructions and rules</span>
-        </button>
-      )}
       {missing.map((p) => (
         <p key={p} className="flex flex-wrap items-center gap-1 px-s1 text-xs text-ink-3" data-missing={p}>
           <Mark provider={p} />
@@ -284,8 +278,41 @@ const ProblemsButton = ({ c, open, onToggle }: { c: Choice; open: boolean; onTog
     </button>
   ) : null;
 
-interface RowProps {
-  kind: Kind;
+/* Why a fallback is skipped, in two or three words beside it. */
+function shortWhy(c: Choice): string {
+  switch (c.blocker) {
+    case "signed_out":
+      return "signed out";
+    case "not_installed":
+      return "not connected";
+    case "excluded":
+      return "excluded";
+    case "refused":
+      return "not allowed";
+    case "problems":
+      return problemCount(c.problems.length);
+    default:
+      return c.why;
+  }
+}
+
+/* Why a first pick can't run, after its name: "isn't allowed by your org". */
+function cantRun(c: Choice): string {
+  switch (c.blocker) {
+    case "refused":
+      return "isn't allowed by your org";
+    case "problems":
+      return `has ${problemCount(c.problems.length)}`;
+    default:
+      return `can't run: ${c.why}`;
+  }
+}
+
+/* The first entry that can run, where the size's first pick can't. */
+const runner = (list: Choice[]): Choice | undefined => list.find((c) => c.ok);
+
+interface SizeRowProps {
+  size: Size;
   state: KindState;
   choiceOf(id: string): Choice;
   choices: Choice[];
@@ -294,9 +321,7 @@ interface RowProps {
   adding: boolean;
   /* The agent whose problems are open under the row, if any. */
   probs: string | null;
-  fresh: string | null;
   busy: boolean;
-  builder: ReactNode;
   onPanel(p: Panel | null): void;
   onAdding(): void;
   onProbs(id: string): void;
@@ -304,63 +329,35 @@ interface RowProps {
   onNavigate?: AgentsScreenProps["onNavigate"];
 }
 
-function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, probs, fresh, busy, builder, onPanel, onAdding, onProbs, put, onNavigate }: RowProps) {
-  const { name, blurb } = KIND_INFO[kind];
+/* One job size in the shared table: what runs it, then at its limit. */
+function SizeRow({ size, state, choiceOf: info, choices, missing, panel, adding, probs, busy, onPanel, onAdding, onProbs, put, onNavigate }: SizeRowProps) {
+  const { name, blurb } = KIND_INFO[size];
   const list = runOrder(state).map(info);
   const [first, ...rest] = list;
-  const now = list.find((c) => c.ok);
+  const now = runner(list);
+  // What the row shows as running it: the first pick, or the one standing in for it.
+  const shown = first && !first.ok && now ? now : first;
+  const standingIn = !!first && shown !== first;
+  const chain = list.map((c, i) => ({ c, at: i + 1 })).filter(({ c }) => c !== first && c !== shown);
   const learned = state.learned ? info(state.learned) : null;
   const own = [state.model, ...state.fallbacks].filter((x): x is string => !!x);
-  // Each agent's "N problems" opens its own.
   const broken = list.find((c) => c.id === probs && c.problems.length > 0);
   const problems = (c: Choice) => <ProblemsButton c={c} open={probs === c.id} onToggle={() => onProbs(c.id)} />;
-  // Its provider can be connected or signed in from Settings › Providers.
-  const connectable = (c: Choice | undefined) => !!c?.provider && (c.blocker === "not_installed" || c.blocker === "signed_out");
   const toggle = (p: Panel) => onPanel(panel === p ? null : p);
   const [instr, setInstr] = useState(state.instructions ?? "");
   useEffect(() => setInstr(state.instructions ?? ""), [state.instructions]);
 
-  let note: ReactNode = null;
-  if (learned) {
-    note = (
-      <div className="flex flex-col gap-0.5 rounded-md bg-pass-soft px-s1 py-0.5 text-sm" data-testid="learned">
-        <span>
-          brindle learned <b>{learned.label}</b> does better here ·{" "}
-          <button type="button" className="text-pass underline" disabled={busy} onClick={() => put({ locked: true })}>
-            use mine instead
-          </button>
-        </span>
-        <span className="text-xs text-ink-3">Lock this row to keep your choice.</span>
-      </div>
-    );
-  } else if (first && !first.ok && now) {
-    note = (
-      <p className="flex flex-wrap items-baseline gap-x-1 rounded-md bg-sap-soft px-s1 py-0.5 text-sm" data-testid="cant-run">
-        {first.label} can't run: {first.why}. <b>{now.label}</b> runs it until then.
-        {connectable(first) && <ConnectLink provider={first.provider} onNavigate={onNavigate} />}
-      </p>
-    );
-  }
-  if (!now) {
-    note = (
-      <p className="rounded-md bg-sap-soft px-s1 py-0.5 text-sm text-sap" data-testid="cant-run">
-        Nothing here can run this now{first ? `: ${first.label} can't (${first.why})` : ""}. This work waits.
-        {connectable(first) && <> <ConnectLink provider={first.provider} onNavigate={onNavigate} /></>}
-      </p>
-    );
-  }
-
   const fallbacks = (
-    <div className="flex flex-col gap-s1 px-s2 py-s1" data-testid="fallback-list">
+    <div className="flex flex-col gap-s1 py-s1" data-testid="fallback-list">
       <p className="text-xs text-ink-2">Tried in order when the one before it is at its limit or can't run. None left: the task waits and you're told.</p>
-      <ol className="flex flex-col rounded-md bg-canvas-2 px-s1 py-0.5" aria-label={`${name} fallbacks`}>
+      <ol className="flex flex-col" aria-label={`${name} fallbacks`}>
         {rest.map((c, k) => {
           const i = own.indexOf(c.id);
           const mine = !!learned && i === 0;
           return (
-            <li key={c.id} className="flex items-center gap-s1 py-0.5 text-sm" data-choice={c.id}>
-              <span className="w-4 text-right text-xs text-ink-3">{k + 1}</span>
-              <span className={`flex min-w-0 items-center gap-1 ${c.ok ? "" : "text-ink-3 line-through"}`}>
+            <li key={c.id} className="flex items-center gap-s1 border-t border-line py-1.5 text-sm first:border-t-0" data-choice={c.id}>
+              <span className="w-3.5 text-right text-xs text-ink-3">{k + 2}</span>
+              <span className={`flex min-w-0 items-center gap-1.5 ${c.ok ? "" : "text-ink-3"}`}>
                 <ChoiceName c={c} />
               </span>
               <CostTag cost={c.cost} />
@@ -385,7 +382,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
             </li>
           );
         })}
-        {rest.length === 0 && <li className="py-0.5 text-sm text-ink-3">No fallbacks yet.</li>}
+        {rest.length === 0 && <li className="py-1.5 text-sm text-ink-3">No fallbacks yet.</li>}
         <li>
           <button type="button" className={`${quiet} -ml-s1`} aria-expanded={adding} onClick={onAdding}>
             {adding ? "−" : "+"} Add a fallback
@@ -396,8 +393,22 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
     </div>
   );
 
-  const more = (
-    <div className="flex flex-col gap-s1 px-s2 py-s1" data-testid="more">
+  const edit = (
+    <div className="flex flex-col gap-s1 py-s1" data-testid="edit">
+      <div className="flex flex-wrap items-center gap-s2 text-sm">
+        <span className="w-24 text-ink-3">Learning</span>
+        <button
+          type="button"
+          className={`btn btn-quiet ${state.locked ? "bg-surface-2 text-ink" : ""}`}
+          aria-pressed={state.locked}
+          data-testid="lock"
+          disabled={busy}
+          onClick={() => put({ locked: !state.locked })}
+        >
+          {state.locked ? "Locked to your order" : "Lock to your order"}
+        </button>
+        <span className="text-xs text-ink-3">{state.locked ? "Learning won't change this size." : "brindle's hosted learning may run a better model here, and says so."}</span>
+      </div>
       <div className="flex flex-wrap items-center gap-s2 text-sm">
         <span className="w-24 text-ink-3">Effort</span>
         <Seg name={`${name} effort`} options={EFFORT} value={(state.effort as (typeof EFFORT)[number]) ?? null} disabled={busy} onPick={(effort) => put({ effort })} />
@@ -407,7 +418,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
         <textarea
           className={`${field} min-h-16 min-w-0 flex-1`}
           value={instr}
-          placeholder={`Added to whatever runs ${name} work.`}
+          placeholder={`Added to whatever runs ${name} jobs.`}
           onChange={(e) => setInstr(e.target.value)}
           onBlur={() => {
             // Blank clears them: null, not "", so the engine drops the instructions.
@@ -421,93 +432,94 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
 
   const picking = (
     <div className="flex flex-col gap-0.5">
-      {learned && <p className="text-xs text-ink-3">Learning runs {learned.label} here now. Picking one locks this row, so learning won't change it.</p>}
+      {learned && <p className="text-xs text-ink-3">Learning runs {learned.label} here now. Picking one locks this size, so learning won't change it.</p>}
       <Choices
         name={name}
         choices={choices}
         current={state.model}
-        fresh={fresh}
         missing={missing}
         onPick={(id) => {
           onPanel(null);
           // What ran it before becomes its first fallback.
           put({ model: id, fallbacks: own.filter((x) => x !== id) });
         }}
-        onMake={() => onPanel("make")}
         onNavigate={onNavigate}
       />
     </div>
   );
 
-  const ext = panel === "pick" ? picking : panel === "fb" ? fallbacks : panel === "more" ? more : panel === "make" ? builder : null;
-  const selected = panel === "pick" || panel === "fb" || panel === "make";
+  const ext = panel === "pick" ? picking : panel === "fb" ? fallbacks : panel === "edit" ? edit : null;
   return (
-    <li className={`grid grid-cols-[12rem_minmax(0,1fr)] gap-x-s3 gap-y-s1 border-t border-line px-s2 py-s2 lg:grid-cols-[12rem_minmax(0,16rem)_minmax(0,1fr)_auto] ${selected ? "bg-surface-2" : ""}`} aria-label={`${name} work`} data-testid={`kind-${kind}`}>
-      <div>
-        <div className="text-sm font-semibold">{name}</div>
-        <div className="text-xs text-ink-2">{blurb}</div>
-      </div>
-      <div className="flex min-w-0 flex-col items-start gap-1">
-        {first ? (
-          <button
-            type="button"
-            className={`inline-flex max-w-full items-center gap-1 rounded-md border border-line-strong bg-surface px-s1 py-0.5 text-sm hover:bg-surface-2 ${first.ok ? "" : "text-ink-3"}`}
-            aria-label={`${name} runs on`}
-            aria-expanded={panel === "pick"}
-            data-choice={first.id}
-            onClick={() => toggle("pick")}
-          >
-            <ChoiceName c={first} />
-            {learned && <span className={`${pill} text-pass`}>learned</span>}
-            <span className="text-ink-3" aria-hidden>
-              ▾
+    <li className="border-t border-line py-[11px]" aria-label={`${name} jobs`} data-testid={`kind-${size}`}>
+      <div className="grid grid-cols-[9.75rem_minmax(0,18.75rem)_minmax(0,1fr)_auto] items-start gap-x-s3">
+        <div>
+          <div className="text-sm font-semibold">{name}</div>
+          <div className="text-xs text-ink-2">{blurb}</div>
+        </div>
+        <div className="flex min-w-0 flex-col items-start">
+          {shown ? (
+            <button
+              type="button"
+              className={`-mx-1 flex max-w-full items-center gap-1.5 whitespace-nowrap rounded-md px-1 text-left text-sm hover:bg-surface-2 ${shown.ok ? "" : "text-ink-3"}`}
+              aria-label={`${name} runs on`}
+              aria-expanded={panel === "pick"}
+              data-choice={shown.id}
+              data-standing-in={standingIn || undefined}
+              onClick={() => toggle("pick")}
+            >
+              <ChoiceName c={shown} />
+              {learned && <span className={`${pill} text-branch`} data-learned>learned</span>}
+              {standingIn && <span className={`${pill} text-pass`}>standing in</span>}
+            </button>
+          ) : (
+            <button type="button" className={button} aria-label={`${name} runs on`} aria-expanded={panel === "pick"} onClick={() => toggle("pick")}>
+              Pick a model
+            </button>
+          )}
+          {standingIn ? (
+            <span className="pl-[22px] text-xs text-ink-3" data-testid="first-pick">
+              Your first pick, {first.label}, <span className="text-fail" title={first.why}>{cantRun(first)}</span>
             </span>
-          </button>
-        ) : (
-          <button type="button" className={button} aria-label={`${name} runs on`} aria-expanded={panel === "pick"} onClick={() => toggle("pick")}>
-            Pick a model ▾
-          </button>
-        )}
-        {first && <MadeBy c={first} />}
-        {first && problems(first)}
-        {note}
-      </div>
-      <div className="text-sm">
-        <button type="button" className="text-left" aria-expanded={panel === "fb"} data-testid="fallbacks" onClick={() => toggle("fb")}>
-            <span className="text-ink-3">If it's at its limit: </span>
-            <span data-testid="chain">
-              {rest.length === 0
-                ? "the task waits"
-                : rest.map((c, i) => (
-                    <span key={c.id}>
-                      {i > 0 && ", then "}
-                      <span className={c.ok ? "" : "text-ink-3 line-through"}>{c.label}</span>
-                    </span>
-                  ))}
-            </span>{" "}
-            <span className="text-pass">
-              fallbacks ({rest.length}) {panel === "fb" ? "▴" : "▾"}
+          ) : shown && !shown.ok ? (
+            <span className="pl-[22px] text-xs text-fail" data-testid="nothing-runs">
+              {shown.why}. Nothing in this order can run: these jobs wait.
             </span>
+          ) : (
+            shown && <MadeBy c={shown} indent />
+          )}
+          {learned && (
+            <span className="pl-[22px] text-xs text-ink-3" data-testid="learned">
+              brindle learned it does better here ·{" "}
+              <button type="button" className={link} disabled={busy} onClick={() => put({ locked: true })}>
+                use mine instead
+              </button>
+            </span>
+          )}
+          {first && <span className="pl-[22px]">{problems(first)}</span>}
+        </div>
+        <button type="button" className="min-w-0 text-left" aria-expanded={panel === "fb"} aria-label={`${name}: then, at its limit`} data-testid="fallbacks" onClick={() => toggle("fb")}>
+          <span className="flex flex-wrap gap-x-5 gap-y-1.5 pt-px text-sm" data-testid="chain">
+            {chain.length === 0 ? (
+              <span className="text-ink-3">The task waits</span>
+            ) : (
+              chain.map(({ c, at }) => (
+                <span key={c.id} className={`inline-flex items-center gap-1.5 whitespace-nowrap ${c.ok ? "" : "text-ink-3"}`} data-chain={c.id} data-skipped={c.ok ? undefined : c.blocker ?? "missing"}>
+                  <span className="inline-block w-3.5 text-right text-xs text-ink-3">{at}</span>
+                  <Mark provider={c.provider} />
+                  <span data-chain-label>{c.label}</span>
+                  <EffortChip effort={c.effort} />
+                  {!c.ok && <span className={`${pill} text-sap`}>{shortWhy(c)}</span>}
+                </span>
+              ))
+            )}
+          </span>
         </button>
-      </div>
-      <div className="flex items-start gap-s1">
-        <button
-          type="button"
-          className={`${chip} border ${state.locked ? "border-pass/55 bg-pass-soft text-pass" : "border-line text-ink-2"}`}
-          aria-pressed={state.locked}
-          data-testid="lock"
-          title={state.locked ? "Locked: learning won't change this row. Click to let it." : "Learning may run a better model here. Click to lock your choice."}
-          disabled={busy}
-          onClick={() => put({ locked: !state.locked })}
-        >
-          <span aria-hidden>{state.locked ? "🔒" : "🔓"}</span> {state.locked ? "Locked" : "Lock"}
-        </button>
-        <button type="button" className={`${quiet} text-xs`} aria-expanded={panel === "more"} onClick={() => toggle("more")}>
-          More {panel === "more" ? "▴" : "▾"}
+        <button type="button" className={quiet} aria-expanded={panel === "edit"} aria-label={`Edit ${name}`} onClick={() => toggle("edit")}>
+          Edit
         </button>
       </div>
       {(ext || broken) && (
-        <div className="col-span-full flex flex-col gap-s1 lg:col-start-2">
+        <div className="mt-s1 flex flex-col gap-s1 rounded-md bg-surface-2 px-s2 py-s1">
           {ext}
           {broken && <Problems c={broken} />}
         </div>
@@ -516,192 +528,282 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
   );
 }
 
-/* The guided path to a custom agent, under the row it was opened from:
-   the five steps as one short form, each unlocking the next. */
-function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, choiceOf: info, current, busy, error, onCreate, onCancel, onNavigate }: {
-  kind: Kind;
+/* An agent's own models by size: each size follows the job size, or runs
+   a model of its own, picked inline. */
+function SizeModels({ who, own, choicesFor, info, missing, busy, onSet, onNavigate }: {
+  who: string;
+  own: Partial<Record<Size, string>>;
+  choicesFor(size: Size): Choice[];
+  info(id: string): Choice;
+  missing: string[];
+  busy: boolean;
+  onSet(size: Size, id: string | null): void;
+  onNavigate?: AgentsScreenProps["onNavigate"];
+}) {
+  const [open, setOpen] = useState<Size | null>(null);
+  return (
+    <ul className="flex flex-col" aria-label={`${who}'s models by job size`}>
+      {SIZES.map((s) => {
+        const id = own[s];
+        return (
+          <li key={s} className="flex flex-col border-t border-line py-1 first:border-t-0" data-size={s} data-own={id ?? undefined}>
+            <span className="flex items-center gap-s2 text-sm">
+              <span className="w-20 text-ink-2">{KIND_INFO[s].name}</span>
+              <button type="button" className="flex items-center gap-1.5 rounded-md px-1 hover:bg-canvas" aria-expanded={open === s} aria-label={`${who} ${KIND_INFO[s].name} model`} disabled={busy} onClick={() => setOpen(open === s ? null : s)}>
+                {id ? <ChoiceName c={info(id)} /> : <span className="text-ink-2">Follows the job size</span>}
+                <span className="text-ink-3" aria-hidden>
+                  ▾
+                </span>
+              </button>
+            </span>
+            {open === s && (
+              <Choices
+                name={`${who} ${KIND_INFO[s].name}`}
+                choices={choicesFor(s)}
+                current={id ?? null}
+                missing={missing}
+                onNavigate={onNavigate}
+                onPick={(pick) => {
+                  setOpen(null);
+                  onSet(s, pick);
+                }}
+                extra={
+                  id ? (
+                    <button
+                      type="button"
+                      className="rounded-md px-s1 py-0.5 text-left text-sm text-ink-2 hover:bg-canvas"
+                      onClick={() => {
+                        setOpen(null);
+                        onSet(s, null);
+                      }}
+                    >
+                      Follow the job size
+                    </button>
+                  ) : null
+                }
+              />
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+const worksLikeLabel = (w: WorksLike) => agentLabel(w);
+
+/* The add-an-agent form (and the same form to edit one of the person's
+   own): one column, Name, What it's for, Instructions, Rules, then the two
+   defaults behind Change. Soft-filled inputs on the page ground. */
+function AgentForm({ editing, draft, setDraft, rules, taken, pinned, busy, error, choicesFor, info, missing, onSave, onCancel, onNavigate }: {
+  /* The agent being edited, or null for a new one. */
+  editing: AgentRow | null;
   draft: Draft;
   setDraft(d: Draft): void;
-  profiles: RoutingProfileDTO[];
-  connected: Set<string>;
   rules: RulePackInfo[];
   taken: string[];
-  choiceOf(id: string): Choice;
-  current: Record<Kind, KindState>;
+  /* A pinned profile's model ("Its own"), when editing one. */
+  pinned: Choice | null;
   busy: boolean;
   error: string | null;
-  onCreate(): void;
+  choicesFor(size: Size): Choice[];
+  info(id: string): Choice;
+  missing: string[];
+  onSave(): void;
   onCancel(): void;
   onNavigate?: AgentsScreenProps["onNavigate"];
 }) {
   const set = (patch: Partial<Draft>) => setDraft({ ...draft, ...patch });
-  const providers = providersOf(profiles).filter((p) => p !== "native" || connected.has(p));
-  const off = providers.filter((p) => !connected.has(p));
-  const models = draft.provider ? modelsOf(draft.provider, profiles) : [];
-  const picked = models.find((m) => m.model === draft.model);
-  const problem = draftProblem(draft, taken);
-  const name = cleanName(draft.name);
-  const useFor = draft.useFor;
-  const before = useFor ? current[useFor].model : null;
-  const reach = !draft.name.trim() || !draft.purpose.trim() ? 0 : !draft.model ? 1 : 4;
-  const step = (i: number, body: ReactNode) => (
-    <div key={STEPS[i][0]} className={`grid gap-x-s3 gap-y-1 border-t border-line py-s1 md:grid-cols-[11rem_minmax(0,1fr)] ${i > reach ? "opacity-[var(--dim)]" : ""}`} data-step={STEPS[i][0]}>
-      <span className="flex items-baseline gap-1 text-sm font-semibold">
-        <span className="inline-flex size-4 items-center justify-center rounded-full bg-pass-soft text-[10px] text-pass">{i + 1}</span>
-        {STEPS[i][1]}
-      </span>
-      <div className="flex min-w-0 flex-col gap-s1">{body}</div>
-    </div>
-  );
+  const ownSizes = SIZES.filter((s) => draft.own[s]);
+  const [change, setChange] = useState(false);
+  const [ownModel, setOwnModel] = useState(ownSizes.length > 0);
+  const problem = editing ? (draft.purpose.trim() ? null : "Say what it's for.") : draftProblem(draft, taken);
+  const mode = ownSizes.length === 0 ? "follows" : ownSizes.length === SIZES.length ? "own" : "except";
+  const first = useRef<HTMLInputElement>(null);
+  useEffect(() => first.current?.focus(), []);
+  const hint = "text-xs text-ink-3";
+  const key = "text-[13px] font-medium";
+  const title = editing ? `Edit ${editing.label}` : "New agent";
   return (
-    <section className={`${card} flex flex-col gap-s1 border-pass/55 px-s2 py-s2`} aria-label="New custom agent" data-testid="builder">
-      <header className="flex flex-col">
-        <h3 className="text-sm font-semibold">New custom agent</h3>
-        <p className="text-xs text-ink-2">A model plus how it should work. When it's made, it's in every model list, and {KIND_INFO[kind].name} can use it.</p>
-      </header>
-      {step(
-        0,
-        <>
-          <label className="flex max-w-md flex-col gap-0.5 text-xs text-ink-3">
-            Name
-            <input className={`${field} ${mono}`} value={draft.name} placeholder="careful-dev" onChange={(e) => set({ name: e.target.value })} />
+    <section className="border-t border-line py-s3" aria-label={title} data-testid="agent-form">
+      <div className="flex max-w-[620px] flex-col gap-[18px]">
+        <h3 className={h2}>{title}</h3>
+        <label className="flex flex-col gap-[5px]">
+          <span className={key}>Name</span>
+          <input
+            ref={editing ? undefined : first}
+            className={`${softField} ${mono}`}
+            value={draft.name}
+            placeholder="frontend-developer"
+            readOnly={!!editing}
+            aria-readonly={!!editing || undefined}
+            onChange={(e) => set({ name: e.target.value })}
+          />
+        </label>
+        <div className="flex flex-col gap-[5px]">
+          <label className="flex flex-col gap-[5px]">
+            <span className={key}>What it's for</span>
+            <input ref={editing ? first : undefined} className={softField} value={draft.purpose} placeholder="Builds and polishes UI components" onChange={(e) => set({ purpose: e.target.value })} />
           </label>
-          <label className="flex max-w-md flex-col gap-0.5 text-xs text-ink-3">
-            What it's for
-            <input className={field} value={draft.purpose} placeholder="Feature work, tests first, small commits" onChange={(e) => set({ purpose: e.target.value })} />
-          </label>
-        </>,
-      )}
-      {step(
-        1,
-        <>
-          <div className="flex flex-wrap gap-1" role="group" aria-label="Provider">
-            {providers.map((p) =>
-              connected.has(p) ? (
-                <button key={p} type="button" aria-pressed={draft.provider === p} className={`${chip} gap-1 border py-0.5 ${draft.provider === p ? "border-pass/55 bg-pass-soft text-pass" : "border-line text-ink"}`} onClick={() => set({ provider: p, model: null })}>
-                  <Mark provider={p} />
-                  {productName(p)}
-                  <span className={draft.provider === p ? "text-ink-2" : "text-ink-3"}>{modelsOf(p, profiles).length} models</span>
-                </button>
-              ) : (
-                <span key={p} className={`${chip} gap-1 border border-line py-0.5 text-ink-3`} data-provider-off={p}>
-                  <Mark provider={p} />
-                  {productName(p)} <span>not connected</span>
-                </span>
-              ),
-            )}
-          </div>
-          {off.length > 0 && (
-            <p className="text-xs text-ink-3">
-              Only connected providers can run agents here. {off.map(productName).join(" and ")}: <ConnectLink provider={off[0]} onNavigate={onNavigate}>connect in Settings › Providers</ConnectLink>.
-            </p>
-          )}
-          {draft.provider ? (
-            <div className="grid gap-1 sm:grid-cols-2 xl:grid-cols-3" role="group" aria-label="Model">
-              {models.map((m) => (
-                <button key={m.name} type="button" aria-pressed={draft.model === m.model} className={`flex flex-col items-start rounded-md border px-s1 py-0.5 text-left ${draft.model === m.model ? "border-pass/55 bg-pass-soft" : "border-line hover:bg-surface-2"}`} onClick={() => set({ model: m.model ?? null })}>
-                  <span className="text-sm font-semibold" data-model-name={displayOf(m)}>{displayOf(m)}</span>
-                  <span className={`text-xs ${draft.model === m.model ? "text-ink-2" : "text-ink-3"}`}>
-                    {[madeBy(m), `${COST_MARK[m.cost_tier]} ${COST_WORDS[m.cost_tier]}`].filter(Boolean).join(" · ")}
-                  </span>
-                  <span className="text-xs text-ink-2">{info(m.name).good}</span>
-                </button>
-              ))}
-            </div>
-          ) : (
-            <p className="text-xs text-ink-3">Pick a provider to see its models.</p>
-          )}
-        </>,
-      )}
-      {step(
-        2,
-        <>
-          <div className="flex flex-wrap items-center gap-s2 text-sm">
-            <span className="w-24 text-ink-3">Effort</span>
-            <Seg name="Effort" options={EFFORT} value={draft.effort as (typeof EFFORT)[number]} onPick={(effort) => set({ effort })} />
-            <span className="text-xs text-ink-3">Higher thinks longer and costs more.</span>
-          </div>
-          <label className="flex flex-col gap-0.5 text-xs text-ink-3">
-            Instructions
-            <textarea className={`${field} min-h-16`} value={draft.instructions} placeholder="Write the failing test first. Keep each commit to one step." onChange={(e) => set({ instructions: e.target.value })} />
-          </label>
-          <div className="flex flex-col gap-0.5 text-sm" role="group" aria-label="Rules">
-            <p className="text-xs text-ink-3">
-              Rules are short instructions brindle adds to this agent's brief.{" "}
-              <button type="button" className="text-pass underline" onClick={() => onNavigate?.("knowledge")}>
-                See all rules
-              </button>
-            </p>
+          <span className={hint}>One line. The supervisor reads it to decide which tasks this agent gets.</span>
+        </div>
+        <label className="flex flex-col gap-[5px]">
+          <span className={key}>Instructions</span>
+          <textarea
+            className={`${softField} min-h-[92px] resize-y`}
+            value={draft.instructions}
+            placeholder={editing ? "Leave empty to keep its instructions as they are." : "How it should work, in your words. For example: use the app's tokens, and render the screen before you report."}
+            onChange={(e) => set({ instructions: e.target.value })}
+          />
+        </label>
+        <div className="flex flex-col gap-[5px]" role="group" aria-label="Rules">
+          <span className={key}>Rules</span>
+          <ul className="-mx-2 flex flex-col gap-0.5">
             {rules.map((r) => (
-              <label key={r.name} className="grid cursor-pointer grid-cols-[1rem_minmax(0,10rem)_minmax(0,1fr)] items-baseline gap-x-s1" data-rule={r.name}>
-                <input type="checkbox" className="accent-current" checked={draft.rules.includes(r.name)} onChange={() => set({ rules: draft.rules.includes(r.name) ? draft.rules.filter((x) => x !== r.name) : [...draft.rules, r.name] })} />
-                <span className={mono}>{r.name}</span>
-                <span className="text-ink-2">{r.description}</span>
-              </label>
+              <li key={r.name}>
+                <label className="grid cursor-pointer grid-cols-[14px_minmax(0,1fr)] gap-x-2.5 rounded-[6px] px-2 py-[5px] hover:bg-surface-2" data-rule={r.name}>
+                  <span className="relative mt-[3px] flex">
+                    <input
+                      type="checkbox"
+                      className="peer sr-only"
+                      checked={draft.rules.includes(r.name)}
+                      onChange={() => set({ rules: draft.rules.includes(r.name) ? draft.rules.filter((x) => x !== r.name) : [...draft.rules, r.name] })}
+                    />
+                    <span className={softCheck} aria-hidden>
+                      ✓
+                    </span>
+                  </span>
+                  <span className={mono}>{r.name}</span>
+                  <span className="col-start-2 text-xs text-ink-3">{r.description}</span>
+                </label>
+              </li>
             ))}
-            {rules.length === 0 && <p className="text-xs text-ink-3">No rule packs here yet.</p>}
-          </div>
-        </>,
-      )}
-      {step(
-        3,
-        <>
-          <div className="flex flex-wrap items-center gap-s2 text-sm">
-            <span className="text-ink-3">Use it for</span>
-            <Seg<"any" | Kind>
-              name="Use it for"
-              options={["any", ...KINDS]}
-              value={useFor ?? "any"}
-              labelOf={(k) => (k === "any" ? "Any kind of work" : KIND_INFO[k].name)}
-              onPick={(k) => set({ useFor: k === "any" ? null : k })}
-            />
-          </div>
-          <p className="text-xs text-ink-3">
-            {useFor
-              ? `It runs ${KIND_INFO[useFor].name} work first${before ? `; ${info(before).label} becomes its first fallback` : ""}.`
-              : "It can work at any level: it's saved and offered in every model list, so you can pick it for any kind of work, now or later."}
-          </p>
-        </>,
-      )}
-      {step(
-        4,
-        <>
-          <p className="text-sm" data-testid="summary">
-            {picked ? (
-              <>
-                <span className={mono}>
-                  <b>{name || "…"}</b>
-                </span>{" "}
-                runs on {displayOf(picked)} ({picked.tool ?? productName(picked.provider)}) <CostTag cost={picked.cost_tier} /> · {draft.effort} effort
-                {draft.rules.length > 0 && <> · rules {draft.rules.join(", ")}</>}, and {useFor ? <>runs <b>{KIND_INFO[useFor].name}</b> work{before ? `, ahead of ${info(before).label}` : ""}</> : "can work at any level, picked from any model list"}.
-              </>
+            {rules.length === 0 && <li className={`${hint} px-2`}>No rule packs here yet.</li>}
+          </ul>
+          <span className={hint}>
+            Ready-made instructions it must follow. Tick any that apply.{" "}
+            <button type="button" className={link} onClick={() => onNavigate?.("knowledge")}>
+              See all rules
+            </button>
+          </span>
+        </div>
+        <div className="flex flex-col gap-3 border-t border-line pt-3.5">
+          <p className="text-[13px] text-ink-2" data-testid="defaults" data-works-like={draft.worksLike} data-model-mode={pinned ? "own" : mode}>
+            {pinned ? (
+              <>Runs its own model, {pinned.display}, whatever the job size.</>
             ) : (
-              "Pick a model first."
+              <>
+                Works like a {worksLikeLabel(draft.worksLike)}, and its model{" "}
+                {mode === "follows" ? "follows the job size" : mode === "own" ? "is its own for every size" : `follows the job size, except ${ownSizes.map((s) => KIND_INFO[s].name).join(", ")}`}.{" "}
+                <button type="button" className={link} aria-expanded={change} onClick={() => setChange(!change)}>
+                  Change
+                </button>
+              </>
             )}
           </p>
-          <p className={`text-sm ${problem ? "text-sap" : "text-pass"}`} data-testid="check">
-            {problem ?? "brindle checked it: the model is available and every rule pack is installed."}
-          </p>
+          {change && !pinned && (
+            <div className="flex flex-col gap-3" data-testid="change">
+              <div className="flex flex-wrap items-center gap-s1">
+                <span className="w-[110px] text-sm text-ink-2">Works like</span>
+                <Seg name="Works like" options={WORKS_LIKE} value={draft.worksLike} labelOf={worksLikeLabel} onPick={(worksLike) => set({ worksLike })} />
+                <span className="text-xs text-ink-3">Its tools and what it may do.</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-s1">
+                <span className="w-[110px] text-sm text-ink-2">Model</span>
+                <Seg<"follows" | "own">
+                  name="Model"
+                  options={["follows", "own"]}
+                  value={ownModel ? "own" : "follows"}
+                  labelOf={(m) => (m === "follows" ? "Follows the job size" : "Its own for a size…")}
+                  onPick={(m) => {
+                    setOwnModel(m === "own");
+                    if (m === "follows") set({ own: {} });
+                  }}
+                />
+              </div>
+              {ownModel && (
+                <div className="pl-[118px]">
+                  <SizeModels
+                    who={cleanName(draft.name) || "It"}
+                    own={draft.own}
+                    choicesFor={choicesFor}
+                    info={info}
+                    missing={missing}
+                    busy={busy}
+                    onSet={(s, id) => {
+                      const next = { ...draft.own };
+                      if (id) next[s] = id;
+                      else delete next[s];
+                      set({ own: next });
+                    }}
+                    onNavigate={onNavigate}
+                  />
+                </div>
+              )}
+            </div>
+          )}
           {error && (
             <p role="alert" className={alert}>
-              Could not create it: {withLinks(error)}
+              Could not {editing ? "save" : "create"} it: {withLinks(error)}
             </p>
           )}
-          <div className="flex flex-wrap items-center gap-s1">
-            <span className="text-xs text-ink-3">
-              Saved to <span className={mono}>~/.brindle/agents/{name || "…"}.md</span>.
-            </span>
-            <span className="flex-1" />
+          <div className="flex flex-wrap items-center justify-end gap-s1">
+            {problem && draft.name.trim() && (
+              <span className="mr-auto text-xs text-sap" data-testid="form-problem">
+                {problem}
+              </span>
+            )}
             <button type="button" className={quiet} onClick={onCancel}>
               Cancel
             </button>
-            <button type="button" className={main} disabled={!!problem || busy} onClick={onCreate}>
-              {busy ? "Creating…" : "Create agent"}
+            <button type="button" className={main} disabled={!!problem || busy} onClick={onSave}>
+              {busy ? (editing ? "Saving…" : "Creating…") : editing ? "Save" : "Create agent"}
             </button>
           </div>
-        </>,
-      )}
+        </div>
+      </div>
     </section>
+  );
+}
+
+/* The Model cell of an agent's row. */
+function AgentModel({ a, info, pinned }: { a: AgentRow; info(id: string): Choice; pinned: Choice | null }) {
+  const own = (id: string) => {
+    const c = info(id);
+    return (
+      <span className="inline-flex items-center gap-1.5">
+        <Mark provider={c.provider} />
+        <span data-model-name={c.display}>{c.display}</span>
+        <EffortChip effort={c.effort} />
+      </span>
+    );
+  };
+  if (pinned)
+    return (
+      <span className="flex flex-col text-sm">
+        {own(pinned.id)}
+        <span className="text-xs text-ink-3">Its own: it names a model</span>
+      </span>
+    );
+  if (a.mode === "follows") return <span className="text-sm text-ink-2">Follows the job size</span>;
+  const sizes = SIZES.filter((s) => a.models[s]?.model);
+  const ids = [...new Set(sizes.map((s) => a.models[s]!.model!))];
+  if (a.mode === "own" && ids.length === 1)
+    return (
+      <span className="flex flex-col text-sm">
+        {own(ids[0])}
+        <span className="text-xs text-ink-3">{a.name === "supervisor" ? "Its own: a session isn't sized" : "Its own for every job size"}</span>
+      </span>
+    );
+  return (
+    <span className="flex flex-col text-sm">
+      <span className="text-ink-2">{a.mode === "own" ? "Its own for each job size" : "Follows the job size, except"}</span>
+      {sizes.map((s) => (
+        <span key={s} className="flex items-center gap-1.5">
+          {KIND_INFO[s].name}: {own(a.models[s]!.model!)}
+        </span>
+      ))}
+    </span>
   );
 }
 
@@ -718,6 +820,17 @@ function keepLearned(next: RoutingDTO, prev: RoutingDTO | null): RoutingDTO {
   return { ...next, kinds };
 }
 
+/* One thing that stops a size's first pick, with what fixes it. */
+interface Need {
+  key: string;
+  tone: "fail" | "sap";
+  head: string;
+  body: string;
+  action: ReactNode;
+}
+
+const ownOf = (a: AgentRow): Partial<Record<Size, string>> => Object.fromEntries(SIZES.filter((s) => a.models[s]?.model).map((s) => [s, a.models[s]!.model!]));
+
 export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   const { repos } = useSessions();
   /* Agents are the person's, the same in every repo (their settings and
@@ -730,12 +843,15 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [open, setOpen] = useState<{ kind: Kind; panel: Panel } | null>(null);
-  const [adding, setAdding] = useState<Kind | null>(null);
+  const [open, setOpen] = useState<{ size: Size; panel: Panel } | null>(null);
+  const [adding, setAdding] = useState<Size | null>(null);
   /* The row and the agent whose problems are open there. */
-  const [probs, setProbs] = useState<{ kind: Kind; id: string } | null>(null);
-  const [draft, setDraft] = useState<Draft | null>(null);
-  const [createError, setCreateError] = useState<string | null>(null);
+  const [probs, setProbs] = useState<{ size: Size; id: string } | null>(null);
+  /* The form: a new agent (name null) or the one being edited, and its answers. */
+  const [form, setForm] = useState<{ editing: string | null; draft: Draft } | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
+  /* A built-in agent whose own models are open under its row. */
+  const [models, setModels] = useState<string | null>(null);
   const [fresh, setFresh] = useState<string | null>(null);
   const seq = useRef(0);
 
@@ -765,7 +881,7 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   useEffect(() => {
     setRouting(null);
     setOpen(null);
-    setDraft(null);
+    setForm(null);
     setBusy(false);
     setSaveError(null);
     void load();
@@ -774,6 +890,7 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   const profiles = useMemo(() => routing?.profiles ?? [], [routing]);
   const connected = useMemo(() => connectedProviders(profiles), [profiles]);
   const kinds = useMemo(() => (routing ? kindsOf(routing) : null), [routing]);
+  const agents = useMemo(() => (routing ? agentRows(routing) : []), [routing]);
   const byName = useMemo(() => new Map(profiles.map((p) => [p.name, p])), [profiles]);
   const info = useCallback(
     (id: string): Choice => {
@@ -785,101 +902,172 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   const policy = routing?.policy;
   const frozen = !!policy?.applies && policy.editable === false;
   const missing = providersOf(profiles).filter((p) => !connected.has(p) && p !== "native");
-  const custom = profiles.filter(isCustom);
+  const offered = (k: Kind) => offeredFor(k, profiles).map((p) => choiceOf(p, connected, describe));
+  const pinnedOf = (a: AgentRow) => (a.pinned ? info(a.name) : null);
 
-  const put = (kind: Kind, change: KindPut) => {
+  const save = (body: Omit<RoutingPut, "repo" | "scope">) => {
     if (!repo || frozen) return Promise.resolve();
     setBusy(true);
     setSaveError(null);
     return client
-      .putRouting({ repo, scope: "user", kinds: { [kind]: change } })
+      .putRouting({ repo, scope: "user", ...body })
       .then(load)
       .catch((e: unknown) => setSaveError(message(e)))
       .finally(() => setBusy(false));
   };
+  const put = (size: Size, change: KindPut) => save({ kinds: { [size]: change } });
 
-  const panelFor = (k: Kind): Panel | null => (open?.kind === k ? open.panel : null);
-  const setPanel = (k: Kind, p: Panel | null) => {
-    setOpen(p ? { kind: k, panel: p } : null);
-    setAdding(null);
-    if (p === "make") {
-      setDraft(newDraft(k));
-      setCreateError(null);
+  /* An agent's own order for a size: the model picked, then the shared table's order behind it. */
+  const orderFor = (size: Size, id: string) => ({ model: id, fallbacks: kinds ? runOrder(kinds[size]).filter((x) => x !== id) : [] });
+  const ownChanges = (before: Partial<Record<Size, string>>, after: Partial<Record<Size, string>>) => {
+    const out: Record<string, { model: string; fallbacks?: string[] } | null> = {};
+    for (const s of SIZES) {
+      if (before[s] === after[s]) continue;
+      out[s] = after[s] ? orderFor(s, after[s]!) : null;
     }
+    return out;
+  };
+  /* What an agent's own model for a size may be: the models its role runs. */
+  const choicesFor = (role: string | null) => (s: Size) => offered(role === "reviewer" ? "reviewer" : s);
+
+  const panelFor = (s: Size): Panel | null => (open?.size === s ? open.panel : null);
+  const setPanel = (s: Size, p: Panel | null) => {
+    setOpen(p ? { size: s, panel: p } : null);
+    setAdding(null);
   };
 
-  const create = async (k: Kind) => {
-    if (!repo || !draft || !kinds || !draft.provider || !draft.model) return;
-    const name = cleanName(draft.name);
+  const startNew = () => {
+    setForm({ editing: null, draft: newDraft() });
+    setFormError(null);
+    setModels(null);
+  };
+  const startEdit = (a: AgentRow) => {
+    if (!a.custom) {
+      setForm(null);
+      setModels(models === a.name ? null : a.name);
+      return;
+    }
+    setModels(null);
+    setFormError(null);
+    setForm(
+      form?.editing === a.name
+        ? null
+        : { editing: a.name, draft: { name: a.name, purpose: a.description, instructions: "", rules: a.rules, worksLike: a.role === "reviewer" ? "reviewer" : "developer", own: ownOf(a) } },
+    );
+  };
+
+  const submit = async () => {
+    if (!repo || !form) return;
+    const { draft, editing } = form;
+    const name = editing ?? cleanName(draft.name);
+    const before = editing ? agents.find((a) => a.name === editing) : undefined;
     setBusy(true);
-    setCreateError(null);
+    setFormError(null);
     try {
-      await client.createProfile({ repo, name, description: draft.purpose.trim(), provider: draft.provider, model: draft.model, effort: draft.effort, instructions: draft.instructions, rules: draft.rules });
-      // It runs the kind chosen; what ran it before becomes its first fallback.
-      if (draft.useFor) {
-        const was = kinds[draft.useFor];
-        const own = [was.model, ...was.fallbacks].filter((x): x is string => !!x);
-        await client.putRouting({ repo, scope: "user", kinds: { [draft.useFor]: { model: name, fallbacks: own } } });
+      if (!editing) {
+        // An agent is how to work: no provider, model or effort; its model follows the job size.
+        await client.createProfile({ repo, name, description: draft.purpose.trim(), works_like: draft.worksLike, instructions: draft.instructions, rules: draft.rules });
+      } else {
+        const initialRole = before?.role === "reviewer" ? "reviewer" : "developer";
+        await client.updateProfile(name, {
+          repo,
+          description: draft.purpose.trim(),
+          rules: draft.rules,
+          ...(draft.instructions.trim() ? { instructions: draft.instructions } : {}),
+          ...(!before?.pinned && draft.worksLike !== initialRole ? { works_like: draft.worksLike } : {}),
+        });
       }
+      const changes = before?.pinned ? {} : ownChanges(before ? ownOf(before) : {}, draft.own);
+      if (Object.keys(changes).length > 0) await client.putRouting({ repo, scope: "user", agents: { [name]: { models: changes } } });
       setFresh(name);
-      setDraft(null);
+      setForm(null);
       await load();
-      // The builder closes; the row it went to shows its list, the new agent in it.
-      setOpen({ kind: draft.useFor ?? k, panel: "pick" });
     } catch (e) {
-      setCreateError(message(e));
+      setFormError(message(e));
     } finally {
       setBusy(false);
     }
   };
 
-  const row = (k: Kind) => {
-    if (!kinds) return null;
-    return (
-      <Row
-        key={k}
-        kind={k}
-        state={kinds[k]}
-        choiceOf={info}
-        choices={offeredFor(k, profiles).map((p) => choiceOf(p, connected, describe))}
+  /* Needs you: per size, a first pick that can't run, with its one fix. */
+  const needs: Need[] = [];
+  if (kinds) {
+    const offline = new Map<string, { names: Set<string>; sizes: Set<string>; blocker: string }>();
+    for (const s of SIZES) {
+      const list = runOrder(kinds[s]).map(info);
+      const [first] = list;
+      const now = runner(list);
+      for (const c of list) {
+        if (c.blocker !== "signed_out" && c.blocker !== "not_installed") continue;
+        const got = offline.get(c.provider) ?? { names: new Set(), sizes: new Set(), blocker: c.blocker };
+        got.names.add(c.label);
+        got.sizes.add(KIND_INFO[s].name);
+        offline.set(c.provider, got);
+      }
+      if (!first || first.ok || first.blocker === "signed_out" || first.blocker === "not_installed") continue;
+      needs.push({
+        key: `size-${s}`,
+        tone: "fail",
+        head: `${first.label} ${cantRun(first)}.`,
+        body: now ? `${KIND_INFO[s].name} jobs run on ${now.label} instead.` : `Nothing can run ${KIND_INFO[s].name} jobs now: they wait.`,
+        action: now && (
+          <button type="button" className={quiet} disabled={busy || frozen} onClick={() => void put(s, { model: now.id, fallbacks: runOrder(kinds[s]).filter((x) => x !== now.id) })}>
+            Put {now.label} first
+          </button>
+        ),
+      });
+    }
+    for (const [p, { names, sizes, blocker }] of offline) {
+      const signedOut = blocker === "signed_out";
+      needs.push({
+        key: `provider-${p}`,
+        tone: "sap",
+        head: `${productName(p)} ${signedOut ? "is signed out" : "isn't connected"}.`,
+        body: `${[...names].join(", ")} ${names.size === 1 ? "is" : "are"} skipped in ${[...sizes].join(", ")}.`,
+        action: (
+          <button type="button" className={quiet} data-connect={p} onClick={() => onNavigate?.("providers")}>
+            {signedOut ? "Sign in" : `Connect ${productName(p)}`}
+          </button>
+        ),
+      });
+    }
+  }
+
+  /* A provider that isn't connected and no size uses: one quiet line at the foot. */
+  const quietMissing = missing.filter((p) => !needs.some((n) => n.key === `provider-${p}`));
+
+  const formFor = (editing: AgentRow | null) =>
+    form && (
+      <AgentForm
+        editing={editing}
+        draft={form.draft}
+        setDraft={(draft) => setForm({ ...form, draft })}
+        rules={rules}
+        taken={profiles.map((p) => p.name)}
+        pinned={editing ? pinnedOf(editing) : null}
+        busy={busy}
+        error={formError}
+        choicesFor={choicesFor(editing?.role ?? (form.draft.worksLike === "reviewer" ? "reviewer" : null))}
+        info={info}
         missing={missing}
-        panel={panelFor(k)}
-        adding={adding === k}
-        probs={probs?.kind === k ? probs.id : null}
-        fresh={fresh}
-        busy={busy || frozen}
-        builder={
-          draft && (
-            <Builder
-              kind={k}
-              draft={draft}
-              setDraft={setDraft}
-              profiles={profiles}
-              connected={connected}
-              rules={rules}
-              taken={profiles.map((p) => p.name)}
-              choiceOf={info}
-              current={kinds}
-              busy={busy}
-              error={createError}
-              onCreate={() => void create(k)}
-              onCancel={() => setPanel(k, null)}
-              onNavigate={onNavigate}
-            />
-          )
-        }
-        onPanel={(p) => setPanel(k, p)}
-        onAdding={() => setAdding(adding === k ? null : k)}
-        onProbs={(id) => setProbs(probs?.kind === k && probs.id === id ? null : { kind: k, id })}
-        put={(change) => void put(k, change)}
+        onSave={() => void submit()}
+        onCancel={() => setForm(null)}
         onNavigate={onNavigate}
       />
     );
-  };
 
+  const head = "grid grid-cols-[12.5rem_minmax(0,1.25fr)_minmax(0,0.9fr)_minmax(0,1.05fr)_3rem] items-start gap-x-s3";
   return (
-    <section className="flex flex-col gap-s2" aria-label="Agents">
-      <PageHeader title="Agents" lede="Which model runs each kind of work, and what takes over at a limit." />
+    <section className="flex flex-col" aria-label="Agents">
+      <div className="pb-s2">
+        <PageHeader title="Agents" lede="Two choices, kept apart: who does a task, and what model runs it.">
+          {kinds && (
+            <button type="button" className={button} aria-expanded={form?.editing === null} onClick={() => (form?.editing === null ? setForm(null) : startNew())}>
+              New agent
+            </button>
+          )}
+        </PageHeader>
+      </div>
 
       {repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
       {loadError && (
@@ -891,80 +1079,152 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
         </div>
       )}
       {repo && !routing && !loadError && <p className="text-ink-3">Loading…</p>}
+      {saveError && (
+        <p role="alert" className={`${alert} mb-s1`}>
+          Could not save: {withLinks(saveError)}
+        </p>
+      )}
 
-
-      <section className={`${card} flex flex-col gap-s2 px-s2 py-s2`} aria-labelledby="how-title">
-        <header className="flex flex-wrap items-baseline gap-x-s2">
-          <h2 id="how-title" className={h2}>
-            How a task gets run
-          </h2>
-          <span className="text-sm text-ink-2">Automatic. You only choose what runs each kind of work, below.</span>
-        </header>
-        <ol className="grid gap-s1 md:grid-cols-2 xl:grid-cols-4" aria-label="How a task is run">
-          {FLOW.map(([t, b], i) => (
-            <li key={t} className="flex gap-s1 rounded-md bg-canvas-2 px-s1 py-s1">
-              <span className="inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-pass-soft text-xs text-pass">{i + 1}</span>
-              <span className="flex flex-col">
-                <b className="text-sm">{t}</b>
-                <span className="text-xs text-ink-2">{b}</span>
-              </span>
-            </li>
-          ))}
-        </ol>
-      </section>
+      {kinds && needs.length > 0 && (
+        <section className={`${card} pb-1.5 pt-2.5`} aria-label="Needs you" data-testid="needs-you">
+          <div className="flex items-center gap-s1">
+            <span className={label}>Needs you</span>
+            <span className="text-xs text-ink-3">{needs.length}</span>
+          </div>
+          <ul>
+            {needs.map((n) => (
+              <li key={n.key} className="flex items-center gap-2.5 py-1.5 text-sm" data-need={n.key}>
+                <span className={`${pill} ${n.tone === "fail" ? "text-fail" : "text-sap"}`} aria-hidden />
+                <span>
+                  <span className="font-medium">{n.head}</span> <span className="text-ink-2">{n.body}</span>
+                </span>
+                <span className="flex-1" />
+                {n.action}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {kinds && (
-        <section className={`${card} flex flex-col py-s2`} aria-labelledby="work-title">
-          <header className="flex flex-wrap items-baseline gap-x-s2 px-s2 pb-s1">
-            <h2 id="work-title" className={h2}>
-              Who does each kind of work
+        <section className={`${card} pt-3.5`} aria-labelledby="who-title">
+          <div className="flex flex-wrap items-baseline gap-x-s1 pb-3">
+            <h2 id="who-title" className={h2}>
+              Who does the work
             </h2>
-            <span className="text-sm text-ink-2">
-              Pick a model, or one of your custom agents. Only connected providers' models are offered. brindle's hosted learning may run a better model for a kind of work, and says so on the row; lock a row to keep your choice.
-            </span>
-          </header>
-          {policy?.applies && (
-            <p className="px-s2 pb-s1 text-sm text-ink-2" data-testid="policy">
-              🔒 Your org's policy applies: models it doesn't allow aren't offered.
-              {frozen && ` Nothing here can change now: ${policy.reason ?? "the policy couldn't be read"}.`}
-            </p>
-          )}
-          {saveError && (
-            <p role="alert" className={`${alert} mx-s2 mb-s1`}>
-              Could not save: {withLinks(saveError)}
-            </p>
-          )}
-          <div className={`${label} px-s2 py-s1`}>Sizes · the supervisor gives every task one</div>
-          <ul className="flex flex-col">{SIZES.map(row)}</ul>
-          <div className={`${label} border-t border-line px-s2 py-s1`}>Every branch, and the session itself</div>
-          <ul className="flex flex-col">{(["reviewer", "supervisor"] as const).map(row)}</ul>
-          {missing
-            .filter((p) => KINDS.some((k) => runOrder(kinds[k]).some((id) => byName.get(id)?.provider === p)))
-            .map((p) => (
-              <p key={p} className="flex flex-wrap items-center gap-1 border-t border-line px-s2 pt-s1 text-sm text-ink-2" data-missing={p}>
-                <Mark provider={p} />
-                {productName(p)} isn't connected, so its models aren't offered and rows skip it.
-                <ConnectLink provider={p} onNavigate={onNavigate} />
-              </p>
-            ))}
-          <p className="border-t border-line px-s2 pt-s1 text-xs text-ink-3" data-testid="custom-agents">
-            {custom.length > 0 ? (
-              <>
-                Your custom agents:{" "}
-                {custom.map((p, i) => (
-                  <span key={p.name}>
-                    {i > 0 && ", "}
-                    <span className={mono}>{p.name}</span>
-                    {(p.lint_errors?.length ?? 0) > 0 && <span className="text-sap"> ({problemCount(p.lint_errors!.length)})</span>}
-                  </span>
-                ))}
-                . They're listed with the models in every picker; "Make a custom agent…" is at the foot of it.
-              </>
-            ) : (
-              <>No custom agents yet: "Make a custom agent…" is at the foot of every row's model list.</>
-            )}
-          </p>
+            <span className="text-sm text-ink-2">The supervisor gives each task to the agent that fits it. An agent is how to work, not which model.</span>
+          </div>
+          {form?.editing === null && formFor(null)}
+          <div className={`${head} pb-2`} aria-hidden>
+            <span className={label}>Agent</span>
+            <span className={label}>What it does</span>
+            <span className={label}>Rules</span>
+            <span className={label}>Model</span>
+            <span />
+          </div>
+          <ul aria-label="Agents">
+            {agents.map((a) => {
+              const pinned = pinnedOf(a);
+              return (
+                <li key={a.name} data-testid={`agent-${a.name}`} data-model-mode={a.mode} data-custom={a.custom || undefined} data-fresh={fresh === a.name || undefined}>
+                  <div className={`${head} border-t border-line py-2.5`}>
+                    <span className="flex min-w-0 items-center gap-s1">
+                      <span className={`font-medium ${a.custom ? mono : "text-sm"}`}>{a.label}</span>
+                      {a.custom && <span className="rounded-sm border border-line px-[5px] text-[11px] leading-[15px] text-ink-3">yours</span>}
+                    </span>
+                    <span className="text-[13px] text-ink-2">{a.description}</span>
+                    {a.rules.length > 0 ? (
+                      <span className={`${mono} flex flex-col`}>
+                        {a.rules.map((r) => (
+                          <span key={r}>{r}</span>
+                        ))}
+                      </span>
+                    ) : (
+                      <span className="text-[13px] text-ink-3">None</span>
+                    )}
+                    <AgentModel a={a} info={info} pinned={pinned} />
+                    <button type="button" className={quiet} aria-label={`Edit ${a.label}`} aria-expanded={form?.editing === a.name || models === a.name} disabled={frozen && !a.custom} onClick={() => startEdit(a)}>
+                      Edit
+                    </button>
+                  </div>
+                  {form?.editing === a.name && formFor(a)}
+                  {models === a.name && (
+                    <div className="mb-s1 flex flex-col gap-s1 rounded-md bg-surface-2 px-s2 py-s1" data-testid="agent-models">
+                      <p className="text-xs text-ink-2">
+                        {a.label} is built in: its instructions and rules come with brindle. Its model follows the job size, unless you give it its own for a size.
+                      </p>
+                      <SizeModels
+                        who={a.label}
+                        own={ownOf(a)}
+                        choicesFor={choicesFor(a.role)}
+                        info={info}
+                        missing={missing}
+                        busy={busy || frozen}
+                        onSet={(s, id) => void save({ agents: { [a.name]: { models: { [s]: id ? orderFor(s, id) : null } } } })}
+                        onNavigate={onNavigate}
+                      />
+                    </div>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
         </section>
+      )}
+
+      {kinds && (
+        <section className={`${card} mt-1 pt-3.5`} aria-labelledby="model-title">
+          <div className="flex flex-wrap items-baseline gap-x-s1 pb-3">
+            <h2 id="model-title" className={h2}>
+              What model runs it
+            </h2>
+            <span className="text-sm text-ink-2">By job size, for every agent that follows it. When the first is at its limit, the next takes over.</span>
+          </div>
+          <div className="grid grid-cols-[9.75rem_minmax(0,18.75rem)_minmax(0,1fr)_auto] gap-x-s3 pb-2" aria-hidden>
+            <span className={label}>Job size</span>
+            <span className={label}>Runs it</span>
+            <span className={label}>Then, at its limit</span>
+            <span />
+          </div>
+          <ul aria-label="Job sizes">
+            {SIZES.map((s) => (
+              <SizeRow
+                key={s}
+                size={s}
+                state={kinds[s]}
+                choiceOf={info}
+                choices={offered(s)}
+                missing={missing}
+                panel={panelFor(s)}
+                adding={adding === s}
+                probs={probs?.size === s ? probs.id : null}
+                busy={busy || frozen}
+                onPanel={(p) => setPanel(s, p)}
+                onAdding={() => setAdding(adding === s ? null : s)}
+                onProbs={(id) => setProbs(probs?.size === s && probs.id === id ? null : { size: s, id })}
+                put={(change) => void put(s, change)}
+                onNavigate={onNavigate}
+              />
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {kinds && (policy?.applies || quietMissing.length > 0) && (
+        <p className="mt-1.5 flex flex-wrap items-center gap-1.5 border-t border-line pt-2.5 text-xs text-ink-3" data-testid="policy">
+          <svg className="size-[13px] shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <path d="M7 11V8a5 5 0 0 1 10 0v3M6 11h12v9H6z" />
+          </svg>
+          {policy?.applies && <span>Your org's policy applies: models it doesn't allow aren't offered.{frozen && ` Nothing here can change now: ${policy.reason ?? "the policy couldn't be read"}.`}</span>}
+          {quietMissing.map((p) => (
+            <span key={p} className="flex items-center gap-1" data-missing={p}>
+              {productName(p)} isn't connected.
+              <ConnectLink provider={p} onNavigate={onNavigate}>
+                <span className="text-xs">Connect it in Settings › Providers</span>
+              </ConnectLink>
+            </span>
+          ))}
+        </p>
       )}
     </section>
   );

@@ -77,6 +77,9 @@ export interface RoutingPut {
      learning. Choosing a model or fallbacks locks the kind unless `locked`
      is given. */
   kinds?: Record<string, KindPut>;
+  /* An agent's own model for a job size (config agent_models), over the
+     shared table: null for a size goes back to following the job size. */
+  agents?: Record<string, { models: Record<string, { model: string; fallbacks?: string[] } | null> }>;
 }
 
 export interface KindPut {
@@ -97,18 +100,32 @@ export interface KindExtras {
   instructions?: string | null;
 }
 
-/* POST /profiles (ahead of the engine, whose `brindle profile new` writes
-   the same file): a custom agent, a model plus how it works, written to
-   ~/.brindle/agents/<name>.md. */
+/* POST /profiles (routes_actions.create_profile): a custom agent written to
+   ~/.brindle/agents/<name>.md. Without a provider and model it is an agent
+   (how to work, `extends` its `works_like` role) whose model follows the job
+   size; with them it pins that model. */
+export type WorksLike = "developer" | "qa" | "reviewer";
+
 export interface ProfileNew {
   repo: string;
   name: string;
   description: string;
-  provider: string;
-  model: string;
-  effort: string;
+  provider?: string;
+  model?: string;
+  effort?: string;
+  works_like?: WorksLike;
   instructions: string;
   rules: string[];
+}
+
+/* PUT /profiles/{name} (routes_actions.put_profile): what a custom agent
+   says it is for, how it works and its rules; a field left out stays. */
+export interface ProfileEdit {
+  repo: string;
+  works_like?: WorksLike;
+  description?: string;
+  instructions?: string;
+  rules?: string[];
 }
 
 export interface ProfileCreated {
@@ -2948,6 +2965,10 @@ export class DaemonClient {
 
   createProfile(body: ProfileNew) {
     return this.post<ProfileCreated>("/profiles", body);
+  }
+
+  updateProfile(name: string, body: ProfileEdit) {
+    return this.put<ProfileCreated>(`/profiles/${encodeURIComponent(name)}`, body);
   }
 
   /* Every rule pack that would load for the repo (profiles.list_rule_packs),

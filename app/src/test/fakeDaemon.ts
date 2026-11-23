@@ -28,6 +28,7 @@ import type {
   GoalDTO,
   InboxItemDTO,
   ProfileDTO,
+  RoutingAgentDTO,
   RoutingDTO,
   RoutingKindDTO,
   RoutingLockDTO,
@@ -467,6 +468,8 @@ export interface RoutingFile {
   kind_fallbacks?: Record<string, string[]>;
   /* Ahead of the engine: each kind's effort and instructions. */
   kinds?: Record<string, KindExtras>;
+  /* config agent_models: an agent's own ordered models for a size, over the shared table. */
+  agent_models?: Record<string, Record<string, string[]>>;
 }
 
 /* config.WEIGHTS, DEFAULT_ROUTING and RepoConfig.reviewer. */
@@ -1680,6 +1683,8 @@ export class FakeDaemon {
   private refusal(p: RoutingProfile): string | null {
     const policy = this.data.routingPolicy;
     if (!policy) return null;
+    // An agent names no model: the policy judges the model it's joined to at launch.
+    if (p.kind === "agent") return policy.error ?? null;
     if (policy.error) return policy.error;
     const cli = this.providerRefusal(p.provider);
     if (cli) return cli;
@@ -2218,11 +2223,21 @@ export class FakeDaemon {
     const fallbacksOf = (k: string) => files[precedence.find((s) => files[s].kind_fallbacks?.[k]) ?? "user"].kind_fallbacks?.[k] ?? [];
     kinds.reviewer = kind("reviewer", [...reviewer.values, ...fallbacksOf("reviewer")]);
     kinds.supervisor = { ...kind("supervisor", files.user.supervisor ? [files.user.supervisor, ...fallbacksOf("supervisor")] : []), learned: null };
+    // routes_read._routing's `agents`: every profile of kind "agent", with the sizes where it keeps its own models (agent_models, locked).
+    const agents: Record<string, RoutingAgentDTO> = {};
+    for (const p of this.data.routingProfiles) {
+      if (p.kind !== "agent") continue;
+      const scope = precedence.find((s) => files[s].agent_models?.[p.name]);
+      const pools = scope ? files[scope].agent_models![p.name] : {};
+      const models = Object.fromEntries(Object.entries(pools).map(([size, names]) => [size, { model: names[0] ?? null, fallbacks: names.slice(1), locked: true, learned: null }]));
+      agents[p.name] = { description: p.description ?? "", rules: p.rules ?? [], role: p.role ?? null, builtin: p.builtin ?? false, kind: "agent", models };
+    }
     return {
       tiers,
       reviewer,
       exclude_providers: excluded,
       kinds,
+      agents,
       profiles: this.data.routingProfiles.map((p) => ({
         ...p,
         provider_name: CLI_NAMES[p.provider] ?? p.provider,
@@ -2234,29 +2249,42 @@ export class FakeDaemon {
     };
   }
 
-  /* POST /profiles (ahead of the engine; `brindle profile new` writes the
-     same file): a custom agent in ~/.brindle/agents/<name>.md, listed by
-     GET /profiles and GET /routing from then on, costed as the provider's
-     other profiles on that model are, and checked as profile lint would. */
+  /* POST /profiles (routes_actions.create_profile): a custom profile in
+     ~/.brindle/agents/<name>.md, listed by GET /profiles and GET /routing
+     from then on. With no provider and model it's an agent (`extends` its
+     works_like role, its model following the job size); with them it pins
+     that model, costed as the provider's other profiles on it are. Checked
+     as profile lint would. */
   private createProfile(body: Record<string, unknown>): Response {
     const d = this.data;
-    const { repo, name, description, provider, model, effort, instructions, rules } = body;
+    const { repo, name, description, model, effort, instructions, rules, works_like } = body;
+    let { provider } = body;
     if (typeof repo !== "string") return error("invalid", "repo is required", 400);
     if (typeof name !== "string" || !/^[a-z0-9][a-z0-9-]*$/.test(name)) return error("invalid", "name must be lowercase letters, digits and dashes", 400);
     if ([...d.profiles, ...d.routingProfiles].some((p) => p.name === name)) return error("conflict", `there's already a profile called ${name}`, 409);
+    if (works_like != null && !["developer", "qa", "reviewer"].includes(works_like as string)) return error("invalid", "works_like must be developer, qa or reviewer", 400);
+    const agent = provider == null && model == null;
+    if (agent && effort != null) return error("invalid", "effort requires a provider or model", 400);
+    if (agent) provider = "claude"; // The parser's default when the file has only extends.
     if (typeof provider !== "string" || !PROVIDERS.includes(provider)) return error("invalid", `no such provider: ${String(provider)}`, 400);
-    if (typeof model !== "string" || !model) return error("invalid", "model is required", 400);
+    if (!agent && (typeof model !== "string" || !model)) return error("invalid", "model is required", 400);
     const packs = Array.isArray(rules) ? rules.map(String) : [];
+    const unknownPack = packs.find((r) => !d.rulePacks.some((x) => x.name === r));
+    if (agent && unknownPack) return error("invalid", `rule ${unknownPack}: no rule pack named ${unknownPack}`, 400);
     const same = d.routingProfiles.filter((p) => p.provider === provider);
     const like = same.find((p) => p.model === model);
     const lint_errors = packs.filter((r) => !d.rulePacks.some((x) => x.name === r)).map((r) => `no rule pack named ${r}`);
     const file = `/home/u/.brindle/agents/${name}.md`;
-    const listed: ProfileDTO = { name, description: typeof description === "string" ? description : "", provider, model, effort: typeof effort === "string" ? effort : null };
+    const text = typeof description === "string" ? description : "";
+    const listed: ProfileDTO = { name, description: text, provider, model: agent ? null : (model as string), effort: typeof effort === "string" ? effort : null };
     d.profiles = [...d.profiles, listed];
     if (d.profilesByRepo[repo]) d.profilesByRepo[repo] = [...d.profilesByRepo[repo], listed];
+    const role = works_like === "reviewer" ? "reviewer" : "developer";
     d.routingProfiles = [
       ...d.routingProfiles,
-      { name, provider, model, cost_tier: like?.cost_tier ?? "medium", installed: same.some((p) => p.installed), signed_in: same.some((p) => p.signed_in), lint_errors, lint_warnings: [] },
+      agent
+        ? { name, provider, model: null, kind: "agent", builtin: false, role, description: text, rules: packs, cost_tier: "medium", installed: true, signed_in: true, lint_errors, lint_warnings: [] }
+        : { name, provider, model: model as string, kind: "pinned", builtin: false, role, description: text, rules: packs, cost_tier: like?.cost_tier ?? "medium", installed: same.some((p) => p.installed), signed_in: same.some((p) => p.signed_in), lint_errors, lint_warnings: [] },
     ];
     d.profileDetails[name] = {
       source: file,
@@ -2265,6 +2293,30 @@ export class FakeDaemon {
       lint: { errors: lint_errors, warnings: [] },
     };
     return json({ name, path: file }, 201);
+  }
+
+  /* PUT /profiles/{name} (routes_actions.put_profile): a personal profile's
+     role, description, instructions or rules; a built-in one is refused. */
+  private putProfile(name: string, body: Record<string, unknown>): Response {
+    const d = this.data;
+    const { repo, works_like, description, instructions, rules } = body;
+    if (typeof repo !== "string") return error("invalid", "repo is required", 400);
+    if (works_like != null && !["developer", "qa", "reviewer"].includes(works_like as string)) return error("invalid", "works_like must be developer, qa or reviewer", 400);
+    if (works_like == null && description == null && instructions == null && rules == null) return error("invalid", "give works_like, description, instructions or rules", 400);
+    const packs = Array.isArray(rules) ? rules.map(String) : null;
+    const unknownPack = packs?.find((r) => !d.rulePacks.some((x) => x.name === r));
+    if (unknownPack) return error("invalid", `rule ${unknownPack}: no rule pack named ${unknownPack}`, 400);
+    const at = d.routingProfiles.findIndex((p) => p.name === name);
+    if (at < 0) return error("not_found", `no agent named '${name}'`, 404);
+    const p = d.routingProfiles[at];
+    if (p.builtin) return error("forbidden", `agent '${name}' isn't a personal profile`, 403);
+    const text = typeof description === "string" ? description.split(/\s+/).filter(Boolean).join(" ") : undefined;
+    d.routingProfiles = d.routingProfiles.map((x, i) =>
+      i === at ? { ...x, ...(text !== undefined ? { description: text } : {}), ...(packs ? { rules: packs } : {}), ...(works_like != null ? { role: works_like === "reviewer" ? "reviewer" : "developer" } : {}) } : x,
+    );
+    if (text !== undefined) d.profiles = d.profiles.map((x) => (x.name === name ? { ...x, description: text } : x));
+    if (typeof instructions === "string" && d.profileDetails[name]) d.profileDetails[name] = { ...d.profileDetails[name], prompt: instructions };
+    return json({ name, path: `/home/u/.brindle/agents/${name}.md` });
   }
 
   /* PUT /routing (routes_actions.put_routing): the tiers given replace theirs
@@ -2285,7 +2337,26 @@ export class FakeDaemon {
     const scope = body.scope;
     if (typeof scope !== "string") return error("invalid", "scope is required", 400);
     if (!ROUTING_SCOPES.includes(scope as RoutingScope)) return error("invalid", "scope must be user, local or repo", 400);
-    const { exclude_providers: excluded, kinds } = body as { exclude_providers?: unknown; kinds?: unknown };
+    const { exclude_providers: excluded, kinds, agents } = body as { exclude_providers?: unknown; kinds?: unknown; agents?: unknown };
+    if (agents != null && (typeof agents !== "object" || Array.isArray(agents))) return error("invalid", "agents has the wrong type", 400);
+    // service/routing.parse_agent_model_changes: per agent, per size, an order or null (back to the job size).
+    const agentChanges: Record<string, Record<string, string[] | null>> = {};
+    for (const [name, spec] of Object.entries((agents ?? {}) as Record<string, unknown>)) {
+      if (this.data.routingProfiles.find((p) => p.name === name)?.kind !== "agent") return error("invalid", `no routable agent named '${name}'`, 400);
+      const models = (spec as { models?: unknown } | null)?.models;
+      if (typeof models !== "object" || models === null || Array.isArray(models)) return error("invalid", `${name}: models must map sizes to overrides`, 400);
+      for (const [size, order] of Object.entries(models as Record<string, unknown>)) {
+        if (!(WEIGHTS as readonly string[]).includes(size)) return error("invalid", `${name}: size must be one of ${WEIGHTS.join(", ")}`, 400);
+        if (order === null) {
+          (agentChanges[name] ??= {})[size] = null;
+          continue;
+        }
+        const { model, fallbacks = [] } = order as { model?: unknown; fallbacks?: unknown };
+        if (typeof model !== "string" || !model) return error("invalid", `${name} ${size}: model must be a profile name`, 400);
+        if (!Array.isArray(fallbacks) || !fallbacks.every((n) => typeof n === "string" && n)) return error("invalid", `${name} ${size}: fallbacks must be a list of profile names`, 400);
+        (agentChanges[name] ??= {})[size] = [...new Set([model, ...(fallbacks as string[])])];
+      }
+    }
     let { tiers, reviewer } = body as { tiers?: unknown; reviewer?: unknown };
     if (tiers != null && (typeof tiers !== "object" || Array.isArray(tiers))) return error("invalid", "tiers has the wrong type", 400);
     if (reviewer != null && typeof reviewer !== "string") return error("invalid", "reviewer has the wrong type", 400);
@@ -2330,7 +2401,12 @@ export class FakeDaemon {
       }
     }
     const known = new Set(this.data.routingProfiles.map((p) => p.name));
-    const named: string[] = [...(reviewer ? [reviewer as string] : []), ...(supervisor ? [supervisor] : []), ...Object.values(kindFallbacks).flat()];
+    const named: string[] = [
+      ...(reviewer ? [reviewer as string] : []),
+      ...(supervisor ? [supervisor] : []),
+      ...Object.values(kindFallbacks).flat(),
+      ...Object.values(agentChanges).flatMap((sizes) => Object.values(sizes).flatMap((n) => n ?? [])),
+    ];
     for (const [tier, names] of Object.entries((tiers ?? {}) as Record<string, unknown>)) {
       if (!(WEIGHTS as readonly string[]).includes(tier)) return error("invalid", `tier must be one of ${WEIGHTS.join(", ")}, not '${tier}'`, 400);
       if (!Array.isArray(names) || names.length === 0 || !names.every((n) => typeof n === "string")) {
@@ -2386,7 +2462,22 @@ export class FakeDaemon {
       path = this.scopePath("user", repo);
       updated.push("supervisor");
     }
-    if (updated.length === 0) return error("invalid", "give tiers, reviewer, exclude_providers or kinds", 400);
+    if (Object.keys(agentChanges).length > 0) {
+      // service/routing.merge_agent_model_changes: null drops the size; an agent with none left is dropped.
+      const stored = { ...file.agent_models };
+      for (const [name, sizes] of Object.entries(agentChanges)) {
+        const pools = { ...stored[name] };
+        for (const [size, names] of Object.entries(sizes)) {
+          if (names === null) delete pools[size];
+          else pools[size] = names;
+        }
+        if (Object.keys(pools).length > 0) stored[name] = pools;
+        else delete stored[name];
+      }
+      file.agent_models = stored;
+      updated.push("agent_models");
+    }
+    if (updated.length === 0) return error("invalid", "give tiers, reviewer, exclude_providers, kinds or agents", 400);
     return json({ updated, path });
   }
 
@@ -2773,6 +2864,8 @@ export class FakeDaemon {
       if (connection && this.holdConnections) return new Promise<Response>((resolve) => this.pendingKeys.push(() => resolve(this.putConnection(connection[1], (body ?? {}) as Record<string, unknown>))));
       if (connection) return this.putConnection(connection[1], (body ?? {}) as Record<string, unknown>);
       if (path === "/routing") return this.putRouting((body ?? {}) as Record<string, unknown>);
+      const profileEdit = path.match(/^\/profiles\/([^/]+)$/);
+      if (profileEdit) return this.putProfile(decodeURIComponent(profileEdit[1]), (body ?? {}) as Record<string, unknown>);
       if (path === "/routing/goal") return this.putRoutingGoal((body ?? {}) as { weights?: RoutingWeights });
       if (path === "/doc-format") {
         // The engine replaces what the level sets (doc_templates.save), keeping no key the body leaves out.
