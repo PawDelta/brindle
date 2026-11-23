@@ -1,7 +1,115 @@
 import pytest
 
 from brindle import model_names
-from brindle.profiles import _frontmatter, _list, load_profile
+from brindle.profiles import _frontmatter, _list, compose, kind_of, load_profile
+
+
+def test_custom_agent_composes_at_launch_on_its_recorded_model(tmp_path, db, monkeypatch):
+    from brindle import agents, providers
+    from brindle.db import Agent, Workspace
+    from brindle.providers import Codex, LaunchContext
+
+    root = str(tmp_path)
+    library = tmp_path / ".brindle" / "agents"
+    library.mkdir(parents=True)
+    (library / "mine.md").write_text(
+        "---\nextends: qa\nrules: [security/backend]\n---\nCheck database invariants.")
+    (library / "pinned.md").write_text("---\nextends: mine\neffort: high\n---\n")
+    (library / "pinned-child.md").write_text("---\nextends: pinned\n---\n")
+    (tmp_path / ".brindle" / "config.json").write_text('{"prompt_cache_prefix": false}')
+    ws = Workspace("w", root, "test", "worktree", "feat/test", "main", root, None, "test", 1)
+    db.add_workspace(ws)
+    db.add_agent(Agent("legacy", ws.id, "dev.gpt-sol", "codex", None, "assign", "idle", "", None, 1,
+                       tmux_server="test"))
+    db.conn.execute("ALTER TABLE agents DROP COLUMN agent")
+    db._migrate()
+    assert db.get_agent("legacy").agent is None
+    row = Agent("a", ws.id, "dev.gpt-sol", "codex", None, "assign", "idle", "", None, 1,
+                agent="mine", tmux_server="test")
+    db.add_agent(row)
+    db.update_agent(row.id, weight="medium")
+    saved = db.get_agent(row.id)
+    assert (saved.agent, saved.profile) == ("mine", "dev.gpt-sol")
+    assert kind_of("mine", root) == kind_of("qa", root) == "agent"
+    assert kind_of("pinned-child", root) == "pinned"
+    assert kind_of("developer-codex-sol", root) == "model"
+
+    base = load_profile("dev.gpt-sol", root)
+    joined = compose("mine", "dev.gpt-sol", root)
+    assert (joined.provider, joined.model, joined.name) == ("codex", "gpt-6.1-sol", "dev.gpt-sol")
+    assert joined.allowed_tools == base.allowed_tools
+    assert joined.prompt.startswith(base.prompt + "\n\n")
+    assert joined.prompt.endswith("Check database invariants.")
+    assert joined.rules == ["tests/only", "security/backend"]
+
+    launched = agents._profile_for(db, saved, ws, m=None)
+    assert (launched.provider, launched.model, launched.allowed_tools) == (
+        joined.provider, joined.model, joined.allowed_tools)
+    assert joined.prompt in launched.prompt
+    assert launched.rules == joined.rules
+    monkeypatch.setattr(providers, "_codex_layers", lambda cwd: [])
+    argv = Codex().command(LaunchContext(row.id, launched, None, cwd=root))
+    assert argv[argv.index("--model") + 1] == "gpt-6.1-sol"
+
+
+@pytest.mark.parametrize("agent, model", [
+    ("developer", "dev.claude-opus"),
+    pytest.param("reviewer", "review.gpt", marks=pytest.mark.variant(
+        "standalone provider reviewer roots must not receive the Claude reviewer prompt or model")),
+])
+@pytest.mark.variant("composing a role root must preserve every legacy field without appending its prompt twice")
+def test_default_agent_composition_preserves_the_existing_profile(agent, model):
+    assert kind_of(agent) == "agent"
+    assert kind_of(model) == "model"
+    assert compose(agent, model) == load_profile(model)
+
+
+def test_custom_agent_cannot_widen_the_provider_tools(tmp_path):
+    library = tmp_path / ".brindle" / "agents"
+    library.mkdir(parents=True)
+    (library / "mine.md").write_text(
+        "---\nextends: developer\nallowed_tools: Bash(git status:*), Bash(*)\n---\nInspect.")
+    root = str(tmp_path)
+    joined = compose("mine", "dev.qwen3-coder", root)
+    assert joined.allowed_tools == ["Bash(git status:*)"]
+    assert joined.permission_mode == load_profile("dev.qwen3-coder", root).permission_mode
+    # A disjoint request must remain an empty allowlist, never inherit the root's tools.
+    (library / "mine.md").write_text(
+        "---\nextends: developer\nallowed_tools: Bash(*)\n---\nInspect.")
+    assert compose("mine", "dev.qwen3-coder", root).allowed_tools == []
+    (library / "mine.md").write_text("---\nextends: developer\n---\nInspect.")
+    assert compose("mine", "dev.qwen3-coder", root).allowed_tools == load_profile(
+        "dev.qwen3-coder", root).allowed_tools
+    # A reviewer on a developer model keeps the provider's reviewer permissions.
+    reviewer = compose("reviewer", "dev.gpt-sol", root)
+    assert (reviewer.provider, reviewer.model) == ("codex", "gpt-6.1-sol")
+    assert reviewer.allowed_tools == load_profile("review.gpt", root).allowed_tools
+    assert reviewer.permission_mode == load_profile("review.gpt", root).permission_mode
+
+
+def test_agent_model_orders_merge_by_agent_and_size_across_config_scopes(tmp_path, brindle_home):
+    import json
+
+    from brindle.config import load_repo_config
+
+    brindle_home.mkdir(parents=True, exist_ok=True)
+    (brindle_home / "config.json").write_text(json.dumps({"agent_models": {
+        "qa": {"light": ["developer-codex"], "heavy": ["dev.claude-opus"]},
+        "reviewer": {"light": ["reviewer-codex"]}}}))
+    settings = tmp_path / ".brindle"
+    settings.mkdir()
+    (settings / "config.json").write_text(json.dumps({"agent_models": {
+        "qa": {"light": ["dev.claude-haiku"], "medium": ["dev.gpt-sol"]}}}))
+    (settings / "config.local.json").write_text(json.dumps({"agent_models": {
+        "qa": {"light": ["developer-local", 7], "heavy": [], "invalid": ["ignored"]},
+        "broken": "ignored"}}))
+
+    assert load_repo_config(tmp_path).agent_models == {
+        "qa": {"light": ["dev.qwen3-coder"], "medium": ["dev.gpt-sol"], "heavy": []},
+        "reviewer": {"light": ["review.gpt"]}}
+    assert load_repo_config(tmp_path, user_only=True).agent_models == {
+        "qa": {"light": ["dev.gpt"], "heavy": ["dev.claude-opus"]},
+        "reviewer": {"light": ["review.gpt"]}}
 
 
 @pytest.mark.variant("configs naming an old built-in id must keep loading after the rename")
@@ -21,6 +129,7 @@ def test_a_custom_agent_that_extends_an_old_id_still_works(tmp_path):
 
     p = load_profile("mine", str(tmp_path))
     assert p.name == "mine" and p.provider == "codex"
+    assert kind_of("mine", str(tmp_path)) == "pinned"
 
 
 @pytest.mark.parametrize("name, text, role", [

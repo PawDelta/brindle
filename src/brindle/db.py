@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS agents (
     id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     profile TEXT NOT NULL,
+    agent TEXT,                    -- optional role layer; profile remains the model id
     provider TEXT NOT NULL,
     parent_id TEXT,
     mode TEXT NOT NULL,            -- 'interactive', 'handoff', or 'assign'
@@ -1530,6 +1531,7 @@ class Agent:
     review_slot: str | None = None         # the review claim slot it was started in (gates.standing_reviews)
     failed_why: str | None = None          # why it is 'failed': auth | model | delivery; None from an older brindle
     name: str | None = None                # a session root's name from the person; None: listed by its goal
+    agent: str | None = None               # role layer composed onto profile; None keeps legacy loading
 
 @dataclass
 class Autopilot:
@@ -2076,7 +2078,7 @@ class DB:
                           ("reviewing_since", "REAL"), ("review_restarted", "REAL"),
                           ("merge_failed", "TEXT"), ("plan_text", "TEXT"), ("config_home", "TEXT"),
                           ("weight", "TEXT"), ("review_slot", "TEXT"), ("failed_why", "TEXT"),
-                          ("name", "TEXT")):
+                          ("name", "TEXT"), ("agent", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         if "failed_why" not in cols:
@@ -2572,13 +2574,13 @@ class DB:
                 "INSERT INTO agents (id, workspace_id, profile, provider, parent_id, mode, "
                 "status, tmux_window, result, created_at, status_since, task, session_ref, "
                 "headless, transcript_path, done_when, inbox_socket, inbox_token, review_sha, "
-                "tmux_server, config_home) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "tmux_server, config_home, agent) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (a.id, a.workspace_id, a.profile, a.provider, a.parent_id, a.mode,
                  a.status, a.tmux_window, a.result, a.created_at,
                  a.status_since or a.created_at, a.task, a.session_ref, a.headless,
                  a.transcript_path, a.done_when, a.inbox_socket, a.inbox_token, a.review_sha,
-                 a.tmux_server, a.config_home),
+                 a.tmux_server, a.config_home, a.agent),
             )
 
     def data_version(self) -> int:

@@ -259,6 +259,8 @@ class RepoConfig:
     airgap: bool = False
     # Weight routing: task weight -> profiles to try, in order (see autopilot.choose_profile).
     routing: dict[str, list[str]] = field(default_factory=lambda: {k: list(v) for k, v in DEFAULT_ROUTING.items()})
+    # Per agent and weight, an explicit model order over the shared routing table.
+    agent_models: dict[str, dict[str, list[str]]] = field(default_factory=dict)
     fable_for_design_only: bool = True
     # Effective tier's origin for doctor and routing-skip diagnostics; not a setting.
     routing_sources: dict[str, str] = field(default_factory=lambda: {k: "DEFAULT_ROUTING" for k in WEIGHTS})
@@ -563,6 +565,16 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 if norm_tier in WEIGHTS and isinstance(names, list):
                     cfg.routing[norm_tier] = [current(n) for n in names if isinstance(n, str)]
                     cfg.routing_sources[norm_tier] = str(path)
+        agent_models = source.get("agent_models")
+        if isinstance(agent_models, dict):
+            for agent, tiers in agent_models.items():
+                if not isinstance(agent, str) or not isinstance(tiers, dict):
+                    continue
+                for tier, names in tiers.items():
+                    norm_tier = normalize_weight(tier)
+                    if norm_tier in WEIGHTS and isinstance(names, list):
+                        cfg.agent_models.setdefault(current(agent), {})[norm_tier] = [
+                            current(n) for n in names if isinstance(n, str)]
     for source in (user, shared, local):  # per kind, a later scope overriding an earlier one
         cfg.routing_locked.update(locked_kinds(source.get("routing_locked")))
     for source in (user, shared, local):
