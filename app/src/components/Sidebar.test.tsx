@@ -286,10 +286,13 @@ describe("Sidebar", () => {
     await waitFor(() => expect(agentRow("w1")).toBeTruthy());
     const role = (id: string) => within(agentRow(id)!).getByTestId("agent-role").dataset;
     expect(agentRow("w1")!.closest("li")!.contains(agentRow("w3"))).toBe(true);
-    // A sized worker leads with its size, the model second; a profile id no list knows still gets the engine's name.
+    // Every row leads with its role, the model second; a sized worker keeps its job size in data-size and the title only.
     expect([role("w4").size, role("w4").modelName]).toEqual(["medium", "GPT‑6.1 Sol"]);
+    expect(within(agentRow("w4")!).getByTestId("agent-role").textContent).toMatch(/^developer · GPT‑6\.1 Sol$/);
+    expect(within(agentRow("w1")!).getByTestId("agent-role").textContent).toMatch(/^developer · Claude Haiku$/);
     expect([role("w1").size, role("w1").modelName]).toEqual(["light", "Claude Haiku"]);
     expect([role("w2").size, role("w2").modelName]).toEqual(["heavy", "Claude"]);
+    expect(agentRow("w4")!.title).toContain("job size: medium");
     expect(within(agentRow("w4")!).getByTestId("agent-role").textContent).not.toContain("developer-codex-sol");
     expect([role("w3").size, role("w3").modelName]).toEqual([undefined, "GPT‑6 Luna"]);
     expect([role("w5").size, role("w5").modelName]).toEqual([undefined, undefined]);
