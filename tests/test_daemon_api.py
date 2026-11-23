@@ -1011,6 +1011,15 @@ def test_model_less_agent_can_be_created_and_edited(repo, db):
     edited = profiles._parse(target.read_text(), "proofreader")
     assert (edited.extends, edited.description, edited.prompt, edited.rules, edited.write_scope) == (
         "qa", "Proofread changes", "Read the diff.", [], ["docs/**"])
+    # The editor reads back the file's own instructions, not the prompt it inherits, and can clear them.
+    code, shown = _get(f"{path}/proofreader", AUTH, f"repo={repo}")
+    assert code == 200, shown
+    assert (shown["instructions"], shown["extends"][0]) == ("Read the diff.", "qa")
+    code, reply = asyncio.run(_read_request(app, f"{path}/proofreader", AUTH, method="PUT", payload={
+        "repo": str(repo), "instructions": "",
+    }))
+    assert code == 200, reply
+    assert _get(f"{path}/proofreader", AUTH, f"repo={repo}")[1]["instructions"] == ""
 
 
 def test_agent_routing_overrides_merge_clear_and_enforce_policy(repo, db, monkeypatch):

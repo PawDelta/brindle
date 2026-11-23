@@ -528,35 +528,63 @@ const routingGoal: NonNullable<DaemonData["routingGoal"]> = {
   },
 };
 
-/* The built-in profiles as GET /routing describes them on a Mac with Claude
-   Code and Codex installed and signed in, Antigravity installed but signed
-   out, no OpenCode, and Ollama (native) there. */
-const rp = (name: string, provider: string, model: string | null, cost_tier: string, installed = true, signed_in = true): RoutingProfile => ({
+/* Every profile as GET /routing describes it (A1: models and agents apart)
+   on a Mac with Claude Code and Codex installed and signed in, Antigravity
+   installed but signed out, no OpenCode, and Ollama (native) there. Models
+   are the built-in dev.* and review.* profiles, named as brindle.model_names
+   names them; agents (how to work, no model) are the role profiles and the
+   person's own frontend-developer. */
+const MAKER: Record<string, [string, string]> = {
+  claude: ["Anthropic", "Claude Code"],
+  codex: ["OpenAI", "Codex"],
+  antigravity: ["Google", "Antigravity"],
+  opencode: ["OpenCode", "OpenCode"],
+  native: ["Alibaba", "Ollama"],
+  subagent: ["Anthropic", "Claude Code"],
+};
+const rp = (name: string, provider: string, model: string | null, display: string | null, cost_tier: string, fields: Partial<RoutingProfile> = {}): RoutingProfile => ({
   name,
   provider,
   model,
+  display,
+  maker: MAKER[provider][0],
+  tool: MAKER[provider][1],
   cost_tier,
-  installed,
-  signed_in,
+  installed: true,
+  signed_in: true,
+  builtin: true,
+  kind: "model",
+  role: name.startsWith("review.") ? "reviewer" : "developer",
+  ...fields,
 });
+const agentProfile = (name: string, description: string, fields: Partial<RoutingProfile> = {}): RoutingProfile =>
+  rp(name, "claude", null, null, "medium", { kind: "agent", description, rules: [], ...fields });
+const signedOut = { signed_in: false };
 const routingProfiles: RoutingProfile[] = [
-  rp("developer-light", "claude", "haiku", "low"),
-  rp("developer", "claude", "sonnet", "medium"),
-  rp("developer-heavy", "claude", "opus", "high"),
-  rp("developer-fable", "claude", "fable", "high"),
-  rp("developer-codex", "codex", "gpt-5-codex", "medium"),
-  rp("developer-gemini", "antigravity", "gemini-3-pro", "high", true, false),
-  rp("developer-opencode", "opencode", null, "medium", false, false),
-  rp("developer-local", "native", "qwen3-coder:30b", "low"),
-  rp("reviewer", "claude", "sonnet", "medium"),
-  rp("reviewer-codex", "codex", "gpt-5-codex", "medium"),
-  rp("reviewer-gemini", "antigravity", "gemini-3-pro", "high", true, false),
-  rp("reviewer-local", "native", "qwen3-coder:30b", "low"),
-  rp("qa", "claude", "sonnet", "medium"),
-  rp("backend-auditor", "claude", "opus", "high"),
-  rp("supervisor", "claude", null, "medium"),
-  rp("coordinator", "claude", "haiku", "low"),
-  rp("subagent", "subagent", null, "medium"),
+  rp("dev.claude-haiku", "claude", "haiku", "Claude Haiku", "low", { effort: "low" }),
+  rp("dev.claude-sonnet", "claude", "sonnet", "Claude Sonnet", "medium", { effort: "medium" }),
+  rp("dev.claude-opus", "claude", "opus", "Claude Opus", "high", { effort: "high" }),
+  rp("dev.claude-fable", "claude", "fable", "Claude Fable", "high", { effort: "high" }),
+  rp("dev.gpt-luna", "codex", "gpt-6-luna", "GPT‑6 Luna", "low"),
+  rp("dev.gpt-sol", "codex", "gpt-6.1-sol", "GPT‑6.1 Sol", "medium", { effort: "medium" }),
+  rp("dev.gpt-terra", "codex", "gpt-6.1-terra", "GPT‑6.1 Terra", "high", { effort: "high" }),
+  rp("dev.gemini", "antigravity", "gemini-4-argon", "Gemini 4 Argon", "high", signedOut),
+  rp("dev.opencode", "opencode", null, "OpenCode", "medium", { installed: false, signed_in: false }),
+  rp("dev.qwen3-coder", "native", "qwen3-coder:30b", "Qwen3 Coder", "low"),
+  rp("review.claude-sonnet.low", "claude", "sonnet", "Claude Sonnet", "low", { effort: "low" }),
+  rp("review.claude-sonnet.high", "claude", "sonnet", "Claude Sonnet", "medium", { effort: "high" }),
+  rp("review.gpt", "codex", "gpt-6.1-sol", "GPT‑6.1 Sol", "medium"),
+  rp("review.gpt.low", "codex", "gpt-6.1-sol", "GPT‑6.1 Sol", "low", { effort: "low" }),
+  rp("review.gemini", "antigravity", "gemini-4-argon", "Gemini 4 Argon", "high", signedOut),
+  rp("review.qwen3-coder", "native", "qwen3-coder:30b", "Qwen3 Coder", "low"),
+  agentProfile("developer", "Builds a task on its own branch"),
+  agentProfile("qa", "Writes and fixes tests, never the code under test", { rules: ["tests/only"] }),
+  agentProfile("reviewer", "Reviews every branch before it merges, never edits", { role: "reviewer" }),
+  agentProfile("backend-auditor", "Reviews a branch as a backend security audit", { role: "reviewer", rules: ["security/backend"] }),
+  agentProfile("frontend-developer", "Builds and polishes UI components", { builtin: false, rules: ["style/minimal-diff", "frontend/a11y"] }),
+  agentProfile("supervisor", "Plans the work, sizes each task, merges", { role: "supervisor" }),
+  rp("coordinator", "claude", "haiku", "Claude Haiku", "low", { kind: "pinned", role: "helper" }),
+  rp("subagent", "subagent", null, null, "medium", { kind: "pinned", role: "helper" }),
 ];
 
 /* Every profile as GET /profiles resolves it (brindle/service/dto.py ProfileDTO). */
@@ -687,11 +715,11 @@ export const data: Partial<DaemonData> = {
     learning_note: "not enough similar tasks yet: kept the default for the last pick",
     orgs: ORGS,
   },
-  // A Team org's policy: Claude Code and Codex only, four models, the Claude route managed by the org, no personal keys.
+  // A Team org's policy: Claude Code, Codex and local models only, every model but Claude Fable, the Claude route managed by the org, no personal keys.
   routingPolicy: {
     org_id: "org_acme",
-    allowed_providers: ["claude", "codex"],
-    allowed_models: ["opus", "sonnet", "haiku", "gpt-5-codex"],
+    allowed_providers: ["claude", "codex", "native"],
+    allowed_models: ["opus", "sonnet", "haiku", "gpt-5-codex", "gpt-6-luna", "gpt-6.1-sol", "gpt-6.1-terra", "qwen3-coder:30b"],
     managed_routes: ["claude", "codex"],
     deny_personal_keys: true,
   },
@@ -719,12 +747,33 @@ export const data: Partial<DaemonData> = {
   terminals,
   routingProfiles,
   routingGoal,
-  // The team keeps Gemini out and reviews with Codex; this person put Opus first for heavy work.
+  // The person's shared model table by job size (Fable first for Advanced, which Acme refuses: Opus stands in),
+  // Reviewer's own cheap model for Light reviews, and the supervisor on Opus whatever the size.
   routingConfig: {
-    user: {},
-    repo: { exclude_providers: ["antigravity"], reviewer: "reviewer-codex" },
-    local: { routing: { heavy: ["developer-heavy", "developer-fable", "developer-codex"] } },
+    user: {
+      routing: {
+        light: ["dev.claude-haiku", "dev.gpt-luna", "dev.qwen3-coder"],
+        medium: ["dev.claude-sonnet", "dev.claude-opus"],
+        heavy: ["dev.claude-opus", "dev.gpt-terra", "dev.gemini"],
+        advanced: ["dev.claude-fable", "dev.claude-opus", "dev.gpt-terra"],
+      },
+      agent_models: {
+        reviewer: { light: ["review.claude-sonnet.low", "review.gpt.low"] },
+        supervisor: { light: ["dev.claude-opus"], medium: ["dev.claude-opus"], heavy: ["dev.claude-opus"], advanced: ["dev.claude-opus"] },
+      },
+    },
+    repo: {},
+    local: {},
   },
+  // Hosted learning runs GPT‑6.1 Sol for Medium work.
+  learned: { medium: "dev.gpt-sol" },
+  // The rule packs the add-an-agent form offers.
+  rulePacks: [
+    { name: "style/minimal-diff", description: "Change only what the task needs", source: "built-in rule pack style/minimal-diff" },
+    { name: "frontend/a11y", description: "Labels, focus order, contrast", source: "/home/sam/.brindle/rules/frontend/a11y.md" },
+    { name: "tests/only", description: "Tests, never the code under test", source: "built-in rule pack tests/only" },
+    { name: "security/backend", description: "Trace every input to where it's used", source: "built-in rule pack security/backend" },
+  ],
   diffs: {
     "pawdelta/desktop-ux-revamp": { workspace_id: "pawdelta/desktop-ux-revamp", base: "dev/desktop-app", diff: DIFF, stat: "" },
     "pawdelta/desktop-shots": { workspace_id: "pawdelta/desktop-shots", base: "dev/desktop-app", diff: SHOTS_DIFF, stat: "" },
