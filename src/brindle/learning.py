@@ -446,13 +446,17 @@ def choose_why(db: DB, cfg: RepoConfig, repo_root: str, task: str | None = None,
     fewer than two candidates. ``goal``: the routing goal's weights in force
     (brindle.routing_goal.resolve, with the session and task levels); without
     it, the personal and repo levels'."""
+    from brindle.profiles import existing_profiles
+
     _forget_note(cfg, repo_root)
     if candidates is None:
         candidates = cfg.learning_candidates or cfg.routing.get("medium") or []
-    names = [c for c in candidates if isinstance(c, str) and cfg.routing_allows(c, design_heavy)]
+    names = existing_profiles(
+        (c for c in candidates if isinstance(c, str) and cfg.routing_allows(c, design_heavy)), repo_root)
     if not names:
         return None, None
-    default = default if default and cfg.routing_allows(default, design_heavy) else names[0]
+    default = (default if default and cfg.routing_allows(default, design_heavy)
+               and existing_profiles([default], repo_root) else names[0])
     if default not in names:
         # e.g. default_agent outside learning_candidates: it's still the baseline to beat
         names.insert(0, default)

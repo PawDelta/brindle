@@ -489,7 +489,7 @@ def second_profile(db: DB, cfg: RepoConfig, worker: Agent, ws: Workspace) -> str
     from brindle.profiles import current_name
 
     primary = agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task)
-    if not profile or current_name(profile, ws.repo_root) == current_name(primary, ws.repo_root):
+    if not profile or (primary and current_name(profile, ws.repo_root) == current_name(primary, ws.repo_root)):
         return None
     return profile
 
@@ -948,12 +948,16 @@ def _fallback_reviewer(cfg: RepoConfig, reviewer: Agent,
     routes to the cheapest available reviewer tier (reusing weight/price
     tiers, and including ``reviewer-local`` only when configured by the repo),
     falling back to ``cfg.reviewer``."""
-    if cfg.review_profile:
+    from brindle.profiles import existing_profiles
+
+    review_pin = existing_profiles([cfg.review_profile], repo_root)
+    if review_pin:
         return cfg.review_profile, f"using {cfg.review_profile} (pinned by review_profile)"
     if db is not None and ws is not None and "reviewer" in cfg.agent_models and not cfg.reviewer_models_inherited:
         name, why = agents._review_choice(db, ws, None, cfg)
         return name, why or f"using {name} from this task size's reviewer pool"
-    default = cfg.reviewer or "review.claude-sonnet.high"
+    default = next(iter(existing_profiles([cfg.reviewer, *cfg.reviewer_fallbacks], repo_root)),
+                   "review.claude-sonnet.high")
     if default != "review.claude-sonnet.high" or _repo_pins_reviewer(repo_root):
         return default, f"using {default} (pinned by reviewer config)"
     from brindle import autopilot, pricing, profiles, review_scope
@@ -1148,7 +1152,7 @@ def _other_provider_reviewers(db: DB, cfg: RepoConfig, reviewer: Agent, ws: Work
     it. Also why each candidate was skipped (the list is empty when none can
     run)."""
     from brindle import cascade, review_scope
-    from brindle.profiles import load_profile
+    from brindle.profiles import existing_profiles, load_profile
 
     taken = {a.profile for a in db.list_agents(ws.id) if a.mode == "review" and a.id != reviewer.id
              and a.review_sha == sha and a.result is None and agents.alive_or_starting(a)}
@@ -1157,13 +1161,14 @@ def _other_provider_reviewers(db: DB, cfg: RepoConfig, reviewer: Agent, ws: Work
     pool = [n for n in dict.fromkeys(canonical(x) for x in (*own, *(() if locked else cascade.REVIEWERS)) if x)
             if n not in taken]
     worker = agents.workspace_worker(db, ws)
-    if not cfg.review_profile and "reviewer" in cfg.agent_models and not cfg.reviewer_models_inherited:
+    if not existing_profiles([cfg.review_profile], ws.repo_root) and (
+            "reviewer" in cfg.agent_models and not cfg.reviewer_models_inherited):
         size = review_scope.review_size(worker, db, ws.repo_root, ws, cfg)
         configured = review_scope.model_order(cfg, size)
         if configured is not None:
             pool = [n for n in configured if n not in taken]
             locked = size in cfg.agent_models["reviewer"] or bool(cfg.routing_locked.get(size))
-    pool, same_model = review_scope.writer_model_last(pool, worker, ws.repo_root)
+    pool, same_model = review_scope.writer_model_last(existing_profiles(pool, ws.repo_root), worker, ws.repo_root)
 
     def why_not(name: str) -> str | None:
         try:

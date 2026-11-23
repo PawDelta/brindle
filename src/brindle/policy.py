@@ -121,7 +121,8 @@ def _decide(what: str, cfg: RepoConfig, repo_root: str, ask) -> Decision:
 
 def _profile_fields(profile: str | None, repo_root: str, *,
                     user_library: bool = False, cwd: str | None = None,
-                    env: dict[str, str] | None = None) -> tuple[str | None, str | None]:
+                    env: dict[str, str] | None = None,
+                    resolve_version: bool = False) -> tuple[str | None, str | None]:
     """(provider, model) of ``profile``, best effort. ``user_library``: the
     person's profile of that name, never the repo's own (the company route
     is still the repo's)."""
@@ -132,6 +133,10 @@ def _profile_fields(profile: str | None, repo_root: str, *,
 
         p = load_profile(profile, None if user_library else repo_root)
         model = p.model
+        if model and resolve_version:
+            from brindle.agents import routing_model
+
+            model = routing_model(p, repo_root, cwd=cwd, env=env)
         if p.provider == "claude":
             from brindle import company_login
 
@@ -174,7 +179,7 @@ def check_assign(cfg: RepoConfig, repo_root: str, profile: str, task: str, mode:
     if not d.allowed:              # an air-gap refusal is audited like any other denial
         from brindle import events
 
-        provider, model = _profile_fields(profile, repo_root, cwd=cwd, env=env)
+        provider, model = _profile_fields(profile, repo_root, cwd=cwd, env=env, resolve_version=True)
         events.emit_denial(cfg, repo_root, "assign", d.reason, branch=branch, profile=profile,
                            provider=provider, model=model, actor=actor.id if actor else "user")
     return d
@@ -190,7 +195,7 @@ def assign_decision(cfg: RepoConfig, repo_root: str, profile: str, task: str, mo
     actually starts (or is refused) is audited."""
     from brindle import airgap
 
-    provider, model = _profile_fields(profile, repo_root, cwd=cwd, env=env)
+    provider, model = _profile_fields(profile, repo_root, cwd=cwd, env=env, resolve_version=True)
     info = AssignInfo(
         repo_root=repo_root, task=task, files=tuple(files or ()), weight=weight,
         profile=profile, provider=provider, model=model, mode=mode, branch=branch,

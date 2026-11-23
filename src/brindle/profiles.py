@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -670,6 +671,11 @@ def profile_source(name: str, repo_root: str | None = None) -> str | None:
     """Where ``name`` is read from: a path, or "built-in profile <name>"."""
     found = _read(name, repo_root)
     return found[1] if found else None
+
+
+def existing_profiles(names: Iterable[str | None], repo_root: str | None) -> list[str]:
+    """Keep the configured order of profiles that still exist."""
+    return [name for name in names if name and profile_source(name, repo_root) is not None]
 
 
 def _merge_rules(parent: str | None, child: str | None) -> str:

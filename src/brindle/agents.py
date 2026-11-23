@@ -848,10 +848,12 @@ def supervisor_choice(repo_root: str):
     its provider from, ordered by the measured table, unless the owner pinned
     the supervisor (``routing_locked``). None when none is set (the
     supervisor profile's own then) or nothing can run."""
+    from dataclasses import replace
+
     from brindle import cascade, provider_health
     from brindle.autopilot import effective_profile_model
     from brindle.config import load_repo_config
-    from brindle.profiles import ProfileError
+    from brindle.profiles import ProfileError, existing_profiles
     from brindle.service.routing import RoutingPolicy
 
     cfg = load_repo_config(repo_root)
@@ -863,6 +865,9 @@ def supervisor_choice(repo_root: str):
             p = loaded[name] = load_profile(name, repo_root)
         except (KeyError, ProfileError) as e:
             return str(e)
+        resolved = routing_model(p, repo_root)
+        if resolved != p.model:
+            p = replace(p, model=resolved)
         why = policy.refusal(p) or unusable(p.provider, p.env)
         if why:
             return why
@@ -870,14 +875,15 @@ def supervisor_choice(repo_root: str):
                                        profile=name, repo_root=repo_root, env=p.env, installed=False)
         return None if health.ok else health.reason
 
-    configured = [n for n in [cfg.supervisor_profile, *cfg.supervisor_fallbacks] if n]
     pinned = bool(cfg.routing_locked.get("supervisor"))
-    if not configured:
+    if not cfg.supervisor_profile and not cfg.supervisor_fallbacks:
         return None   # nothing chosen: the launch picks a usable provider itself (service.sessions)
-    if why_not(configured[0]) is None:
-        return loaded[configured[0]]
-    pool = configured if pinned else [*configured, *cascade.SUPERVISORS]
-    found = cascade.run("supervisor", pool, why_not, repo_root=repo_root, lead=configured[0], pinned=pinned,
+    configured = existing_profiles([cfg.supervisor_profile, *cfg.supervisor_fallbacks], repo_root)
+    lead = next(iter(configured), None)
+    if lead and why_not(lead) is None:
+        return loaded[lead]
+    pool = configured if pinned else existing_profiles([*configured, *cascade.SUPERVISORS], repo_root)
+    found = cascade.run("supervisor", pool, why_not, repo_root=repo_root, lead=lead, pinned=pinned,
                         beyond=len(configured))
     return loaded[found.first] if found.first else None
 
@@ -1042,7 +1048,7 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
         if why:
             raise AgentError(f"managed models: {why}")
         profile = managed_models.apply_profile(m, profile)
-    return profile
+    return _with_newest_model(profile, ws, agent=agent, m=m)
 
 
 def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str],
@@ -1232,6 +1238,54 @@ def login_shell_additions(agent: Agent, ws: Workspace) -> dict[str, str]:
     return {n: v for n, v in found.items() if effective.get(n) == v}
 
 
+def _with_newest_model(profile, ws: Workspace, *, agent: Agent | None = None, m=_UNREAD,
+                       effective: dict[str, str] | None = None):
+    """Resolve a pin using the same CLI account and credentials as provisioning."""
+    from dataclasses import replace
+
+    from brindle import model_catalog, policy, preflight
+    from brindle.launch_health import account_revision
+    from brindle.pro import team_policy
+
+    provider = agent.provider if agent else profile.provider
+    if provider != profile.provider or provider not in ("codex", "antigravity", "opencode") or not profile.model:
+        return profile
+    candidates = model_catalog.newer_versions(profile.model)
+    if not candidates or preflight.turned_off(provider):
+        return profile
+    try:
+        _airgap_check(profile, ws.repo_root)
+    except AgentError:
+        return profile
+    org = team_policy.ProPolicy(ws.repo_root).policy()
+    if isinstance(org, policy.Decision):
+        if not org.allowed:
+            return profile
+    else:
+        candidates = [model for model in candidates if team_policy.model_allowed(org.allowed_models, model)]
+    if not candidates:
+        return profile
+    if effective is None:
+        if agent is None:
+            agent = Agent("preflight", ws.id, profile.name, provider, None,
+                          "assign", "starting", "", None, time.time())
+        effective = _effective_window_env(agent, ws, m)
+    model = _model_checker.first_listed(
+        profile, candidates, effective_env=effective, cwd=ws.path,
+        account_identity=account_revision(provider, effective),
+        catalog_context=provisioning_context(provider, ws.path, effective),
+    )
+    return replace(profile, model=model) if model else profile
+
+
+def routing_model(profile, repo_root: str, *, cwd: str | None = None,
+                  env: dict[str, str] | None = None) -> str | None:
+    """The model a routing preview sees before the target workspace exists."""
+    ws = Workspace("preflight", repo_root, "preflight", "root", "", None,
+                   cwd or repo_root, None, "", 0.0)
+    return _with_newest_model(profile, ws, effective=env).model
+
+
 def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = None,
                   profile=None, m=_UNREAD) -> str | None:
     """Read-only provisioning/routing gate, using the worker's actual identity."""
@@ -1264,6 +1318,7 @@ def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = Non
     agent = agent or Agent("preflight", ws.id, profile_name, profile.provider, None,
                            "assign", "starting", "", None, time.time())
     effective = _effective_window_env(agent, ws, m)
+    profile = _with_newest_model(profile, ws, agent=agent, m=m, effective=effective)
     profile = replace(profile, provider=agent.provider)
     if profile.provider == "codex" and not profile.model:
         from brindle import policy
@@ -4877,14 +4932,19 @@ def _hand_edited_merges(ws: Workspace, prev_sha: str) -> list[str]:
 
 
 def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None = None,
-                           repo_root: str | None = None, task: str | None = None) -> str:
+                           repo_root: str | None = None, task: str | None = None) -> str | None:
     """Use an explicit size pool when configured, otherwise the legacy reviewer.
 
     Existing configurations retain Sonnet-high and the optional learner. An
     explicit reviewer map follows the shared table for its missing sizes.
     """
-    if cfg.review_profile:
+    from brindle.profiles import existing_profiles
+
+    if cfg.review_profile and (repo_root is None or existing_profiles([cfg.review_profile], repo_root)):
         return cfg.review_profile
+    reviewer = cfg.reviewer
+    if repo_root is not None:
+        reviewer = next(iter(existing_profiles([reviewer, *cfg.reviewer_fallbacks], repo_root)), None)
     if "reviewer" in cfg.agent_models and not cfg.reviewer_models_inherited:
         from brindle import review_scope
 
@@ -4893,17 +4953,17 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
             return _review_choice(db, ws, None, cfg)[0]
         size = review_scope.review_size(worker, db, repo_root or "", None, cfg)
         pool = review_scope.model_order(cfg, size)
-        names, _ = review_scope.writer_model_last(pool, worker, repo_root or "")
-        return names[0] if names else cfg.reviewer
-    if cfg.reviewer and cfg.reviewer != "review.claude-sonnet.high":
-        return cfg.reviewer
+        names, _ = review_scope.writer_model_last(existing_profiles(pool, repo_root), worker, repo_root or "")
+        return names[0] if names else reviewer
+    if reviewer != "review.claude-sonnet.high" or reviewer != cfg.reviewer:
+        return reviewer
     if db is None or not repo_root or cfg.routing_locked.get("reviewer"):
-        return cfg.reviewer
+        return reviewer
     from brindle import learning
 
     if learning.plugin(cfg, repo_root) is None:
-        return cfg.reviewer  # no learner: don't even probe the alternatives
-    candidates = [cfg.reviewer]
+        return reviewer  # no learner: don't even probe the alternatives
+    candidates = [reviewer]
     if unusable("antigravity") is None:
         try:
             load_profile("review.gemini", repo_root)
@@ -4923,9 +4983,9 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
     if worker and worker.weight:
         weight = worker.weight
     pick, _ = learning.choose_why(db, cfg, repo_root, task, candidates=candidates,
-                                  default=cfg.reviewer, files=list(files) or None,
+                                  default=reviewer, files=list(files) or None,
                                   weight=weight)
-    return pick or cfg.reviewer
+    return pick or reviewer
 
 
 def _local_reviewer_available() -> bool:
@@ -5024,11 +5084,13 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
     owner pinned the reviewer), ordered by the measured table; the first
     candidate keeps its place while it can run."""
     from brindle import cascade, review_scope
+    from brindle.profiles import existing_profiles
 
     pinned = profile is not None or bool(cfg.routing_locked.get("reviewer"))
     worker = workspace_worker(db, ws) if profile is None else None
     size_pool = None
-    if profile is None and not cfg.review_profile and "reviewer" in cfg.agent_models and not cfg.reviewer_models_inherited:
+    review_pin = existing_profiles([cfg.review_profile], ws.repo_root)
+    if profile is None and not review_pin and "reviewer" in cfg.agent_models and not cfg.reviewer_models_inherited:
         size = review_scope.review_size(worker, db, ws.repo_root, ws, cfg)
         overrides = cfg.agent_models["reviewer"]
         size_pool = review_scope.model_order(cfg, size)
@@ -5036,16 +5098,17 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
     if profile is not None:
         candidates = [profile]
     elif size_pool is not None:
-        candidates = list(dict.fromkeys(size_pool))
+        candidates = existing_profiles(dict.fromkeys(size_pool), ws.repo_root)
         if not candidates:
             raise AgentError("No reviewer models configured for this task size")
     else:
         pick = default_review_profile(cfg, worker, db, ws.repo_root, worker.task if worker else None)
-        candidates = list(dict.fromkeys([pick, *cfg.reviewer_fallbacks]))
-        if pick == "review.claude-sonnet.high" and not cfg.review_profile and not cfg.routing_locked.get("reviewer"):
+        candidates = existing_profiles(dict.fromkeys([pick, *cfg.reviewer_fallbacks]), ws.repo_root)
+        automatic = pick and not review_pin and not pinned and existing_profiles([cfg.reviewer], ws.repo_root)
+        if automatic and pick == "review.claude-sonnet.high":
             if "reviewer" not in candidates:
                 candidates.append("reviewer")
-        if cfg.review_sizing and not cfg.review_profile and not cfg.routing_locked.get("reviewer"):
+        if automatic and cfg.review_sizing:
             from brindle import review_scope
 
             if review_scope.small_branch(ws, cfg):
@@ -5053,6 +5116,10 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
                 if cheap:
                     candidates.insert(0, cheap)
     pool = candidates if pinned or size_pool is not None else [*candidates, *cascade.REVIEWERS]
+    if profile is None:
+        pool = existing_profiles(pool, ws.repo_root)
+    if not pool:
+        raise AgentError("No reviewer models configured for this task size")
     same_model = set()
     # Keep the legacy selection and cascade order for inherited reviewer settings.
     if size_pool is not None:
@@ -5078,17 +5145,12 @@ def _review_choice(db: DB, ws: Workspace, profile: str | None,
 
     if why_not(preferred) is None:
         return preferred, same_model_note(preferred)
-    if cfg.review_profile and not pinned:
-        try:
-            load_profile(cfg.review_profile, ws.repo_root)
-        except KeyError as e:
-            raise AgentError(str(e)) from e   # a misnamed setting is reported, never replaced silently
     found = cascade.run("reviewer", pool, why_not, repo_root=ws.repo_root, lead=preferred, pinned=pinned,
                         beyond=None if size_pool is not None else len(candidates))
     found.order = [n for n in found.order if n not in same_model] + [n for n in found.order if n in same_model]
     first = next((errors[n] for n in found.pool if n in errors), None)
     if found.first is None:
-        raise first
+        raise first or AgentError("No reviewer model can run")
     name = found.first
     return name, same_model_note(name) or (f"Review of {ws.branch}: {first}; reviewing with {name} instead."
                   if first is not None and found.pool.index(name) > 0 else None)
