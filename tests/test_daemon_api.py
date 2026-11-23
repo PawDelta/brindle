@@ -1069,13 +1069,44 @@ def test_legacy_reviewer_update_changes_the_medium_override(repo, db):
     assert agents.default_review_profile(cfg, None) == chosen
 
 
-def test_reviewer_override_requires_removing_an_existing_pin(repo, db):
+def test_shared_legacy_reviewer_edit_cannot_copy_or_hide_behind_a_local_order(repo, db):
+    from brindle import config
+
+    shared = {"reviewer": {"medium": ["review.claude-sonnet.high", "review.gpt"]}}
+    local = {"reviewer": {"medium": ["review.gpt", "review.gemini"]}}
+    config.set_repo(repo, "agent_models", shared)
+    config.set_local(repo, "agent_models", local)
+    app = build_app(TOKEN)
+
+    def put():
+        return asyncio.run(_read_request(app, "/v1/routing", AUTH, method="PUT", payload={
+            "repo": str(repo), "scope": "repo", "kinds": {"reviewer": {"model": "reviewer"}},
+        }))
+
+    paths = config.scope_paths(repo)
+    before = paths["repo"].read_text(), paths["local"].read_text()
+    code, _ = put()
+    assert code == 409
+    assert (paths["repo"].read_text(), paths["local"].read_text()) == before
+    config.set_local(repo, "agent_models", {"reviewer": {"light": ["review.gemini"]}})
+    config.set_local(repo, "review_profile", "review.gemini")
+    assert put()[0] == 409
+    assert paths["repo"].read_text() == before[0]
+    config.unset_local(repo, "review_profile")
+    assert put()[0] == 200
+    cfg = config.load_repo_config(repo)
+    assert cfg.agent_models["reviewer"] == {"medium": ["reviewer", "review.gpt"], "light": ["review.gemini"]}
+
+
+def test_reviewer_override_requires_removing_an_existing_pin(repo, db, monkeypatch):
     from brindle import agents, config
 
     pin = "review.claude-sonnet.high"
     chosen = "review.gpt"
+    fallback = "review.gemini"
     config.set_repo(repo, "review_profile", pin)
-    config.set_repo(repo, "agent_models", {"reviewer": {"medium": ["review.gemini"]}})
+    config.set_repo(repo, "reviewer_fallbacks", [fallback])
+    config.set_repo(repo, "agent_models", {"reviewer": {"medium": [fallback]}})
     app = build_app(TOKEN)
 
     def put():
@@ -1088,9 +1119,19 @@ def test_reviewer_override_requires_removing_an_existing_pin(repo, db):
     code, routing = _get("/v1/routing", AUTH, f"repo={repo}&learned=0")
     assert code == 200, routing
     cfg = config.load_repo_config(repo)
-    assert cfg.agent_models["reviewer"]["medium"] == ["review.gemini"]
+    assert cfg.agent_models["reviewer"]["medium"] == [fallback]
     assert routing["kinds"]["reviewer"]["model"] == agents.default_review_profile(cfg, None) == pin
-    assert routing["agents"]["reviewer"]["models"]["medium"]["model"] == pin
+    order = routing["agents"]["reviewer"]["models"]["medium"]
+    assert (order["model"], order["fallbacks"], order["locked"]) == (pin, [fallback], False)
+    assert all(routing["kinds"]["reviewer"][field] == value for field, value in order.items())
+
+    def can_run(name, ws, cfg):
+        if name == pin:
+            raise agents.AgentError("provider unavailable")
+
+    monkeypatch.setattr(agents, "_reviewer_can_run", can_run)
+    ws = workspaces.adopt_root(db, str(repo))
+    assert agents._review_choice(db, ws, None, cfg)[0] == order["fallbacks"][0]
 
     config.unset_repo(repo, "review_profile")
     assert put()[0] == 200

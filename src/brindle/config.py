@@ -484,14 +484,16 @@ def kind_overrides(found: object) -> dict[str, dict[str, str]]:
     return out
 
 
-def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: str | None = None) -> RepoConfig:
+def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: str | None = None,
+                     include_local: bool = True) -> RepoConfig:
     """The settings for ``repo_root``: its local file over its shared one over
     the person's ~/.brindle/config.json. ``user_only``: the person's file
     alone, as every repo starts from it (the app's Agents tab). ``branch``:
-    read the shared file as committed there (see ``_read_shared``)."""
+    read the shared file as committed there (see ``_read_shared``).
+    ``include_local=False`` reads through the shared layer for a shared edit."""
     base = config_root(repo_root) / CONFIG_DIR
     shared = {} if user_only else _read_shared(base.parent, branch)
-    local = {} if user_only else _read_json(base / LOCAL_CONFIG_FILE)
+    local = _read_json(base / LOCAL_CONFIG_FILE) if include_local and not user_only else {}
     user = user_settings()
 
     cfg = RepoConfig()

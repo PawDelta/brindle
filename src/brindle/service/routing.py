@@ -26,10 +26,19 @@ def legacy_medium_override(cfg: config.RepoConfig, name: str) -> list[str] | Non
     return cfg.agent_models.get(name, {}).get("medium")
 
 
+def shadows_legacy_medium(settings: dict, name: str) -> bool:
+    models = settings.get("agent_models")
+    sizes = models.get(name) if isinstance(models, dict) else None
+    # An empty map resets all inherited overrides for this role.
+    return isinstance(sizes, dict) and (not sizes or any(
+        config.normalize_weight(size) == "medium" and isinstance(order, list) for size, order in sizes.items()))
+
+
 def agent_model_orders(cfg: config.RepoConfig, name: str, legacy: RoutingModelOrderDTO | None
                        ) -> dict[str, RoutingModelOrderDTO]:
-    if name == "reviewer" and cfg.review_profile:
-        return {size: RoutingModelOrderDTO(model=cfg.review_profile, locked=True) for size in config.WEIGHTS}
+    if name == "reviewer" and cfg.review_profile and legacy:
+        order = RoutingModelOrderDTO(model=legacy.model, fallbacks=legacy.fallbacks, locked=legacy.locked)
+        return dict.fromkeys(config.WEIGHTS, order)
     pools = cfg.agent_models.get(name)
     if pools is None and name == "supervisor" and legacy and (legacy.model or legacy.fallbacks):
         return {size: RoutingModelOrderDTO(model=legacy.model, fallbacks=legacy.fallbacks, locked=legacy.locked)
