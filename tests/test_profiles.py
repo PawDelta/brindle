@@ -6,7 +6,7 @@ from brindle.profiles import _frontmatter, _list, compose, kind_of, load_profile
 
 def test_custom_agent_composes_at_launch_on_its_recorded_model(tmp_path, db, monkeypatch):
     from brindle import agents, providers
-    from brindle.db import Agent, Workspace
+    from brindle.db import Agent, DB, Workspace, _columns
     from brindle.providers import Codex, LaunchContext
 
     root = str(tmp_path)
@@ -21,15 +21,38 @@ def test_custom_agent_composes_at_launch_on_its_recorded_model(tmp_path, db, mon
     db.add_workspace(ws)
     db.add_agent(Agent("legacy", ws.id, "dev.gpt-sol", "codex", None, "assign", "idle", "", None, 1,
                        tmux_server="test"))
-    db.conn.execute("ALTER TABLE agents DROP COLUMN agent")
-    db._migrate()
     assert db.get_agent("legacy").agent is None
-    row = Agent("a", ws.id, "dev.gpt-sol", "codex", None, "assign", "idle", "", None, 1,
+    assert db.conn.execute("SELECT * FROM agent_roles").fetchall() == []
+    # Preserve role names from the development build, including a concurrent opener.
+    db.conn.execute("ALTER TABLE agents ADD COLUMN agent TEXT")
+    db.conn.execute("UPDATE agents SET agent='qa' WHERE id='legacy'")
+    real_tx = DB.tx
+    moved = []
+
+    def tx_after_other_process(self):
+        if not moved:
+            moved.append(True)
+            DB(db.path).conn.close()
+        return real_tx(self)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(DB, "tx", tx_after_other_process)
+        db._migrate()
+    assert moved and "agent" not in _columns(db.conn)["agents"]
+    assert db.get_agent("legacy").agent == "qa"
+    db.update_agent("legacy", agent="mine", weight="light")
+    assert (db.get_agent("legacy").agent, db.get_agent("legacy").weight) == ("mine", "light")
+    db.update_agent("legacy", agent=None)
+    assert db.get_agent("legacy").agent is None
+    row = Agent("a", ws.id, "dev.gpt-sol", "codex", "legacy", "assign", "idle", "", None, 1,
                 agent="mine", tmux_server="test")
     db.add_agent(row)
     db.update_agent(row.id, weight="medium")
     saved = db.get_agent(row.id)
     assert (saved.agent, saved.profile) == ("mine", "dev.gpt-sol")
+    assert db.children("legacy")[0].agent == "mine"
+    assert {a.id: a.agent for a in db.list_agents(ws.id)} == {"legacy": None, "a": "mine"}
+    assert {a.id: a.agent for a in db.list_agents()} == {"legacy": None, "a": "mine"}
     assert kind_of("mine", root) == kind_of("qa", root) == "agent"
     assert kind_of("pinned-child", root) == "pinned"
     assert kind_of("developer-codex-sol", root) == "model"
