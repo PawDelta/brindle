@@ -1,40 +1,33 @@
-/* What the Agents tab works on, apart from React: the kinds of work, what
-   each one runs and what takes over at a limit, the choices a row's list
-   offers, and the custom agent being made. Everything comes from GET
-   /v1/routing (engine branch feat/routing-learned-lock): every profile with
-   its model, provider, availability, cost and automatic check (lint_errors),
-   and per kind of work the owner's pick, its ordered fallbacks, whether it is
-   locked, and the different profile hosted learning runs for it now.
+/* What the Agents page works on, apart from React (A1, "separate layers"):
+   who does a task (agents: how to work, no model) and what model runs each
+   job size (one shared table). Everything comes from GET /v1/routing: every
+   profile with its kind (model, agent or pinned), model, provider,
+   availability, cost and automatic check (lint_errors); per size the
+   owner's pick, its ordered fallbacks, the lock and what hosted learning
+   runs instead; and per agent its description, rules and the sizes where it
+   keeps a model of its own (`agents[name].models`).
 
-   In the person's words, a built-in profile is a model ("Sonnet 5.5 on
-   Claude Code"); one of their own is a custom agent, named. The word
-   "profile" isn't shown. */
+   In the person's words, a built-in model profile is a model ("Sonnet 5.5
+   on Claude Code"); an agent is named. The word "profile" isn't shown. */
 
-import type { RoutingDTO, RoutingKindDTO, RoutingProfileDTO } from "../../api/schema";
-import type { KindExtras } from "../../api/client";
+import type { RoutingDTO, RoutingKindDTO, RoutingModelOrderDTO, RoutingProfileDTO } from "../../api/schema";
+import type { KindExtras, WorksLike } from "../../api/client";
 import { FACTS } from "../../api/providers";
 
 export const SIZES = ["light", "medium", "heavy", "advanced"] as const;
+export type Size = (typeof SIZES)[number];
 export const KINDS = [...SIZES, "reviewer", "supervisor"] as const;
 export type Kind = (typeof KINDS)[number];
 export const isSize = (k: Kind): boolean => (SIZES as readonly string[]).includes(k);
 
 export const KIND_INFO: Record<Kind, { name: string; blurb: string }> = {
-  light: { name: "Light", blurb: "Small, well-specified, mechanical work: docs, renames, simple tests." },
-  medium: { name: "Medium", blurb: "Normal feature work and bugfixes." },
-  heavy: { name: "Heavy", blurb: "System architecture and broad refactoring." },
-  advanced: { name: "Advanced", blurb: "Complex, long-running design and implementation." },
+  light: { name: "Light", blurb: "Docs, renames, simple tests" },
+  medium: { name: "Medium", blurb: "Features and bugfixes" },
+  heavy: { name: "Heavy", blurb: "Architecture, broad refactors" },
+  advanced: { name: "Advanced", blurb: "Long-running design and build" },
   reviewer: { name: "Reviewer", blurb: "Reviews every branch before it merges. Never edits." },
   supervisor: { name: "Supervisor", blurb: "Plans the work, sizes each task, hands it out, merges." },
 };
-
-/* How a task is run, in four steps. */
-export const FLOW: [string, string][] = [
-  ["A task comes in", "From you, or from a supervisor splitting up bigger work."],
-  ["It's sized", "The supervisor calls it Light, Medium, Heavy or Advanced. Automatic: you don't size tasks."],
-  ["That size's agent runs it", "The model or custom agent you chose for that size."],
-  ["At a limit, the next one", "A usage limit, or a provider that isn't connected: the next fallback takes over. None left: the task waits and you're told."],
-];
 
 export const EFFORT = ["low", "medium", "high"] as const;
 
@@ -192,11 +185,13 @@ export function runOrder(k: KindState): string[] {
 
 /* The profiles a kind's list offers: the built-in reviewers for the
    reviewer, the built-in developers for a size or the supervisor (one per
-   model), and the person's custom agents for any. One the org refuses never shows. */
+   model), and the person's custom agents that pin a model for any. An agent
+   (how to work, no model of its own) is never a model to pick. One the org
+   refuses never shows. */
 export function offeredFor(kind: Kind, profiles: RoutingProfileDTO[]): RoutingProfileDTO[] {
   const role = kind === "reviewer" ? "reviewer" : "developer";
   return profiles.filter((p) => {
-    if (HELPERS.has(p.role ?? "") || HELPER_PROVIDERS.has(p.provider) || p.allowed === false) return false;
+    if (p.kind === "agent" || HELPERS.has(p.role ?? "") || HELPER_PROVIDERS.has(p.provider) || p.allowed === false) return false;
     return isCustom(p) || p.role === role;
   });
 }
@@ -209,47 +204,87 @@ export function move<T>(list: T[], from: number, to: number): T[] {
   return next;
 }
 
-/* ---- A custom agent being made: the five steps' answers. ---- */
+/* ---- Who does the work: the agents. ---- */
+
+/* How an agent's model is chosen: by the job size, by the job size except
+   some sizes where it keeps its own, or its own (every size, or a custom
+   profile that pins a model). */
+export type ModelMode = "follows" | "except" | "own";
+
+export interface AgentRow {
+  name: string;
+  /* As the person reads it: "Backend auditor" for a built-in, its own name for theirs. */
+  label: string;
+  custom: boolean;
+  description: string;
+  rules: string[];
+  role: string | null;
+  /* An agent follows the job size where it has no own model; a pinned one runs its own profile's model. */
+  pinned: boolean;
+  /* The sizes where it keeps a model of its own. */
+  models: Partial<Record<Size, RoutingModelOrderDTO>>;
+  mode: ModelMode;
+}
+
+/* The built-ins in the order the page lists them; the person's own come
+   after them, and the supervisor, which runs the session itself, last. */
+const BUILTIN_ORDER = ["developer", "qa", "reviewer", "backend-auditor"];
+const LAST = "supervisor";
+
+/* A built-in agent's name in words: "backend-auditor" reads "Backend auditor", "qa" reads "QA". */
+export function agentLabel(name: string): string {
+  if (name === "qa") return "QA";
+  const words = name.replace(/[-_.]+/g, " ").trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+function modeOf(models: Partial<Record<Size, RoutingModelOrderDTO>>, pinned: boolean): ModelMode {
+  if (pinned) return "own";
+  const own = SIZES.filter((s) => models[s]?.model);
+  return own.length === 0 ? "follows" : own.length === SIZES.length ? "own" : "except";
+}
+
+/* Every agent GET /routing lists, and every custom profile of the
+   person's that pins a model (it still runs as itself), in the page's order. */
+export function agentRows(routing: RoutingDTO): AgentRow[] {
+  const rows: AgentRow[] = [];
+  for (const [name, a] of Object.entries(routing.agents ?? {})) {
+    const models: Partial<Record<Size, RoutingModelOrderDTO>> = {};
+    for (const s of SIZES) if (a.models?.[s]?.model) models[s] = a.models[s];
+    rows.push({ name, label: a.builtin ? agentLabel(name) : name, custom: !a.builtin, description: a.description, rules: a.rules ?? [], role: a.role, pinned: false, models, mode: modeOf(models, false) });
+  }
+  for (const p of routing.profiles) {
+    if (p.builtin || p.kind === "agent" || p.kind === "model" || rows.some((r) => r.name === p.name)) continue;
+    rows.push({ name: p.name, label: p.name, custom: true, description: p.description ?? "", rules: p.rules ?? [], role: p.role ?? null, pinned: true, models: {}, mode: "own" });
+  }
+  const rank = (r: AgentRow) => (r.name === LAST ? 3 : r.custom ? 2 : BUILTIN_ORDER.includes(r.name) ? 0 : 1);
+  const at = (r: AgentRow) => BUILTIN_ORDER.indexOf(r.name);
+  return rows.sort((a, b) => rank(a) - rank(b) || at(a) - at(b) || a.name.localeCompare(b.name));
+}
+
+/* ---- An agent being added or edited: the form's answers. ---- */
 export interface Draft {
   name: string;
   purpose: string;
-  provider: string | null;
-  model: string | null;
-  effort: string;
   instructions: string;
   rules: string[];
-  /* The kind of work it runs, or null: any kind, picked from any list. */
-  useFor: Kind | null;
+  worksLike: WorksLike;
+  /* Model: follows the job size, or the sizes given here run their own. */
+  own: Partial<Record<Size, string>>;
 }
 
-export const newDraft = (useFor: Kind | null): Draft => ({ name: "", purpose: "", provider: null, model: null, effort: "medium", instructions: "", rules: [], useFor });
+export const newDraft = (): Draft => ({ name: "", purpose: "", instructions: "", rules: [], worksLike: "developer", own: {} });
 
-export const STEPS: [string, string][] = [
-  ["what", "What it's for"],
-  ["model", "Provider and model"],
-  ["how", "How it works"],
-  ["where", "Where it's used"],
-  ["check", "Check and create"],
-];
+export const WORKS_LIKE: WorksLike[] = ["developer", "qa", "reviewer"];
 
-/* The custom agent's name as it is saved (its file's name). */
+/* The agent's name as it is saved (its file's name). */
 export const cleanName = (name: string): string => name.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
 
 /* What stops Create, or null. */
 export function draftProblem(d: Draft, taken: string[]): string | null {
   const name = cleanName(d.name);
   if (!name) return "Give it a name.";
-  if (!d.provider || !d.model) return "Pick a model.";
+  if (!d.purpose.trim()) return "Say what it's for.";
   if (taken.includes(name)) return `There's already an agent called ${name}.`;
   return null;
-}
-
-/* The models a provider offers the builder: each model its built-in developers run, once. */
-export function modelsOf(provider: string, profiles: RoutingProfileDTO[]): RoutingProfileDTO[] {
-  const out = new Map<string, RoutingProfileDTO>();
-  for (const p of profiles) {
-    if (p.provider !== provider || !p.model || p.role !== "developer" || isCustom(p) || p.allowed === false) continue;
-    if (!out.has(p.model)) out.set(p.model, p);
-  }
-  return [...out.values()];
 }

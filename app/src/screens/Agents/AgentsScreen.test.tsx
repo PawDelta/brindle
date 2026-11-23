@@ -52,7 +52,10 @@ const profiles: RoutingProfile[] = [
   rp("reviewer", "claude", "opus-5.5", "high"),
   rp("reviewer-codex", "codex", "gpt-5.5", "medium"),
   rp("supervisor", "claude", null, "medium"),
-  rp("quick-fix", "codex", "gpt-5.5-mini", "low", { builtin: false }),
+  rp("quick-fix", "codex", "gpt-5.5-mini", "low", { builtin: false, kind: "pinned" }),
+  // Agents: how to work, no model of their own (profiles.kind_of "agent").
+  rp("qa", "claude", null, "medium", { kind: "agent", description: "Writes and fixes tests, never the code under test", rules: ["tests-first"] }),
+  rp("backend-auditor", "claude", null, "medium", { kind: "agent", role: "reviewer", description: "Reviews a branch as a backend security audit" }),
 ];
 
 const described: DaemonData["profiles"] = [
@@ -108,11 +111,20 @@ function setup(more: Partial<DaemonData> = {}, fetch?: (daemon: FakeDaemon) => t
   return { daemon, ...mount(daemon, fetch) };
 }
 
-const NAMES: Record<string, string> = { light: "Light", medium: "Medium", heavy: "Heavy", advanced: "Advanced", reviewer: "Reviewer", supervisor: "Supervisor" };
+const NAMES: Record<string, string> = { light: "Light", medium: "Medium", heavy: "Heavy", advanced: "Advanced" };
 const row = (k: string) => screen.getByTestId(`kind-${k}`);
 const runsOn = (k: string) => within(row(k)).getByRole("button", { name: `${NAMES[k]} runs on` });
-const chain = (k: string) => within(row(k)).getByTestId("chain").textContent;
-const lock = (k: string) => within(row(k)).getByTestId("lock");
+/* What takes over at the size's limit, in order, by name. */
+const chain = (k: string) => [...within(row(k)).getByTestId("chain").querySelectorAll("[data-chain-label]")].map((el) => el.textContent).join(", then ");
+const skipped = (k: string, id: string) => within(row(k)).getByTestId("chain").querySelector<HTMLElement>(`[data-chain="${id}"]`)?.dataset.skipped;
+/* The lock against learning is in the size's Edit. */
+const lock = (k: string) => {
+  const edit = within(row(k)).getByRole("button", { name: `Edit ${NAMES[k]}` });
+  if (edit.getAttribute("aria-expanded") !== "true") fireEvent.click(edit);
+  return within(row(k)).getByTestId("lock");
+};
+const need = (key: string) => screen.getByTestId("needs-you").querySelector<HTMLElement>(`[data-need="${key}"]`);
+const agent = (name: string) => screen.getByTestId(`agent-${name}`);
 const puts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method === "PUT" && r.path === "/routing").map((r) => r.body);
 const openFallbacks = (k: string) => {
   const b = within(row(k)).getByTestId("fallbacks");
@@ -124,10 +136,16 @@ const option = (list: HTMLElement, id: string) => list.querySelector<HTMLButtonE
 const noPopups = () => expect(document.querySelector("select, dialog, [role=dialog], [role=menu], [role=listbox], [popover]")).toBeNull();
 
 describe("agents tab", () => {
-  it("agents: shows how a task gets run, then picks a model for a kind from the connected providers only, with cost and speed", async () => {
+  it("agents: lists the agents apart from the job sizes, then picks a size's model from the connected providers only, with cost and speed", async () => {
     const { daemon } = setup();
     await screen.findByTestId("kind-medium");
-    expect(screen.getAllByTestId(/^kind-/).map((el) => el.dataset.testid)).toEqual(["kind-light", "kind-medium", "kind-heavy", "kind-advanced", "kind-reviewer", "kind-supervisor"]);
+    expect(screen.getAllByTestId(/^kind-/).map((el) => el.dataset.testid)).toEqual(["kind-light", "kind-medium", "kind-heavy", "kind-advanced"]);
+    // Who does the work: the agents, built-ins first, the person's own after; a custom profile that names a model runs its own.
+    expect(screen.getAllByTestId(/^agent-/).map((el) => [el.dataset.testid, el.dataset.modelMode])).toEqual([
+      ["agent-qa", "follows"],
+      ["agent-backend-auditor", "follows"],
+      ["agent-quick-fix", "own"],
+    ]);
 
     expect(runsOn("medium").dataset.choice).toBe("developer");
     expect(chain("medium")).toBe("GPT-5.5, then Opus 5.5");
@@ -166,20 +184,38 @@ describe("agents tab", () => {
     expect(option(light, "developer-codex-sol")!.querySelector("[data-model-name]")).toBeTruthy();
   });
 
-  it("agents: renamed built-in profiles are offered by the role the engine gives them, not by their names", async () => {
+  it("agents: renamed built-in profiles are offered by the role the engine gives them, and a reviewing agent keeps its own model for a size", async () => {
     const opus = rp("dev.claude-opus", "claude", "opus-5.5", "high", { role: "developer" });
     const sonnetHigh = rp("review.claude-sonnet.high", "claude", "sonnet-5.5", "medium", { role: "reviewer", effort: "high" });
-    setup({ routingProfiles: [...profiles, opus, sonnetHigh] });
+    const { daemon } = setup({ routingProfiles: [...profiles, opus, sonnetHigh] });
     await screen.findByTestId("kind-medium");
 
     fireEvent.click(runsOn("medium"));
     const medium = within(row("medium")).getByRole("group", { name: "Choices for Medium" });
     expect(option(medium, "dev.claude-opus")).toBeTruthy();
     expect(option(medium, "review.claude-sonnet.high")).toBeNull();
-    fireEvent.click(runsOn("reviewer"));
-    const reviewers = within(row("reviewer")).getByRole("group", { name: "Choices for Reviewer" });
-    expect(option(reviewers, "review.claude-sonnet.high")).toBeTruthy();
-    expect(option(reviewers, "dev.claude-opus")).toBeNull();
+    // An agent is never a model to pick.
+    expect(option(medium, "backend-auditor")).toBeNull();
+
+    // A built-in agent that reviews: its own model for Light comes from the reviewers, never the developers.
+    fireEvent.click(within(agent("backend-auditor")).getByRole("button", { name: "Edit Backend auditor" }));
+    fireEvent.click(within(agent("backend-auditor")).getByRole("button", { name: "Backend auditor Light model" }));
+    const own = within(agent("backend-auditor")).getByRole("group", { name: "Choices for Backend auditor Light" });
+    expect(option(own, "dev.claude-opus")).toBeNull();
+    fireEvent.click(option(own, "review.claude-sonnet.high")!);
+    await waitFor(() => expect(agent("backend-auditor").dataset.modelMode).toBe("except"));
+    // Its order for Light: the one picked, then the shared Light order behind it.
+    expect(puts(daemon).at(-1)).toEqual({
+      repo: REPO,
+      scope: "user",
+      agents: { "backend-auditor": { models: { light: { model: "review.claude-sonnet.high", fallbacks: ["developer-light", "quick-fix", "developer"] } } } },
+    });
+
+    // Back to following the job size: the size's override is cleared.
+    fireEvent.click(within(agent("backend-auditor")).getByRole("button", { name: "Backend auditor Light model" }));
+    fireEvent.click(within(agent("backend-auditor")).getByRole("button", { name: "Follow the job size" }));
+    await waitFor(() => expect(agent("backend-auditor").dataset.modelMode).toBe("follows"));
+    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", agents: { "backend-auditor": { models: { light: null } } } });
   });
 
   it("agents: reorders, removes and adds fallbacks inline, under the row", async () => {
@@ -230,66 +266,219 @@ describe("agents tab", () => {
     expect(lock("heavy").getAttribute("aria-pressed")).toBe("true");
   });
 
-  it("agents: makes a custom agent end to end from a row's list, and it runs that row and is in every list", async () => {
+  it("agents: creating an agent from the form sends no provider or model, and its row follows the job size", async () => {
     const { daemon, onNavigate } = setup();
     await screen.findByTestId("kind-medium");
-    fireEvent.click(runsOn("medium"));
-    fireEvent.click(within(row("medium")).getByRole("button", { name: /Make a custom agent/ }));
-    const b = within(row("medium")).getByRole("region", { name: "New custom agent" });
-    const create = within(b).getByRole("button", { name: "Create agent" }) as HTMLButtonElement;
+    fireEvent.click(screen.getByRole("button", { name: "New agent" }));
+    const form = screen.getByRole("region", { name: "New agent" });
+    const create = within(form).getByRole("button", { name: "Create agent" }) as HTMLButtonElement;
     expect(create.disabled).toBe(true);
 
-    // 1. What it's for.
-    fireEvent.change(within(b).getByLabelText("Name"), { target: { value: "careful-dev" } });
-    fireEvent.change(within(b).getByLabelText("What it's for"), { target: { value: "Feature work, tests first, small commits" } });
-    // 2. Provider (connected ones only; OpenCode named, not offered) and model, each with cost and speed.
-    const providers = within(b).getByRole("group", { name: "Provider" });
-    expect(within(providers).queryByRole("button", { name: /OpenCode/ })).toBeNull();
-    expect(providers.querySelector('[data-provider-off="opencode"]')!.textContent).toContain("not connected");
-    fireEvent.click(within(providers).getByRole("button", { name: /Claude Code/ }));
-    const models = within(b).getByRole("group", { name: "Model" });
-    const sonnet = within(models).getByRole("button", { name: /Sonnet 5\.5/ });
-    fireEvent.click(sonnet);
-    // 3. How it works: effort, instructions, rules with their one-line descriptions, and where they all are.
-    fireEvent.click(within(within(b).getByRole("group", { name: "Effort" })).getByRole("button", { name: "high" }));
-    fireEvent.change(within(b).getByLabelText("Instructions"), { target: { value: "Write the failing test first." } });
-    const rules = within(b).getByRole("group", { name: "Rules" });
+    // Name, what it's for, instructions and rules: no model to pick anywhere.
+    fireEvent.change(within(form).getByLabelText("Name"), { target: { value: "careful-dev" } });
+    fireEvent.change(within(form).getByLabelText("What it's for"), { target: { value: "Feature work, tests first, small commits" } });
+    fireEvent.change(within(form).getByLabelText("Instructions"), { target: { value: "Write the failing test first." } });
+    const rules = within(form).getByRole("group", { name: "Rules" });
     fireEvent.click(within(rules.querySelector<HTMLElement>('[data-rule="tests-first"]')!).getByRole("checkbox"));
     fireEvent.click(within(rules).getByRole("button", { name: "See all rules" }));
     expect(onNavigate).toHaveBeenLastCalledWith("knowledge");
-    // 4. Use it for: one choice, the row it came from first.
-    const use = within(b).getByRole("group", { name: "Use it for" });
-    expect(within(use).getByRole("button", { name: "Medium" }).getAttribute("aria-pressed")).toBe("true");
-    // 5. Checked, summed up, created.
+    expect(within(form).getByTestId("defaults").dataset).toMatchObject({ worksLike: "developer", modelMode: "follows" });
     noPopups();
     fireEvent.click(create);
 
-    await waitFor(() => expect(runsOn("medium").dataset.choice).toBe("careful-dev"));
+    await waitFor(() => expect(agent("careful-dev").dataset.modelMode).toBe("follows"));
     expect(daemon.requests.find((r) => r.method === "POST" && r.path === "/profiles")?.body).toEqual({
       repo: REPO,
       name: "careful-dev",
       description: "Feature work, tests first, small commits",
-      provider: "claude",
-      model: "sonnet-5.5",
-      effort: "high",
+      works_like: "developer",
       instructions: "Write the failing test first.",
       rules: ["tests-first"],
     });
-    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { medium: { model: "careful-dev", fallbacks: ["developer", "developer-codex", "developer-heavy"] } } });
-    expect(chain("medium")).toBe("Sonnet 5.5, then GPT-5.5, then Opus 5.5");
-    // The builder closed; the row's list is open with the new agent in it, marked new.
-    expect(within(row("medium")).queryByRole("region", { name: "New custom agent" })).toBeNull();
-    const list = within(row("medium")).getByRole("group", { name: "Choices for Medium" });
-    expect(option(list, "careful-dev")).toBeTruthy();
-    // Every other row's list offers it too.
-    fireEvent.click(runsOn("reviewer"));
-    expect(option(within(row("reviewer")).getByRole("group", { name: "Choices for Reviewer" }), "careful-dev")).toBeTruthy();
-    expect(screen.getByTestId("custom-agents").textContent).toContain("careful-dev");
+    // It follows the shared table: no per-size order written, and it's never offered as a size's model.
+    expect(puts(daemon)).toEqual([]);
+    expect(agent("careful-dev").dataset.custom).toBe("true");
+    expect(screen.queryByRole("region", { name: "New agent" })).toBeNull();
+    fireEvent.click(runsOn("medium"));
+    expect(option(within(row("medium")).getByRole("group", { name: "Choices for Medium" }), "careful-dev")).toBeNull();
   });
 
-  it("agents: clearing More's instructions sends null, the daemon refuses blank text, and a reload shows them empty", async () => {
+  it("agents: a new agent's own model leaves out refused fallbacks, and when that write fails the agent stays made and Save retries only the models", async () => {
+    // The org refuses Codex's small model (quick-fix, in the shared Light order); the first models write fails anyway.
+    let failures = 1;
+    const flaky = (d: FakeDaemon): typeof globalThis.fetch => (input, init) =>
+      init?.method === "PUT" && String(input).includes("/routing") && failures-- > 0
+        ? Promise.resolve(new Response(JSON.stringify({ error: { code: "unavailable", message: "the daemon is busy" } }), { status: 503, headers: { "content-type": "application/json" } }))
+        : d.fetch(input, init);
+    const { daemon } = setup({ routingPolicy: { org_id: "acme", allowed_models: ["haiku-5.5", "sonnet-5.5", "opus-5.5", "fable-5.1", "gpt-5.5"] } }, flaky);
+    await screen.findByTestId("kind-medium");
+    fireEvent.click(screen.getByRole("button", { name: "New agent" }));
+    const form = screen.getByRole("region", { name: "New agent" });
+    fireEvent.change(within(form).getByLabelText("Name"), { target: { value: "careful-dev" } });
+    fireEvent.change(within(form).getByLabelText("What it's for"), { target: { value: "Careful features" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Change" }));
+    fireEvent.click(within(within(form).getByRole("group", { name: "Model" })).getByRole("button", { name: "Its own for a size…" }));
+    fireEvent.click(within(form).getByRole("button", { name: "careful-dev Light model" }));
+    fireEvent.click(option(within(form).getByRole("group", { name: "Choices for careful-dev Light" }), "developer-heavy")!);
+    fireEvent.click(within(form).getByRole("button", { name: "Create agent" }));
+
+    // Made, but its models weren't saved: it's listed, and the form stays to save only those again.
+    await waitFor(() => expect(agent("careful-dev").dataset.modelMode).toBe("follows"));
+    expect(within(form).getByTestId("form-error")).toBeTruthy();
+    fireEvent.click(within(form).getByRole("button", { name: "Save its models" }));
+    await waitFor(() => expect(agent("careful-dev").dataset.modelMode).toBe("except"));
+    expect(daemon.requests.filter((r) => r.method === "POST" && r.path === "/profiles")).toHaveLength(1);
+    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", agents: { "careful-dev": { models: { light: { model: "developer-heavy", fallbacks: ["developer-light", "developer"] } } } } });
+    expect(screen.queryByRole("region", { name: "New agent" })).toBeNull();
+  });
+
+  it("agents: editing one of your agents shows its saved instructions and role, clears them on purpose, and a new role re-checks its own models", async () => {
+    const tidy = rp("tidy-dev", "claude", null, "medium", { kind: "agent", builtin: false, description: "Tidies code" });
+    const { daemon } = setup({
+      routingProfiles: [...profiles, tidy],
+      profiles: [...described, { name: "tidy-dev", provider: "claude", model: null, description: "Tidies code" }],
+      // GET /profiles/{name}: the resolved prompt carries what it extends; `instructions` is its own text.
+      profileDetails: { "tidy-dev": { extends: ["qa", "developer"], prompt: "Implement the task you are given.\n\nKeep diffs small.", instructions: "Keep diffs small." } },
+    });
+    await screen.findByTestId("agent-tidy-dev");
+    fireEvent.click(within(agent("tidy-dev")).getByRole("button", { name: "Edit tidy-dev" }));
+    const form = within(agent("tidy-dev")).getByRole("region", { name: "Edit tidy-dev" });
+    const box = within(form).getByLabelText("Instructions") as HTMLTextAreaElement;
+    await waitFor(() => expect(box.value).toBe("Keep diffs small."));
+    expect(within(form).getByTestId("defaults").dataset.worksLike).toBe("qa");
+
+    // Its own Light model, as a developer would run…
+    fireEvent.click(within(form).getByRole("button", { name: "Change" }));
+    fireEvent.click(within(within(form).getByRole("group", { name: "Model" })).getByRole("button", { name: "Its own for a size…" }));
+    fireEvent.click(within(form).getByRole("button", { name: "tidy-dev Light model" }));
+    fireEvent.click(option(within(form).getByRole("group", { name: "Choices for tidy-dev Light" }), "developer-heavy")!);
+    expect(within(form).getByTestId("defaults").dataset.modelMode).toBe("except");
+    // …goes when it works like a Reviewer, whose models are the reviewers'.
+    fireEvent.click(within(within(form).getByRole("group", { name: "Works like" })).getByRole("button", { name: "Reviewer" }));
+    expect(within(form).getByTestId("defaults").dataset.modelMode).toBe("follows");
+    fireEvent.click(within(form).getByRole("button", { name: "tidy-dev Light model" }));
+    const light = within(form).getByRole("group", { name: "Choices for tidy-dev Light" });
+    expect(option(light, "reviewer-codex")).toBeTruthy();
+    expect(option(light, "developer-heavy")).toBeNull();
+
+    // Emptied on purpose: sent as "", so the saved instructions are cleared.
+    fireEvent.change(box, { target: { value: "" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(agent("tidy-dev")).queryByRole("region", { name: "Edit tidy-dev" })).toBeNull());
+    expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/profiles/tidy-dev")?.body).toEqual({
+      repo: REPO, description: "Tidies code", rules: [], instructions: "", works_like: "reviewer",
+    });
+    expect(puts(daemon)).toEqual([]);
+  });
+
+  it("agents: a create answered after its form was closed leaves the next new agent's form alone", async () => {
+    // The first create's POST is held; once it lands, its models write fails.
+    const held: Array<() => void> = [];
+    let failures = 1;
+    const slow = (d: FakeDaemon): typeof globalThis.fetch => (input, init) => {
+      const url = String(input);
+      if (init?.method === "POST" && url.endsWith("/profiles") && held.length === 0) return new Promise((resolve) => held.push(() => resolve(d.fetch(input, init))));
+      if (init?.method === "PUT" && url.includes("/routing") && failures-- > 0) {
+        return Promise.resolve(new Response(JSON.stringify({ error: { code: "unavailable", message: "the daemon is busy" } }), { status: 503, headers: { "content-type": "application/json" } }));
+      }
+      return d.fetch(input, init);
+    };
+    const { daemon } = setup({}, slow);
+    await screen.findByTestId("kind-medium");
+    const fill = (name: string) => {
+      fireEvent.click(screen.getByRole("button", { name: "New agent" }));
+      const form = screen.getByRole("region", { name: "New agent" });
+      fireEvent.change(within(form).getByLabelText("Name"), { target: { value: name } });
+      fireEvent.change(within(form).getByLabelText("What it's for"), { target: { value: `${name} work` } });
+      return form;
+    };
+    const first = fill("alpha");
+    fireEvent.click(within(first).getByRole("button", { name: "Change" }));
+    fireEvent.click(within(within(first).getByRole("group", { name: "Model" })).getByRole("button", { name: "Its own for a size…" }));
+    fireEvent.click(within(first).getByRole("button", { name: "alpha Light model" }));
+    fireEvent.click(option(within(first).getByRole("group", { name: "Choices for alpha Light" }), "developer-heavy")!);
+    fireEvent.click(within(first).getByRole("button", { name: "Create agent" }));
+    await waitFor(() => expect(held.length).toBe(1));
+    fireEvent.click(within(first).getByRole("button", { name: "Cancel" }));
+    const second = fill("beta");
+
+    held[0]();
+    await waitFor(() => expect(agent("alpha")).toBeTruthy());
+    // The second form is still a new agent of its own: nothing of the first one's answer reached it.
+    expect(within(second).queryByTestId("form-error")).toBeNull();
+    const create = within(second).getByRole("button", { name: "Create agent" }) as HTMLButtonElement;
+    await waitFor(() => expect(create.disabled).toBe(false));
+    fireEvent.click(create);
+    await waitFor(() => expect(agent("beta")).toBeTruthy());
+    expect(daemon.requests.filter((r) => r.method === "POST" && r.path === "/profiles").map((r) => (r.body as { name: string }).name)).toEqual(["alpha", "beta"]);
+  });
+
+  it("agents: an edit's saved role and instructions come from that opening's own read, and its models wait for it", async () => {
+    const tidy = rp("tidy-dev", "claude", null, "medium", { kind: "agent", builtin: false, description: "Tidies code" });
+    // Every read of the agent is answered as the daemon had it then, but held until released.
+    const held: Array<() => void> = [];
+    let broken = false;
+    const hold = (d: FakeDaemon): typeof globalThis.fetch => (input, init) => {
+      if (init?.method || !String(input).includes("/profiles/tidy-dev")) return d.fetch(input, init);
+      const answer = broken
+        ? Promise.resolve(new Response(JSON.stringify({ error: { code: "unavailable", message: "the daemon is busy" } }), { status: 503, headers: { "content-type": "application/json" } }))
+        : d.fetch(input, init);
+      return new Promise((resolve) => held.push(() => resolve(answer)));
+    };
+    const { daemon } = setup(
+      {
+        routingProfiles: [...profiles, tidy],
+        profiles: [...described, { name: "tidy-dev", provider: "claude", model: null, description: "Tidies code" }],
+        profileDetails: { "tidy-dev": { extends: ["developer"], instructions: "Old words." } },
+      },
+      hold,
+    );
+    await screen.findByTestId("agent-tidy-dev");
+    const edit = () => fireEvent.click(within(agent("tidy-dev")).getByRole("button", { name: "Edit tidy-dev" }));
+    edit();
+    await waitFor(() => expect(held.length).toBe(1));
+    // Closed and opened again after the agent changed: a second read, answered with what's saved now.
+    edit();
+    daemon.data.profileDetails["tidy-dev"] = { extends: ["reviewer"], instructions: "Newer words." };
+    edit();
+    await waitFor(() => expect(held.length).toBe(2));
+    const form = within(agent("tidy-dev")).getByRole("region", { name: "Edit tidy-dev" });
+    // Until its read is in, nothing about its models can be changed.
+    expect((within(form).getByRole("button", { name: "Change" }) as HTMLButtonElement).disabled).toBe(true);
+
+    // The first opening's late answer is dropped; this opening's own fills the form.
+    held[0]();
+    await flush();
+    expect((within(form).getByLabelText("Instructions") as HTMLTextAreaElement).value).toBe("");
+    held[1]();
+    await waitFor(() => expect((within(form).getByLabelText("Instructions") as HTMLTextAreaElement).value).toBe("Newer words."));
+    expect(within(form).getByTestId("defaults").dataset.worksLike).toBe("reviewer");
+    expect((within(form).getByRole("button", { name: "Change" }) as HTMLButtonElement).disabled).toBe(false);
+
+    // A read that fails leaves its role unknown: its role and models stay closed, and saving sends neither.
+    edit();
+    broken = true;
+    edit();
+    await waitFor(() => expect(held.length).toBe(3));
+    held[2]();
+    const again = within(agent("tidy-dev")).getByRole("region", { name: "Edit tidy-dev" });
+    await waitFor(() => expect(within(again).queryByTestId("role-unknown")).toBeTruthy());
+    expect(within(again).queryByRole("button", { name: "Change" })).toBeNull();
+    // Meanwhile it gets its own Light model elsewhere, and the list reads it again (a size's lock saved here).
+    daemon.data.routingConfig.user.agent_models = { "tidy-dev": { light: ["developer-heavy"] } };
+    fireEvent.click(lock("medium"));
+    await waitFor(() => expect(agent("tidy-dev").dataset.modelMode).toBe("except"));
+    fireEvent.click(within(again).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(agent("tidy-dev")).queryByRole("region", { name: "Edit tidy-dev" })).toBeNull());
+    expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/profiles/tidy-dev")?.body).toEqual({ repo: REPO, description: "Tidies code", rules: [] });
+    // Its role and models were never offered: no models write, and the newer override stands.
+    expect(puts(daemon).filter((b) => (b as { agents?: unknown }).agents)).toEqual([]);
+    expect(agent("tidy-dev").dataset.modelMode).toBe("except");
+  });
+
+  it("agents: clearing a size's Edit instructions sends null, the daemon refuses blank text, and a reload shows them empty", async () => {
     const { daemon, client, stop } = setup();
-    const more = () => within(row("medium")).getByRole("button", { name: /^More/ });
+    const more = () => within(row("medium")).getByRole("button", { name: "Edit Medium" });
     await waitFor(() => expect(more()).toBeTruthy());
     fireEvent.click(more());
     const box = within(row("medium")).getByLabelText("Instructions");
@@ -314,8 +503,8 @@ describe("agents tab", () => {
     cleanup();
 
     const again = mount(daemon);
-    await waitFor(() => expect(within(row("medium")).getByRole("button", { name: /^More/ })).toBeTruthy());
-    fireEvent.click(within(row("medium")).getByRole("button", { name: /^More/ }));
+    await waitFor(() => expect(within(row("medium")).getByRole("button", { name: "Edit Medium" })).toBeTruthy());
+    fireEvent.click(within(row("medium")).getByRole("button", { name: "Edit Medium" }));
     expect((within(row("medium")).getByLabelText("Instructions") as HTMLTextAreaElement).value).toBe("");
     again.stop();
   });
@@ -341,8 +530,9 @@ describe("agents tab", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Agents" }));
     await screen.findByTestId("kind-medium");
 
-    // Medium's GPT-5.5 can't run: Sonnet 5.5 runs it for now; Light's quick-fix fallback is skipped.
-    expect(within(row("medium")).getByTestId("cant-run").querySelector("b")?.textContent).toBe("Sonnet 5.5");
+    // Medium's GPT-5.5 can't run: Sonnet 5.5 stands in for it; Light's quick-fix fallback is skipped.
+    expect(runsOn("medium").dataset).toMatchObject({ choice: "developer", standingIn: "true" });
+    expect(skipped("light", "quick-fix")).toBe("signed_out");
     openFallbacks("light");
     // Its models aren't offered.
     fireEvent.click(runsOn("advanced"));
@@ -351,7 +541,8 @@ describe("agents tab", () => {
     expect(option(list, "quick-fix")).toBeNull();
     expect(list.querySelector('[data-missing="codex"]')).toBeTruthy();
 
-    fireEvent.click(within(within(row("medium")).getByTestId("cant-run")).getByRole("button", { name: "Connect Codex" }));
+    // Needs you: Codex is signed out, with the one way to fix it.
+    fireEvent.click(within(need("provider-codex")!).getByRole("button", { name: "Sign in" }));
     expect(await screen.findByRole("region", { name: "Settings" })).toBeTruthy();
     expect(within(pages).getByRole("button", { name: "Open Account › Usage" }).getAttribute("aria-current")).toBe("page");
   });
@@ -399,31 +590,34 @@ describe("agents tab", () => {
   });
 
   it("agents: whether each agent can run comes from its own sign-in and exclusion, with the reason", async () => {
-    // Codex is signed in for its developer, but the reviewer runs under another Codex identity that's signed out; Antigravity is excluded.
-    const mixed = [...profiles.map((p) => (p.name === "reviewer-codex" ? { ...p, signed_in: false } : p)), rp("developer-gemini", "antigravity", "gemini-3-pro", "high")];
+    // Codex is signed in for its developer, but a second Codex profile runs under another identity that's signed out; Antigravity is excluded.
+    const work = rp("developer-codex-work", "codex", "gpt-5.5", "medium", { display: "GPT-5.5 (work)", signed_in: false });
+    const mixed = [...profiles, work, rp("developer-gemini", "antigravity", "gemini-3-pro", "high")];
     const config = data().routingConfig!;
     const { onNavigate } = setup({
       routingProfiles: mixed,
-      routingConfig: { ...config, user: { ...config.user, exclude_providers: ["antigravity"], routing: { ...config.user.routing, heavy: ["developer-heavy", "developer-gemini", "developer-codex"] } } },
+      routingConfig: {
+        ...config,
+        user: { ...config.user, exclude_providers: ["antigravity"], routing: { ...config.user.routing, medium: ["developer-codex-work", "developer"], heavy: ["developer-heavy", "developer-gemini", "developer-codex"] } },
+      },
     });
-    await screen.findByTestId("kind-reviewer");
+    await screen.findByTestId("kind-medium");
 
-    // The reviewer's own Codex sign-in is out: it's skipped, with why, and the next one runs.
-    const note = within(row("reviewer")).getByTestId("cant-run");
-    expect(note.textContent).toContain("GPT-5.5 can't run: Codex is signed out for it. Opus 5.5 runs it until then.");
-    fireEvent.click(within(note).getByRole("button", { name: "Connect Codex" }));
+    // Its own Codex sign-in is out: it's skipped, with why, and the next one stands in.
+    expect(runsOn("medium").dataset).toMatchObject({ choice: "developer", standingIn: "true" });
+    expect(within(row("medium")).getByTestId("first-pick").textContent).toContain("Codex is signed out for it");
+    fireEvent.click(within(need("provider-codex")!).getByRole("button", { name: "Sign in" }));
     expect(onNavigate).toHaveBeenLastCalledWith("providers");
-    // Codex's signed-in developer is still offered; the signed-out reviewer is listed, dimmed, with its reason.
+    // Codex's signed-in developer is still offered; the signed-out one is listed, dimmed, with its reason.
     fireEvent.click(runsOn("medium"));
-    expect(option(within(row("medium")).getByRole("group", { name: "Choices for Medium" }), "developer-codex")).toBeTruthy();
-    fireEvent.click(runsOn("reviewer"));
-    const reviewers = within(row("reviewer")).getByRole("group", { name: "Choices for Reviewer" });
-    expect(option(reviewers, "reviewer-codex")).toBeNull();
-    expect(reviewers.querySelector('[data-choice-off="reviewer-codex"]')!.textContent).toContain("Codex is signed out for it");
-    expect(reviewers.querySelector('[data-missing="codex"]')).toBeNull();
+    const medium = within(row("medium")).getByRole("group", { name: "Choices for Medium" });
+    expect(option(medium, "developer-codex")).toBeTruthy();
+    expect(option(medium, "developer-codex-work")).toBeNull();
+    expect(medium.querySelector('[data-choice-off="developer-codex-work"]')!.textContent).toContain("Codex is signed out for it");
+    expect(medium.querySelector('[data-missing="codex"]')).toBeNull();
 
     // An excluded provider's agent is skipped where it's a fallback and can't be picked, with why; there's nothing to connect.
-    expect(within(row("heavy")).getByTestId("chain").querySelector(".line-through")!.textContent).toBe("Gemini 3 Pro");
+    expect(skipped("heavy", "developer-gemini")).toBe("excluded");
     const heavy = openFallbacks("heavy");
     expect(heavy.querySelector('li[data-choice="developer-gemini"]')).toBeTruthy();
     fireEvent.click(runsOn("advanced"));
@@ -435,14 +629,15 @@ describe("agents tab", () => {
   it("agents: a broken custom agent shows its automatic check's problems where it's used, with no lint button", async () => {
     const broken = profiles.map((p) => (p.name === "quick-fix" ? { ...p, model: "gpt-4.1", lint_errors: ["gpt-4.1 isn't one of Codex's models any more.", "Rule pack python-styl isn't installed."] } : p));
     const config = data().routingConfig!;
-    setup({ routingProfiles: broken, routingConfig: { ...config, user: { ...config.user, routing: { ...config.user.routing, advanced: ["quick-fix", "developer-fable"] } } } });
+    const { daemon } = setup({ routingProfiles: broken, routingConfig: { ...config, user: { ...config.user, routing: { ...config.user.routing, advanced: ["quick-fix", "developer-fable"] } } } });
     await screen.findByTestId("kind-light");
 
-    // Where it runs first: "2 problems", and the next one runs instead.
-    expect(within(row("advanced")).getByTestId("cant-run").querySelector("b")?.textContent).toBe("Fable 5.1");
-    expect(within(within(row("advanced")).getByTestId("cant-run")).queryByRole("button", { name: /Connect/ })).toBeNull();
-    // Where it's a fallback: skipped, struck, with the problems behind its count.
-    expect(within(row("light")).getByTestId("chain").querySelector(".line-through")!.textContent).toBe("quick-fix");
+    // Where it runs first: the next one stands in, and Needs you offers to put that one first, with nothing to connect.
+    expect(runsOn("advanced").dataset).toMatchObject({ choice: "developer-fable", standingIn: "true" });
+    const fix = need("size-advanced")!;
+    expect(within(fix).queryByRole("button", { name: /Connect|Sign in/ })).toBeNull();
+    // Where it's a fallback: skipped, with the problems behind its count.
+    expect(skipped("light", "quick-fix")).toBe("problems");
     const list = openFallbacks("light");
     const entry = list.querySelector<HTMLElement>('li[data-choice="quick-fix"]')!;
     fireEvent.click(within(entry).getByTestId("problems"));
@@ -454,6 +649,12 @@ describe("agents tab", () => {
     expect(option(within(row("medium")).getByRole("group", { name: "Choices for Medium" }), "quick-fix")).toBeNull();
     // Checks are automatic: there's no lint or check button anywhere.
     expect(screen.queryByRole("button", { name: /lint|check every|check agents/i })).toBeNull();
+
+    // Putting the stand-in first moves the broken one behind it, and the need goes.
+    fireEvent.click(within(need("size-advanced")!).getByRole("button", { name: "Put Fable 5.1 first" }));
+    await waitFor(() => expect(runsOn("advanced").dataset.standingIn).toBeUndefined());
+    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { advanced: { model: "developer-fable", fallbacks: ["quick-fix"] } } });
+    expect(document.querySelector('[data-need="size-advanced"]')).toBeNull();
   });
 
   it("org refusal link", async () => {

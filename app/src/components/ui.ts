@@ -20,6 +20,16 @@ export const quiet = "btn btn-quiet";
 /* A field is an underline, not a box; focus turns the line branch. */
 export const field =
   "rounded-none border-0 border-b border-line-strong bg-transparent px-s1 py-1 text-sm text-ink placeholder:text-ink-3 focus:border-branch focus:outline-none";
+/* A boxed field, "soft filled" (the Agents page's form): no line at rest, a
+   fill a step off the page that darkens a touch on hover; while typing, a
+   hairline in branch and its soft ring. Only on the plain page ground. */
+export const softField =
+  "min-h-[38px] w-full rounded-[8px] border border-transparent bg-surface-2 px-3 py-2 text-sm leading-5 text-ink placeholder:text-ink-3 hover:bg-[color-mix(in_srgb,var(--surface-2)_95%,var(--ink))] focus:border-[color-mix(in_srgb,var(--branch)_55%,transparent)] focus:bg-surface-2 focus:shadow-[0_0_0_3px_var(--branch-soft)] focus:outline-none";
+/* Its checkbox: the box drawn beside a visually hidden `peer` checkbox
+   (`<input type="checkbox" className="peer sr-only" /><span className={softCheck}>✓</span>`):
+   a soft square, branch with an on-branch tick when ticked. */
+export const softCheck =
+  "inline-flex size-3.5 shrink-0 items-center justify-center rounded-[3px] bg-[color-mix(in_srgb,var(--surface-2)_86%,var(--ink))] text-[10px] leading-none text-transparent peer-checked:bg-branch peer-checked:text-on-branch peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-branch";
 /* A section is a divider above and whitespace, never an outlined box; a
    tone class beside it (border-pass, border-branch) colours the divider. */
 export const card = "border-t border-line";
