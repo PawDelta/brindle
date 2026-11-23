@@ -635,6 +635,7 @@ function AgentForm({ editing, created, loading, roleUnknown, draft, setDraft, ru
     set({ worksLike, own });
   };
   const mode = ownSizes.length === 0 ? "follows" : ownSizes.length === SIZES.length ? "own" : "except";
+  const modelSummary = mode === "follows" ? "follows the job size" : mode === "own" ? "is its own for every size" : `follows the job size, except ${ownSizes.map((s) => KIND_INFO[s].name).join(", ")}`;
   const first = useRef<HTMLInputElement>(null);
   useEffect(() => first.current?.focus(), []);
   const hint = "text-xs text-ink-3";
@@ -711,12 +712,11 @@ function AgentForm({ editing, created, loading, roleUnknown, draft, setDraft, ru
               <>Runs its own model, {pinned.display}, whatever the job size.</>
             ) : roleUnknown ? (
               <span data-testid="role-unknown">
-                Its model {mode === "follows" ? "follows the job size" : `follows the job size, except ${ownSizes.map((s) => KIND_INFO[s].name).join(", ")}`}. What it works like couldn't be read, so its role and models can't be changed here now.
+                Its model {modelSummary}. What it works like couldn't be read, so its role and models can't be changed here now.
               </span>
             ) : (
               <>
-                Works like a {worksLikeLabel(draft.worksLike)}, and its model{" "}
-                {mode === "follows" ? "follows the job size" : mode === "own" ? "is its own for every size" : `follows the job size, except ${ownSizes.map((s) => KIND_INFO[s].name).join(", ")}`}.{" "}
+                Works like a {worksLikeLabel(draft.worksLike)}, and its model {modelSummary}.{" "}
                 {/* Its saved role decides which models it may keep: nothing to change until that's read. */}
                 <button type="button" className={`${link} disabled:opacity-[var(--dim)]`} aria-expanded={change && !loading} disabled={loading} onClick={() => setChange(!change)}>
                   Change
@@ -866,8 +866,10 @@ interface FormState {
   loading?: boolean;
   /* That read failed: its role and models stay as saved. */
   roleUnknown?: boolean;
-  /* What was saved, to send only what changed: instructions null when they couldn't be read. */
-  base?: { instructions: string | null; worksLike: WorksLike };
+  /* What was saved when it opened, to send only what this form changed:
+     instructions null when they couldn't be read. A later reload of the
+     list never counts as a change made here. */
+  base?: { instructions: string | null; worksLike: WorksLike; own: Partial<Record<Size, string>> };
 }
 
 const roleOf = (role: string | null): WorksLike => (role === "reviewer" ? "reviewer" : "developer");
@@ -1006,14 +1008,14 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
       editing: a.name,
       loading: true,
       draft: { name: a.name, purpose: a.description, instructions: "", rules: a.rules, worksLike: fallback, own: ownOf(a) },
-      base: { instructions: null, worksLike: fallback },
+      base: { instructions: null, worksLike: fallback, own: ownOf(a) },
     });
     // Its own instructions and what it works like, as saved; only this opening's answer is used.
     client.profile(a.name).then(
       (d) => {
         const like = (WORKS_LIKE as string[]).includes(d.extends?.[0] ?? "") ? (d.extends[0] as WorksLike) : fallback;
         const saved = typeof d.instructions === "string" ? d.instructions : null;
-        updateForm(id, (f) => ({ ...f, loading: false, draft: { ...f.draft, instructions: saved ?? "", worksLike: like }, base: { instructions: saved, worksLike: like } }));
+        updateForm(id, (f) => ({ ...f, loading: false, draft: { ...f.draft, instructions: saved ?? "", worksLike: like }, base: { ...f.base!, instructions: saved, worksLike: like } }));
       },
       // Not read: what it works like stays unknown, so its role and models aren't offered (only new instructions go).
       () => updateForm(id, (f) => ({ ...f, loading: false, roleUnknown: true })),
@@ -1023,6 +1025,8 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   const submit = async () => {
     if (!repo || !form) return;
     const { id, draft, editing, base } = form;
+    // Its role wasn't read: its role and models were never offered, so neither is written.
+    const roleAndModels = !form.roleUnknown;
     let created = !!form.created;
     const name = editing ?? cleanName(draft.name);
     const before = editing ? agents.find((a) => a.name === editing) : undefined;
@@ -1043,10 +1047,11 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
           description: draft.purpose.trim(),
           rules: draft.rules,
           ...(instructions !== undefined ? { instructions } : {}),
-          ...(!before?.pinned && draft.worksLike !== (base?.worksLike ?? roleOf(before?.role ?? null)) ? { works_like: draft.worksLike } : {}),
+          ...(roleAndModels && !before?.pinned && base && draft.worksLike !== base.worksLike ? { works_like: draft.worksLike } : {}),
         });
       }
-      const changes = before?.pinned ? {} : ownChanges(before ? ownOf(before) : {}, draft.own);
+      // Only the sizes this form changed, against what it opened with: a newer override read since stays.
+      const changes = !roleAndModels || before?.pinned ? {} : ownChanges(base?.own ?? {}, draft.own);
       if (Object.keys(changes).length > 0) await client.putRouting({ repo, scope: "user", agents: { [name]: { models: changes } } });
       setFresh(name);
       updateForm(id, () => null);

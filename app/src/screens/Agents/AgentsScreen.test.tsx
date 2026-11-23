@@ -464,10 +464,16 @@ describe("agents tab", () => {
     const again = within(agent("tidy-dev")).getByRole("region", { name: "Edit tidy-dev" });
     await waitFor(() => expect(within(again).queryByTestId("role-unknown")).toBeTruthy());
     expect(within(again).queryByRole("button", { name: "Change" })).toBeNull();
+    // Meanwhile it gets its own Light model elsewhere, and the list reads it again (a size's lock saved here).
+    daemon.data.routingConfig.user.agent_models = { "tidy-dev": { light: ["developer-heavy"] } };
+    fireEvent.click(lock("medium"));
+    await waitFor(() => expect(agent("tidy-dev").dataset.modelMode).toBe("except"));
     fireEvent.click(within(again).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(daemon.requests.some((r) => r.method === "PUT" && r.path === "/profiles/tidy-dev")).toBe(true));
+    await waitFor(() => expect(within(agent("tidy-dev")).queryByRole("region", { name: "Edit tidy-dev" })).toBeNull());
     expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/profiles/tidy-dev")?.body).toEqual({ repo: REPO, description: "Tidies code", rules: [] });
-    expect(puts(daemon)).toEqual([]);
+    // Its role and models were never offered: no models write, and the newer override stands.
+    expect(puts(daemon).filter((b) => (b as { agents?: unknown }).agents)).toEqual([]);
+    expect(agent("tidy-dev").dataset.modelMode).toBe("except");
   });
 
   it("agents: clearing a size's Edit instructions sends null, the daemon refuses blank text, and a reload shows them empty", async () => {
