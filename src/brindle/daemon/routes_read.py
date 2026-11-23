@@ -729,6 +729,7 @@ def get_routing(db: DB, request: Request) -> Any:
     """Each tier's profiles (and the model and agent each runs), the reviewer
     and the excluded providers, with the scope each comes from, every profile
     with what routing knows of it, and the org policy all of it answers to.
+    A registered worktree path in ``repo`` previews its launch defaults.
     ``scope=user``: the person's own view, as every repo starts from it (their
     ~/.brindle/config.json and their library, never this repo's files); the
     repo still gives the org policy and what learning knows. ``learned=0``
@@ -748,14 +749,17 @@ def get_routing(db: DB, request: Request) -> Any:
 def _routing(db: DB, request: Request, learn: bool) -> Any:
     from concurrent.futures import ThreadPoolExecutor
 
-    from brindle import autopilot, providers
+    from brindle import autopilot, model_catalog, providers
     from brindle.service.routing import RoutingPolicy, agent_model_orders, legacy_medium_override, provider_name
 
     repo = _need_repo(request)
+    workspace = db.workspace_by_path(repo)
+    if workspace:
+        repo = workspace.repo_root
     user = request.query_params.get("scope") == "user"
     lib = None if user else repo        # where profiles are looked up: the repo's own first, or only the person's
     cfg = config.load_repo_config(repo, user_only=user)
-    policy = RoutingPolicy.load(repo, user_library=user)
+    policy = RoutingPolicy.load(repo, user_library=user, **({"workspace": workspace} if workspace else {}))
     every = profiles.list_profiles(lib)
     refusals = {p.name: policy.refusal(p) for p in every}
     scope_of = {str(path): scope for scope, path in config.scope_paths(repo).items()}
@@ -793,7 +797,10 @@ def _routing(db: DB, request: Request, learn: bool) -> Any:
         except (KeyError, profiles.ProfileError):
             kind = "pinned"  # Unresolved inheritance still has a row for its lint errors.
         role = profiles.base_role(p.name, lib)
-        model = autopilot.effective_profile_model(p, lib) or None
+        if not p.model and model_catalog.default_model(p.provider):
+            _, model = policy.runs(p.name)
+        else:
+            model = autopilot.effective_profile_model(p, lib) or None
         rows.append(RoutingProfileDTO(
             lint_errors=errors, lint_warnings=warnings,
             kind=kind, description=p.description, rules=p.rules,
@@ -811,7 +818,8 @@ def _routing(db: DB, request: Request, learn: bool) -> Any:
 
     # Every candidate's check reads the same stored keys: each from the store once.
     with keystore.reading():
-        kinds = _routing_kinds(db, cfg, repo, learn=learn)
+        context = {"workspace": workspace, "model_fields": policy._model_fields} if workspace else None
+        kinds = _routing_kinds(db, cfg, repo, learn=learn, **({"routing_context": context} if context else {}))
     for row in rows:
         if row.kind == "agent":
             agent_rows[row.name] = RoutingAgentDTO(description=row.description, rules=row.rules, role=row.role,
@@ -828,7 +836,8 @@ def _routing(db: DB, request: Request, learn: bool) -> Any:
         profiles=rows, policy=policy.to_dto(every), kinds=kinds, agents=agent_rows).to_json()
 
 
-def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str, learn: bool = True) -> dict[str, RoutingKindDTO]:
+def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str, learn: bool = True, *,
+                   routing_context: dict | None = None) -> dict[str, RoutingKindDTO]:
     """Per kind of work: the owner's pick, its ordered fallbacks, whether it
     is locked, and the different profile hosted learning runs for it now
     (``learn=False``: none asked for, each null). A locked kind is never
@@ -850,7 +859,8 @@ def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str, learn: bool = True
     kinds = {}
     def weight_pick(t: str) -> str | None:
         # The dispatch's own resolution, so an excluded or unavailable candidate is never reported.
-        name, learned_pick, _ = autopilot._route_by_weight(db, cfg, repo, t, None, None)
+        name, learned_pick, _ = autopilot._route_by_weight(
+            db, cfg, repo, t, None, None, **({"policy": routing_context} if routing_context else {}))
         return name if learned_pick else None
 
     for t in config.WEIGHTS:

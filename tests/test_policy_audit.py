@@ -65,14 +65,21 @@ def test_audit_respects_policy_and_reviewer_fallbacks(db, repo, monkeypatch, org
     assert all(policy.assign_decision(cfg, str(repo), name, "audit", "review").allowed for name in spawned)
 
 
-@pytest.mark.parametrize("configured,cli_default", [
-    (None, "gpt-6.1-terra"),
-    pytest.param("gpt-configured", "gpt-6.1-terra", marks=pytest.mark.variant(
+@pytest.mark.parametrize("configured,cli_default,prefer_cli,expected", [
+    (None, "gpt-6.1-terra", True, "gpt-6.1-terra"),
+    pytest.param("gpt-configured", "gpt-6.1-terra", True, "gpt-configured", marks=pytest.mark.variant(
         "An explicit CLI config model must take precedence over the catalog default")),
-    (None, None),
+    pytest.param(None, None, True, "gpt-6.2-sol", marks=pytest.mark.variant(
+        "An empty CLI catalog must use the built-in fallback without bypassing the allowlist")),
+    pytest.param(None, "gpt-6.1-terra", False, "gpt-6.2-sol", marks=pytest.mark.variant(
+        "Catalog precedence can select the research model over the CLI's marked default")),
+    pytest.param("gpt-configured", "gpt-6.1-terra", False, "gpt-configured", marks=pytest.mark.variant(
+        "An explicit Codex model still wins under catalog precedence")),
 ])
-def test_unpinned_codex_uses_installed_default_and_fails_closed(repo, monkeypatch, org_policy, real_codex_default_model,
-                                                              configured, cli_default):
+def test_unpinned_codex_uses_the_configured_or_catalog_model(repo, monkeypatch, org_policy, real_codex_default_model,
+                                                            configured, cli_default, prefer_cli, expected):
+    from brindle import model_catalog
+
     class AppServer:
         def __init__(self, *a, **kw):
             pass
@@ -89,6 +96,7 @@ def test_unpinned_codex_uses_installed_default_and_fails_closed(repo, monkeypatc
             pass
 
     monkeypatch.setattr(codex_hook, "_AppServer", AppServer)
+    monkeypatch.setattr(model_catalog, "PREFER_CLI_DEFAULTS", prefer_cli)
     profile = replace(profiles.load_profile("reviewer-codex", str(repo)), model=None, env={})
     monkeypatch.setattr(profiles, "load_profile", lambda *a: profile)
     monkeypatch.setattr(autopilot, "effective_profile_model", lambda *a: "")
@@ -96,11 +104,9 @@ def test_unpinned_codex_uses_installed_default_and_fails_closed(repo, monkeypatc
     cfg = RepoConfig()
     assert not policy.assign_decision(cfg, str(repo), profile.name, "audit", "review").allowed
     assert not policy.assign_decision(cfg, str(repo), profile.name, "audit", "review", cwd=str(repo), env={}).allowed
-    expected = configured or cli_default
     assert policy._profile_fields(profile.name, str(repo)) == ("codex", expected)
-    if expected:
-        org_policy[0] = replace(org_policy[0], allowed_models=(expected,))
-        assert policy.assign_decision(cfg, str(repo), profile.name, "audit", "review").allowed
+    org_policy[0] = replace(org_policy[0], allowed_models=(expected,))
+    assert policy.assign_decision(cfg, str(repo), profile.name, "audit", "review").allowed
 
 
 @pytest.mark.parametrize("context", ["worktree", "profile_home"])
@@ -144,3 +150,23 @@ def test_unpinned_codex_policy_checks_the_launch_context(db, repo, tmp_path, mon
     org_policy[0] = replace(org_policy[0], allowed_models=("gpt-disallowed",))
     agents._reviewer_can_run(profile.name, ws, RepoConfig())
     assert agents.model_problem(profile.name, ws, agent=worker, profile=profile, m=None) is None
+
+
+def test_resolved_codex_reviewer_can_run_under_the_worker_cap(db, repo, monkeypatch, org_policy):
+    ws = workspaces.adopt_root(db, str(repo))
+    caller = Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "idle", "", None, 1)
+    writer = Agent("writer", ws.id, "dev.gpt", "codex", caller.id, "assign", "done", "", None, 2)
+    db.add_agent(caller)
+    db.add_agent(writer)
+    db.record_agent_launch_model(writer.id, "gpt-writer")
+    cfg = RepoConfig(agent_models={"reviewer": {"medium": ["review.gpt"]}}, review_sizing=False)
+    monkeypatch.setattr(agents, "unusable", lambda *args: None)
+    monkeypatch.setattr(agents, "_effective_window_env", lambda *args: {})
+    org_policy[0] = replace(org_policy[0], allowed_models=("gpt-5.3-codex",), max_parallel_workers=1)
+
+    launches = {}
+    assert agents._review_profile(db, ws, None, cfg, parent_id=caller.id, launches=launches) == "review.gpt"
+    assert launches["review.gpt"].model == "gpt-5.3-codex"
+    db.set_status(writer.id, "processing")
+    with pytest.raises(agents.AgentError):
+        agents._review_profile(db, ws, None, cfg, parent_id=caller.id)

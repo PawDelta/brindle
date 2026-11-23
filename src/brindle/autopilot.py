@@ -927,7 +927,8 @@ CLI_FOR_PROVIDER = {"claude": "claude", "codex": "codex", "antigravity": "agy", 
 
 
 def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
-                 weight: str | None = None) -> str | None:
+                 weight: str | None = None, *, workspace: Workspace | None = None,
+                 resolved: tuple[str, str | None] | None = None) -> str | None:
     """Why routing skips profile ``name`` (its provider is in
     ``exclude_providers``, its CLI isn't installed or
     signed in, its provider is out of headroom, it would break a budget
@@ -945,12 +946,11 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     if over:
         return f"over budget, skipped {name} ({over})"
     from brindle import agents
-    from brindle.db import Workspace
     # Read-only preview: no adopted workspace, branch, setup or model turn.
-    ws = Workspace("preflight", repo_root, "preflight", "root", "", None,
-                   repo_root, None, "", 0.0)
+    ws = workspace or Workspace("preflight", repo_root, "preflight", "root", "", None,
+                                repo_root, None, "", 0.0)
     try:
-        problem = agents.model_problem(name, ws)
+        problem = agents.model_problem(name, ws, **({"resolved": resolved} if resolved else {}))
     except agents.AgentError as e:
         problem = str(e)
     if problem:
@@ -964,7 +964,8 @@ def _unavailable(name: str, cfg: RepoConfig, repo_root: str, gate=None,
     cli = CLI_FOR_PROVIDER.get(p.provider)
     # One definition of "can take work now" (refused, installed, signed in,
     # limited, rate limited, erroring, closing); the headroom margin below is routing's own.
-    health = provider_health.check(p.provider, model=effective_profile_model(p, repo_root) or None,
+    model = resolved[1] if resolved else effective_profile_model(p, repo_root) or None
+    health = provider_health.check(p.provider, model=model,
                                    profile=name, repo_root=repo_root, env=route_env, installed=bool(cli))
     if health.state == provider_health.SIGNED_OUT:
         return f"{cli} isn't signed in, skipped {name}"
@@ -1063,17 +1064,24 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     if goal is None and not locked:
         goal = routing_goal.for_learner(repo_root)
     ctx = dict(policy or {})
+    model_fields = ctx.get("model_fields")
+    workspace = ctx.get("workspace")
     try:
         running = pol.running_workers(db, repo_root)
     except Exception:  # noqa: BLE001 - the policy decides what an unknown count means
         running = None
 
     def refusal(name: str) -> str | None:
+        resolved = model_fields(name) if model_fields else None
         d = pol.assign_decision(cfg, repo_root, name, task or "", ctx.get("mode", "assign"), files=files,
                                 weight=weight, branch=ctx.get("branch"), actor=ctx.get("actor"),
-                                running_workers=running)
+                                running_workers=running, **({"resolved": resolved} if resolved else {}))
         # A denial is a denial whatever its text: an empty reason never reads as allowed.
         return None if d.allowed else (d.reason or "the repo's policy refused it")
+
+    def availability(name: str) -> str | None:
+        return _unavailable(name, cfg, repo_root, gate, weight, workspace=workspace,
+                            resolved=model_fields(name) if model_fields else None)
 
     try:
         # With a learner, every replacement is checked so it can weigh them all.
@@ -1081,7 +1089,8 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     except Exception:  # noqa: BLE001 - no learner: the table's order stands
         learner = False
     found = cascade.workers(cfg, repo_root, weight, gate=gate, ceiling=ceiling, design_heavy=design_heavy,
-                            after=after or (), weights=goal, policy=refusal, full=learner, agent=agent)
+                            after=after or (), weights=goal, policy=refusal, full=learner, agent=agent,
+                            **({"availability": availability} if workspace else {}))
     order, remaining = found.pool, found.order
     own = set(own_order if own_order is not None else tier_order(cfg, weight))
     over = {n: why for n, why in found.skipped if why.startswith("over budget")}
@@ -1099,9 +1108,10 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
         if found.policy_refused and decision is not None:
             # Only policy stood in the way: the delegation is refused (and audited) as policy refuses it.
             name = found.policy_refused[0]
+            resolved = model_fields(name) if model_fields else None
             d = pol.check_assign(cfg, repo_root, name, task or "", ctx.get("mode", "assign"), files=files,
                                  weight=weight, branch=ctx.get("branch"), actor=ctx.get("actor"),
-                                 running_workers=running)
+                                 running_workers=running, **({"resolved": resolved} if resolved else {}))
             decision["policy_refusal"] = (d.reason or "the repo's policy refused it") if not d.allowed \
                 else dict(found.skipped)[name]
         return None, False, f"every {weight} candidate was out ({'; '.join(skipped) or 'none configured'})"
@@ -1124,7 +1134,7 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     if decision is not None:
         decision["baseline"] = remaining[0]
 
-    info_str = model_cost_info(name, cfg, repo_root)
+    info_str = model_cost_info(name, cfg, repo_root, resolved=model_fields(name) if model_fields else None)
 
     why = f"{weight.title()} job → {info_str}"
     picked = f"learning picked it: {reason}" if reason else "learning picked it"
@@ -1136,8 +1146,9 @@ def _route_by_weight(db: DB, cfg: RepoConfig, repo_root: str, weight: str, task:
     return name, bool(pick), why
 
 
-def effective_profile_model(p, repo_root: str | None = None) -> str:
-    """Resolve the effective model for a profile, checking model, provider-specific env variables, and managed overrides."""
+def effective_profile_model(p, repo_root: str | None = None, default: str | None = None) -> str:
+    """Resolve the model from the profile, an explicit launch default, or the
+    environment, with managed route settings taking precedence."""
     from brindle import profiles
 
     prof = p
@@ -1147,7 +1158,7 @@ def effective_profile_model(p, repo_root: str | None = None) -> str:
         except Exception:
             prof = p
 
-    m = getattr(prof, "model", None) or ""
+    m = getattr(prof, "model", None) or default or ""
     provider = getattr(prof, "provider", None) or "claude"
 
     # Provider-specific model environment variables in order of provider precedence
@@ -1188,23 +1199,27 @@ def effective_profile_model(p, repo_root: str | None = None) -> str:
 
 
 
-def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None) -> str:
+def model_cost_info(name: str, cfg: RepoConfig | None = None, repo_root: str | None = None, *,
+                    resolved: tuple[str, str | None] | None = None) -> str:
     """Format the worker's display name, effort, id and cost tier."""
     try:
-        from brindle import agents, model_catalog, pricing
+        from brindle import agents, model_catalog, policy, pricing
         from brindle.model_names import describe
         from brindle.profiles import load_profile
         p = load_profile(name, repo_root)
-        eff = effective_profile_model(p, repo_root)
-        resolved = agents.routing_model(p, repo_root) if repo_root else p.model
-        if resolved != p.model:
-            eff = resolved
+        if resolved:
+            _, model = resolved
+        elif repo_root and not p.model and model_catalog.default_model(p.provider):
+            _, model = policy._profile_fields(name, repo_root)
+        else:
+            model = agents.routing_model(p, repo_root) if repo_root else p.model
+        eff = model if resolved or model != p.model else effective_profile_model(p, repo_root)
         named = describe(p, eff)
         worker = named["display"]
         if named["effort"]:
             worker += f" ({named['effort']})"
-        if resolved != p.model:
-            worker += f" [{resolved}]"
+        if model and model != p.model:
+            worker += f" [{model}]"
         price = (pricing.FREE if pricing.is_local(p.base_url) else
                  pricing.price_for(eff, pricing.repo_overrides(repo_root)))
         tier = model_catalog.cost_tier(price)
@@ -1287,10 +1302,14 @@ def _goal_weights(db: DB, caller_id: str, repo_root: str, goal) -> dict | None:
 
 def _policy_context(db: DB, caller_id: str, given: dict | None) -> dict:
     """What routing tells the repo's policy about the delegation it weighs:
-    ``given`` (``mode``, ``branch``) and the caller as the actor."""
+    its mode, branch, caller, and model resolution in an existing workspace."""
     ctx = dict(given or {})
     if "actor" not in ctx:
         ctx["actor"] = db.get_agent(caller_id) if caller_id else None
+    if ws := ctx.get("workspace"):
+        from brindle.policy import workspace_models
+
+        ctx["model_fields"] = workspace_models(ws, mode=ctx.get("mode", "assign"), parent_id=caller_id or None)
     return ctx
 
 
@@ -1331,6 +1350,12 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     from brindle.profiles import existing_profiles
 
     cfg = load_repo_config(repo_root)
+    ctx = _policy_context(db, caller_id, policy)
+    model_fields = ctx.get("model_fields")
+
+    def info(name: str) -> str:
+        return model_cost_info(name, cfg, repo_root, resolved=model_fields(name) if model_fields else None)
+
     who = routed_agent(agent, repo_root) if agent else None
     if requested and weight and (named := routed_agent(requested.strip(), repo_root)):
         who, requested = named, None
@@ -1349,7 +1374,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             raise AutopilotError(f"profile {req!r} exceeds configured max_weight {ceiling!r}")
         name = req
         if why is not None:
-            why.append(f"Requested worker → {model_cost_info(name, cfg, repo_root)}")
+            why.append(f"Requested worker → {info(name)}")
     else:
         name = ""
 
@@ -1368,11 +1393,11 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                 candidates = existing_profiles([*cfg.routing.get(ceiling, []), cfg.default_agent], repo_root)
                 name = next(iter(candidates), "")
                 if name and why is not None:
-                    why.append(f"Milestone worker {m_profile} capped to {model_cost_info(name, cfg, repo_root)} by max_weight {ceiling}")
+                    why.append(f"Milestone worker {m_profile} capped to {info(name)} by max_weight {ceiling}")
             else:
                 name = m_profile
                 if why is not None:
-                    why.append(f"Milestone worker → {model_cost_info(name, cfg, repo_root)}")
+                    why.append(f"Milestone worker → {info(name)}")
     if not name:
         from brindle import learning
         from brindle.config import normalize_weight
@@ -1406,7 +1431,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
 
             gate = budget.Gate(db, cfg, repo_root, caller_id)
             picked, learned, note = _route_by_weight(db, cfg, repo_root, weight, task, files, routed, gate,
-                                                     ceiling=ceiling, policy=_policy_context(db, caller_id, policy),
+                                                     ceiling=ceiling, policy=ctx,
                                                      agent=who, **options)
             if routed.get("over_budget"):
                 message = budget.refusal(routed["over_budget"])
@@ -1434,7 +1459,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                 fallback_tier = "advanced" if name else "medium"
                 name, learned, note = _route_by_weight(
                     db, cfg, repo_root, ceiling or fallback_tier, task, files, routed,
-                    ceiling=ceiling, **options)
+                    ceiling=ceiling, policy=ctx, **options)
                 if not name:
                     raise AutopilotError(f"no available agent profile: {note}")
                 if why is not None:
@@ -1443,8 +1468,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                 candidates = existing_profiles([*cfg.routing.get(ceiling, []), cfg.default_agent], repo_root)
                 if candidates:
                     if why is not None:
-                        info = model_cost_info(candidates[0], cfg, repo_root)
-                        why.append(f"fallback profile {name} capped to {info} by max_weight {ceiling}")
+                        why.append(f"fallback profile {name} capped to {info(candidates[0])} by max_weight {ceiling}")
                     name = candidates[0]
             routed.setdefault("baseline", cfg.default_agent)
         routed["prior"] = learned and learning.used_prior(cfg, repo_root)
@@ -1464,8 +1488,7 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
             orig_name = name
             name = permissible[0]
             if why is not None:
-                info = model_cost_info(name, cfg, repo_root)
-                why.append(f"profile {orig_name} capped to {info} by max_weight {ceiling}")
+                why.append(f"profile {orig_name} capped to {info(name)} by max_weight {ceiling}")
         else:
             raise AutopilotError(f"no permissible agent profile under max_weight {ceiling!r}")
     try:
@@ -1480,22 +1503,30 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
     if problem := memory_problem(selected):
         tier = weight or profile_weight(name, cfg, repo_root)
         alternatives = list(dict.fromkeys([*cfg.routing.get(tier, []), *selected.fallback]))
+
+        def available(candidate: str) -> bool:
+            workspace = ctx.get("workspace")
+            context = {"workspace": workspace, "resolved": model_fields(candidate)} if workspace else {}
+            return not _unavailable(candidate, cfg, repo_root, weight=tier, **context)
+
         replacement = next((n for n in alternatives if n != name and
                             cfg.routing_allows(n, design_heavy) and
                             (not ceiling or weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]) and
-                            not _unavailable(n, cfg, repo_root, weight=tier)), None)
+                            available(n)), None)
         if replacement is None:
             raise AutopilotError(f"{problem}; no available fallback for {name}")
         if why is not None:
-            why.append(f"{problem}; using {model_cost_info(replacement, cfg, repo_root)} instead of {name}")
+            why.append(f"{problem}; using {info(replacement)} instead of {name}")
         name, learned = replacement, False
     if decision is not None:
         decision.update(profile=name, learned=learned, weight=weight, agent=who,
                         prior=bool(routed.get("prior")),
                         baseline=routed.get("baseline", name) if learned else name,
                         demoted_from=routed.get("demoted_from"))
+        if model_fields and (resolved := model_fields(name)):
+            decision["resolved"] = resolved
     if why is not None:
-        info_str = model_cost_info(name, cfg, repo_root)
+        info_str = info(name)
         if info_str and not any("cost tier" in w for w in why):
             why.append(info_str)
     return name, learned
