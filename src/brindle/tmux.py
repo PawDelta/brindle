@@ -559,11 +559,26 @@ def gated(command: list[str]) -> tuple[list[str], str]:
     tmux remembers a signal sent before the wait, so the order never hangs."""
     channel = f"brindle-layout-{uuid.uuid4().hex}"
     wait = shlex.join([shutil.which(_bin()) or _bin(), *_base()[1:], "wait-for"])
-    return ["/bin/sh", "-c", f'{wait} "$0" 2>/dev/null; exec "$@"', channel, *command], channel
+    return ["/bin/sh", "-c", f'{wait} "$0" 2>/dev/null && exec "$@"', channel, *command], channel
 
 
 def open_gate(channel: str) -> None:
-    _tmux("wait-for", "-S", channel, check=False)
+    _tmux("wait-for", "-S", channel)
+
+
+def discard_gated_launch(pane: str) -> bool:
+    """Remove the unopened launch only while its pane still belongs to it and has no attached client."""
+    launch = getattr(pane, "launch", "")
+    if not re.fullmatch(r"[0-9a-f]{12}", launch) or not re.fullmatch(r"%\d+", pane):
+        return False
+    owned = f"#{{m:*{AGENT_TAG} * {launch} *,#{{pane_start_command}}}}"
+    unattended = f"#{{&&:{owned},#{{==:#{{session_attached}},0}}}}"
+    try:
+        _tmux("if-shell", "-F", "-t", pane, unattended, f"kill-pane -t {pane}")
+        remaining = _tmux("list-panes", "-a", "-F", "#{pane_id}\t" + owned)
+    except (OSError, TmuxError):
+        return False
+    return f"{pane}\t1" not in remaining.stdout.splitlines()
 
 
 def windows(session: str) -> list[str]:

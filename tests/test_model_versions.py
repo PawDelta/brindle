@@ -203,3 +203,63 @@ def test_post_start_theme_error_keeps_launched_model(db, repo, routing, detached
     assert themed == [True]
     assert db.get_agent(worker.id).tmux_window == "%new"
     assert db.agent_launch_model(worker.id) == "gpt-6.2-astra"
+
+
+@pytest.mark.parametrize("fault", [
+    "registration", "gate",
+    pytest.param("unconfirmed-registration", marks=pytest.mark.variant(
+        "an unconfirmed teardown after registration failure must keep the model and leave the gate closed")),
+])
+def test_critical_pane_startup_failure_is_reported(db, repo, routing, detached, monkeypatch, fault):
+    configure(repo, ["pinned"], pinned="gpt-6.2-astra")
+    opened = []
+    gate_signals = []
+    discarded = []
+    update_agent = db.update_agent
+
+    def new_window(*args, tag, **kwargs):
+        opened.append(tag[1])
+        return "%new"
+
+    def register(agent_id, **fields):
+        if "tmux_window" in fields and fault != "gate":
+            raise OSError("registration failed")
+        update_agent(agent_id, **fields)
+
+    def signal(gate):
+        gate_signals.append(gate)
+        if fault == "gate":
+            raise OSError("gate failed")
+
+    def discard(target):
+        assert not gate_signals
+        discarded.append(target)
+        return fault == "registration"
+
+    monkeypatch.setattr(tmux, "ensure_session", lambda *a, **kw: None)
+    monkeypatch.setattr(tmux, "new_window", new_window)
+    monkeypatch.setattr(tmux, "open_gate", signal)
+    monkeypatch.setattr(tmux, "discard_gated_launch", discard, raising=False)
+    monkeypatch.setattr(tmux, "apply_theme", lambda *a: None)
+    monkeypatch.setattr(tmux, "mark_launched", lambda *a: None)
+    monkeypatch.setattr(agents, "_ensure_sidebar", lambda *a: None)
+    monkeypatch.setattr(db, "update_agent", register)
+    with pytest.raises((OSError, agents.AgentError)):
+        agents.spawn(db, routing, "pinned", prompt="task", mode="assign",
+                     watch_pane=True, background_setup=True)
+    [agent_id] = opened
+    if fault == "registration":
+        assert discarded == ["%new"]
+        assert not gate_signals
+        assert db.get_agent(agent_id) is None
+        assert db.agent_launch_model(agent_id) is None
+    elif fault == "gate":
+        assert len(gate_signals) == 1
+        assert not discarded
+        assert db.get_agent(agent_id).tmux_window == "%new"
+        assert db.agent_launch_model(agent_id) == "gpt-6.2-astra"
+    else:
+        assert discarded == ["%new"]
+        assert not gate_signals
+        assert db.get_agent(agent_id) is not None
+        assert db.agent_launch_model(agent_id) == "gpt-6.2-astra"

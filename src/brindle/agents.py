@@ -184,6 +184,14 @@ class LaunchTaken(AgentError):
     """Another path (a reviewer's death recovery) has already seen to this launch."""
 
 
+class LaunchPaneUnconfirmed(AgentError):
+    """Startup failed and the new pane may still exist."""
+
+    def __init__(self, stage: str, agent_id: str, pane: str):
+        self.agent_id = agent_id
+        super().__init__(f"Could not complete {stage} for agent {agent_id}. Pane {pane} may still exist.")
+
+
 class StrayPane(AgentError):
     """A pane that should be closed won't, or tmux can't say: nothing is launched beside it."""
 
@@ -782,6 +790,9 @@ def spawn(
     try:
         _launch(db, agent, ws, prompt=prompt, resume=None, watch_pane=watch_pane,
                 background_setup=background_setup, model_checked=True)
+    except LaunchPaneUnconfirmed:
+        # The pane can still claim its agent row through its launch tag.
+        raise
     except Exception:
         db.delete_agent(agent_id)
         forget_files(agent)
@@ -1093,6 +1104,8 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     size = _resume_window_size.get()
     tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws), **({"size": size} if size else {}))
     target = None
+    previous_window, previous_server = agent.tmux_window, agent.tmux_server
+    stage = "pane registration"
     try:
         env, credentials, allow, deny, org_env = _window_environment(agent, ws, m)
         agent_env, enforce = _agent_env_policy(ws)
@@ -1132,16 +1145,19 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
                 _ensure_sidebar(db, root_of(db, agent.id), ws, target)
             except Exception:
                 pass
-    except Exception:  # The pane can already be running, or will run when its gate opens.
+        if gate:
+            stage = "startup gate release"
+            tmux.open_gate(gate)
+    except Exception:
         if target is None:
             raise
-        log.warning("Could not finish setting up pane %s for agent %s", target, agent.id)
-    finally:
-        if gate and target is not None:
-            try:
-                tmux.open_gate(gate)
-            except Exception:
-                log.warning("Could not signal the startup gate for pane %s", target)
+        if gate and stage == "pane registration" and tmux.discard_gated_launch(target):
+            agent.__dict__.pop("_opening_pane", None)
+            if agent.tmux_window == target:
+                db.update_agent(agent.id, tmux_window=previous_window, tmux_server=previous_server)
+                agent.tmux_window, agent.tmux_server = previous_window, previous_server
+            raise
+        raise LaunchPaneUnconfirmed(stage, agent.id, target) from None
     try:
         tmux.apply_theme(ws.tmux_session)
     except Exception:
@@ -5843,13 +5859,18 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     if token is None:
         return holder
     reviewer = None
+    reviewer_id = None
     try:
         review_launch = {"review_launch": launches[profile]} if profile in launches else {}
         reviewer = spawn(db, ws, profile, prompt=task, parent_id=caller.id if caller else None,
                          mode="review", background_setup=True, review_sha=sha, agent_name="reviewer",
                          **review_launch)
+        reviewer_id = reviewer.id if reviewer else None
+    except LaunchPaneUnconfirmed as exc:
+        reviewer_id = exc.agent_id
+        raise
     finally:
-        db.hold_review(ws.id, sha, slot, token, reviewer.id if reviewer else None)
+        db.hold_review(ws.id, sha, slot, token, reviewer_id)
     # Verdict slots remain primary/second even when an explicit profile has
     # its own dispatch claim. Changing profile after a rejection must still
     # replace that verdict in the same role (gates.standing_reviews).
