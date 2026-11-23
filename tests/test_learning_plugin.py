@@ -165,6 +165,7 @@ def test_reviewer_verdict_and_no_verdict_and_abandoned_worker_cleanup(db, repo, 
     (repo / ".brindle" / "config.json").write_text(json.dumps({"learning": "cloud", "pipeline": False}))
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
     monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **kw: "delivered")
+    monkeypatch.setattr("brindle.procs.table", lambda: {})
     work = workspaces.create(db, str(repo), "feat").workspace
     now = time.time()
     db.add_agent(Agent("w1", work.id, "developer-heavy", "claude", None, "assign", "processing",
