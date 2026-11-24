@@ -977,6 +977,94 @@ def test_routing_user_view_runs_no_learner_and_no_sign_in_probe(seeded, monkeypa
     assert len(pro_reads) <= 1       # at most one read; main's cross-process entitlement cache may serve it
 
 
+def test_routing_reads_and_clears_saved_orders_by_scope(repo, db, monkeypatch):
+    from brindle import autopilot, config
+
+    config.set_user("routing", {"heavy": ["dev.gpt"], "light": config.DEFAULT_ROUTING["light"]})
+    config.set_user("routing_heavy", "claude-opus")
+    config.set_user("routing_locked", {"heavy": True})
+    config.set_repo(str(repo), "routing", {"medium": ["dev.gpt"]})
+    config.set_local(str(repo), "agent_models", {"qa": {
+        "heavy": ["dev.gpt"], "light": config.DEFAULT_ROUTING["light"]}})
+    monkeypatch.setattr(autopilot, "_route_by_weight", lambda db, cfg, repo, size, *_: (
+        ("dev.gpt", True, "") if size == "advanced" else (None, False, "")))
+
+    query = f"repo={repo}&scope=user&include_repo_orders=1"
+    code, routing = _get("/v1/routing", AUTH, query)
+    assert code == 200, routing
+    orders = routing["orders"]
+    assert orders["heavy"]["recommended"] == config.DEFAULT_ROUTING["heavy"]
+    assert {(entry["scope"], entry["setting"], entry["agent"]) for entry in orders["heavy"]["saved"]} == {
+        ("user", "routing", None), ("user", "picker", None), ("local", "agent_models", "qa")}
+    assert [(entry["scope"], entry["order"]) for entry in orders["medium"]["saved"]] == [
+        ("repo", ["dev.gpt"])]
+    assert orders["light"]["saved"][0]["order"] == orders["light"]["recommended"]
+    assert orders["advanced"]["saved"] == []
+    assert routing["kinds"]["advanced"]["learned"] == "dev.gpt"
+
+    app = build_app(TOKEN)
+    for scope in ("user", "repo", "local"):
+        clear = {size: [{"setting": entry["setting"], "agent": entry["agent"], "order": entry["order"]}
+                        for entry in orders[size]["saved"] if entry["scope"] == scope]
+                 for size in ("heavy", "medium")}
+        code, reply = asyncio.run(_read_request(app, "/v1/routing", AUTH, method="PUT", payload={
+            "repo": str(repo), "scope": scope, "clear_orders": {size: entries for size, entries in clear.items() if entries},
+        }))
+        assert code == 200, reply
+    after = _get("/v1/routing", AUTH, query)[1]
+    assert after["orders"]["heavy"]["saved"] == after["orders"]["medium"]["saved"] == []
+    assert after["orders"]["light"] == orders["light"]
+    assert after["kinds"]["heavy"]["locked"]
+    assert after["kinds"]["advanced"]["learned"] == "dev.gpt"
+    assert "routing_heavy" not in config.user_settings()
+
+
+@pytest.mark.parametrize("remove", [
+    False, pytest.param(True, marks=pytest.mark.variant("a stale reset must not recreate removed keys or files")),
+])
+def test_reset_routing_preserves_orders_changed_since_get(repo, db, remove):
+    from brindle import config
+
+    config.set_user("routing", {"heavy": ["dev.gpt"]})
+    config.set_user("routing_heavy", "claude-opus")
+    config.set_user("agent_models", {"qa": {"heavy": ["dev.gpt"]}})
+    paths = config.scope_paths(repo)
+    if remove:
+        config.set_repo(repo, "routing", {"heavy": ["dev.gpt"]})
+        config.set_local(repo, "agent_models", {"qa": {"heavy": ["dev.gpt"]}})
+    code, routing = _get("/v1/routing", AUTH, f"repo={repo}&learned=0")
+    assert code == 200, routing
+    observed = routing["orders"]["heavy"]["saved"]
+
+    recommended = routing["orders"]["heavy"]["recommended"]
+    if remove:
+        for key in ("routing", "routing_heavy", "agent_models"):
+            config.forget_user(key)
+        paths["repo"].unlink()
+        paths["local"].unlink()
+        ignore = paths["local"].with_name(".gitignore")
+        ignore.unlink()
+    else:
+        config.set_user("routing", {"heavy": recommended})
+        config.set_user("routing_heavy", "codex")
+        config.set_user("agent_models", {"qa": {"heavy": recommended}})
+    current = paths["user"].read_bytes()
+
+    app = build_app(TOKEN)
+    for scope in ("user", "repo", "local") if remove else ("user",):
+        entries = [{k: entry[k] for k in ("setting", "agent", "order")}
+                   for entry in observed if entry["scope"] == scope]
+        code, reply = asyncio.run(_read_request(app, "/v1/routing", AUTH, method="PUT", payload={
+            "repo": str(repo), "scope": scope, "clear_orders": {"heavy": entries},
+        }))
+        assert code == 200, reply
+    assert paths["user"].read_bytes() == current
+    if remove:
+        assert not paths["repo"].exists()
+        assert not paths["local"].exists()
+        assert not ignore.exists()
+
+
 def test_model_less_agent_can_be_created_and_edited(repo, db):
     from brindle import config, profiles
 

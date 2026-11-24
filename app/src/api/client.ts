@@ -40,6 +40,7 @@ import type {
   SharePeopleDTO,
   SharePersonDTO,
   RoutingDTO,
+  RoutingSavedOrderDTO,
   SavedActionDTO,
   SessionDTO,
   WorkspaceDTO,
@@ -80,6 +81,8 @@ export interface RoutingPut {
   /* An agent's own model for a job size (config agent_models), over the
      shared table: null for a size goes back to following the job size. */
   agents?: Record<string, { models: Record<string, { model: string; fallbacks?: string[] } | null> }>;
+  /* Remove only these saved entries in scope, leaving locks and learning alone. */
+  clear_orders?: Record<string, Pick<RoutingSavedOrderDTO, "setting" | "agent" | "order">[]>;
 }
 
 export interface KindPut {
@@ -2997,8 +3000,11 @@ export class DaemonClient {
      person's own settings and library, as every repo starts from them (`repo`
      still gives the org policy). `learned: false`: each kind's `learned` is
      null, without the seconds working it out takes. */
-  routing(repo: string, opts: { scope?: "user"; learned?: boolean } = {}) {
-    return this.get<RoutingDTO>("/routing", { repo, scope: opts.scope, learned: opts.learned === false ? 0 : undefined });
+  routing(repo: string, opts: { scope?: "user"; learned?: boolean; includeRepoOrders?: boolean } = {}) {
+    return this.get<RoutingDTO>("/routing", {
+      repo, scope: opts.scope, learned: opts.learned === false ? 0 : undefined,
+      include_repo_orders: opts.includeRepoOrders ? 1 : undefined,
+    });
   }
 
   putRouting(body: RoutingPut) {
