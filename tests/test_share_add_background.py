@@ -64,6 +64,8 @@ def ack(app, pid, *receipts):
     assert app.post(f"/v1/plans/{pid}/invites/receipts", json={"receipts": list(receipts)}).status_code == 200
 
 
+@pytest.mark.variant("the delivery gate: a 202 the app never acknowledged (its answer lost, the request cancelled) "
+                     "must not be sent by the watch, and a restart must drop it; other tests always acknowledge")
 def test_a_change_is_sent_only_once_the_app_has_its_answer(panel, backend, db):
     """Through the daemon's own routes: a 202 the app never acknowledged
     (it went away, or the request was cancelled) is never sent, by the watch
@@ -108,9 +110,9 @@ def test_overlapping_answers_send_each_acknowledged_change_once(panel, backend, 
     assert person(app, pid, "ann")["access"] == "view"
 
 
-@pytest.mark.variant("an invite sent again before its backoff is due (due_at ignored) hammers an offline Library; "
-                     "other tests only send again when the person asks")
-def test_an_offline_invite_lands_once_the_library_is_back(panel, backend, db, clock):
+@pytest.mark.variant("an invite sent again before its backoff is due (due_at ignored) hammers an offline Library, "
+                     "and one a restart doesn't resume never lands; other tests only send again when asked")
+def test_an_offline_invite_lands_after_a_restart_once_the_library_is_back(panel, backend, db, clock):
     pid, library, app = panel
     back = offline(backend, library, db)
     assert add_person(app, pid, ANN).status_code == 202
@@ -121,8 +123,9 @@ def test_an_offline_invite_lands_once_the_library_is_back(panel, backend, db, cl
     assert len(sent(backend, "POST /analysis-docs")) == tried
 
     back()
+    share_invites._locks.clear()                    # and a restart meanwhile: only the database remembers it
     clock[0] += share_invites.backoff(1)
-    assert share_invites.run(db) == 1
+    lifecycle._send_share_invites()                 # the new daemon's watch, first tick
     assert person(app, pid, "ann")["access"] == "comment"
     assert share_invites.pending(db, pid) == []
 
@@ -163,18 +166,6 @@ def test_a_change_to_a_pending_person_is_only_the_asking_accounts(panel, db):
     assert app.put(f"/v1/plans/{pid}/people/ann", json={"access": "edit"}).status_code == 409
     assert app.delete(f"/v1/plans/{pid}/people/ann").status_code == 409
     assert queued(app, pid)["ann"]["access"] == "comment"
-
-
-def test_a_restart_resumes_an_acknowledged_invite(panel, backend, db, clock):
-    pid, library, app = panel
-    back = offline(backend, library, db)
-    assert add_person(app, pid, ANN).status_code == 202
-    back()
-    share_invites._locks.clear()                    # a new daemon: only the database remembers it
-    clock[0] += share_invites.backoff(1)
-    lifecycle._send_share_invites()                 # its watch's first tick
-    assert person(app, pid, "ann")["access"] == "comment"
-    assert share_invites.pending(db, pid) == []
 
 
 def test_a_refusal_is_shown_and_not_sent_again_until_asked(panel, backend, db, clock):
