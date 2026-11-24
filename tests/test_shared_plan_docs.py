@@ -835,6 +835,174 @@ def test_two_writers_in_one_shared_section_both_land_in_the_live_draft_and_only_
     assert (got["rev"], got["sections"][0]["markdown"], got["gate"]["state"]) == (2, agreed, "waiting")
 
 
+@pytest.mark.parametrize("first", [
+    "approve",          # the approval's own sync brings the version in
+    "own_sign_off",     # the author is a reviewer too: their sign-off's sync brings it in, the approval follows
+    "no_version",       # an app naming only the older revision is told to read the new one
+])
+def test_a_frozen_version_read_before_it_came_in_here_is_signed_and_approved_as_the_app_names_it(
+        db, parts, backend, monkeypatch, first):
+    """The app shows a frozen live version (its own text) while its read of the plan is
+    still the revision before the freeze; each sign-off and the approval name that version.
+    The sync each makes brings the version in as a new revision here: that one is judged."""
+    pid, lib, net = parts
+    monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
+    signer = ["u_a"]
+
+    def sign(form, headers):            # as the server: only the head, by whoever is signed in
+        if form["rev"] != lib.rev:
+            return 409, {"error": "stale", "rev": lib.rev}
+        lib.sign_offs.append({"rev": form["rev"], "sub": signer[0], "at": 9.0})
+        return 200, lib.view()
+
+    backend.routes[f"POST {DESIGN}/sign-offs"] = sign
+    sd.share(db, pid, TEAM, reviewers=[{"sub": "u_a"}, *([{"sub": "user_1"}] if first == "own_sign_off" else [])],
+             **net)
+    lib.open_draft()
+    sd.sync(db, pid, **net)
+    lib.draft.insert("summary", 0, "Agreed: ")      # typed live, then frozen as version 2
+    lib.freeze()
+    screen = {"rev": 1, "version": 2}
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        post = lambda tail, **body: app.post(f"/v1/plans/{pid}/{tail}", json=body)  # noqa: E731
+        theirs = app.post(f"/v1/shared-designs/{DOC}/sign-offs", json=screen)       # the teammate, from their reader
+        assert theirs.status_code == 200, theirs.json()
+        if first == "no_version":
+            refused = post("decide", rev=1, approved=True).json()["error"]
+            assert (refused["code"], refused["rev"]) == ("stale", 2)        # never a closed gate
+            return
+        if first == "own_sign_off":
+            signer[0] = "user_1"
+            mine = post("sign-off", **screen)
+            assert mine.status_code == 200, mine.json()
+            assert (mine.json()["rev"], mine.json()["gate"]["state"]) == (2, "ready")
+        approved = post("decide", approved=True, **screen)
+        assert approved.status_code == 200, approved.json()
+        assert (approved.json()["state"], approved.json()["rev"]) == ("approved", 2)
+
+
+@pytest.mark.parametrize("then", [
+    "came_in",      # the version approved comes in here as a new revision once the Library answers: applied
+    "refrozen",     # a later version with the same text as the one here takes its place: not applied
+])
+def test_an_approval_held_through_an_outage_applies_only_to_the_version_it_was_given_on(
+        db, parts, backend, monkeypatch, then):
+    pid, lib, net = parts
+    monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
+    view = backend.routes[f"GET {DESIGN}"]
+    down = [False]
+
+    def read(form, headers):
+        if down[0]:
+            raise auth.TransportError("cannot reach brindle Pro backend: network is unreachable")
+        return view(form, headers)
+
+    backend.routes[f"GET {DESIGN}"] = read
+    sd.share(db, pid, TEAM, reviewers=[], **net)
+    lib.open_draft()
+    sd.sync(db, pid, **net)
+    lib.draft.insert("summary", 0, "Agreed: ")
+    lib.freeze()                                    # version 2: new text
+    if then == "refrozen":
+        sd.sync(db, pid, **net)                     # it came in here as r2 before the outage
+    screen = {"rev": plans.get(db, pid)["rev"], "version": 2}
+    down[0] = True
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        held = app.post(f"/v1/plans/{pid}/decide", json={"approved": True, **screen}).json()["error"]
+    assert (held["code"], held["approval_held"]) == ("gate_unverified", True)
+    if then == "refrozen":
+        lib.freeze()                                # version 3, the text r2 already has
+    down[0] = False
+    assert sd.sync_open(db, **net) == 1
+    p = plans.get(db, pid)
+    if then == "came_in":
+        assert (p["state"], p["rev"]) == ("approved", 2)
+    else:
+        assert p["state"] == "open" and plans.gate(db, p)["approval_refused"]
+
+
+@pytest.mark.parametrize("meanwhile", [
+    "refrozen",     # the author's sign-off: a sync lands a same-text version 3 while version 2 is checked
+    "unshared",     # the approval: the share is dropped while version 2 is checked
+])
+def test_what_lands_while_a_frozen_version_is_checked_never_takes_its_sign_off_or_approval(
+        db, parts, backend, monkeypatch, meanwhile):
+    from brindle import doc_templates
+
+    pid, lib, net = parts
+    monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
+
+    def sign(form, headers):            # as the server: only the head
+        if form["rev"] != lib.rev:
+            return 409, {"error": "stale", "rev": lib.rev}
+        lib.sign_offs.append({"rev": form["rev"], "sub": "user_1", "at": 9.0})
+        return 200, lib.view()
+
+    backend.routes[f"POST {DESIGN}/sign-offs"] = sign
+    sd.share(db, pid, TEAM, reviewers=[{"sub": "user_1"}] if meanwhile == "refrozen" else [], **net)
+    lib.open_draft()
+    sd.sync(db, pid, **net)
+    lib.draft.insert("summary", 0, "Agreed: ")
+    lib.freeze()                                    # version 2
+    real, landed = doc_templates.require, []
+
+    def checked(here, *args, **kw):                 # between matching version 2 and acting on it
+        real(here, *args, **kw)
+        if not landed:
+            landed.append(True)
+            if meanwhile == "refrozen":
+                lib.freeze()                        # version 3, the same text
+                sd.sync(here, pid, **net)
+            else:
+                with here.tx() as c:
+                    sd.drop_share(c, c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (pid,)).fetchone())
+
+    monkeypatch.setattr(doc_templates, "require", checked)
+    screen = {"rev": 1, "version": 2}
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        post = lambda tail, **body: app.post(f"/v1/plans/{pid}/{tail}", json=body)  # noqa: E731
+        got = post("sign-off", **screen) if meanwhile == "refrozen" else post("decide", approved=True, **screen)
+    assert landed and got.json()["error"]["code"] == "stale"
+    assert lib.sign_offs == [] and plans.get(db, pid)["state"] == "open"
+
+
+@pytest.mark.parametrize(("action", "frozen"), [
+    ("approve", "filled"),      # the cached draft's Summary is empty, the frozen version's is not: approved
+    ("approve", "emptied"),     # the cached draft's Summary is filled, the frozen version's is empty: refused
+    ("sign_off", "filled"),     # the author's own sign-off on that version goes too
+])
+def test_a_frozen_version_meets_its_template_by_its_own_text_not_the_cached_draft(
+        db, parts, backend, monkeypatch, action, frozen):
+    from brindle import doc_templates
+
+    pid, lib, net = parts
+    monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
+    monkeypatch.setattr(doc_templates, "format_for", lambda *a, **kw: {"blocks": [doc_templates.SIGN_OFF]})
+    with db.tx() as c:
+        doc_templates.start(c, pid, {"id": "t", "name": "Design", "default": True, "sections": [
+            {"title": "Summary", "kind": "text", "required": True, "hint": ""}]}, None)
+    sd.share(db, pid, TEAM, reviewers=[{"sub": "user_1"}] if action == "sign_off" else [], **net)
+    lib.open_draft()
+    if frozen == "filled":
+        lib.draft.delete("summary", 0, len(SUMMARY))
+    sd.sync(db, pid, **net)                         # the draft as this machine keeps it, from now on behind
+    if frozen == "filled":
+        lib.draft.insert("summary", 0, SUMMARY)
+    else:
+        lib.draft.delete("summary", 0, len(SUMMARY))
+    lib.freeze()
+    screen = {"rev": 1, "version": 2}
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        post = lambda tail, **body: app.post(f"/v1/plans/{pid}/{tail}", json=body)  # noqa: E731
+        got = post("sign-off", **screen) if action == "sign_off" else post("decide", approved=True, **screen)
+    if frozen == "filled":
+        assert got.status_code == 200, got.json()
+        assert plans.get(db, pid)["state"] == ("approved" if action == "approve" else "open")
+    else:
+        assert got.json()["error"]["code"] == "required_sections_missing"
+        assert plans.get(db, pid)["state"] == "open"
+
+
 def test_a_comment_follows_its_words_through_edits_and_detaches_only_when_they_are_deleted(
         db, parts, backend, monkeypatch):
     pid, lib, net = parts

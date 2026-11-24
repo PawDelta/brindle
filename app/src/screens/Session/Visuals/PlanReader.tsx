@@ -72,6 +72,19 @@ const SuggestEditor = lazy(() => import("./DocEditor").then((m) => ({ default: m
 const progress = (p: Plan) => p.rev * 2 + (p.state === "open" ? 0 : 1);
 const noSubscribe = () => () => {};
 
+/* The refusals that only mean the plan moved on under the screen (a newer revision or version, or
+   a verdict given elsewhere): the doc is read again. Any other refusal (a template's empty required
+   section, a closed gate, a lock) says why in the engine's or the Library's own words. */
+const MOVED = new Set(["stale", "decided", "conflict", "withdrawn"]);
+function refusal(e: unknown): string {
+  if (!(e instanceof DaemonError)) return `Couldn't send: ${message(e)}`;
+  if (e.code === "gate_unverified") return message(e);
+  if (e.status === 409 && MOVED.has(e.code)) return "This plan changed since you opened it (a new revision, or it was already decided). It is being read again.";
+  // The daemon's own 403s (a session locked to another identity) aren't the Library's.
+  if (e.status === 403 && e.code !== "locked") return `The Library refused this for your account: ${message(e)}`;
+  return `Couldn't send: ${message(e)}`;
+}
+
 /* The doc's writes, kept in order by the reader: `begin` is refused while another is out, and
    `end` hands back the engine's reply (the plan as it is now), or null when the write failed. */
 export interface Writes {
@@ -422,6 +435,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // Asked again as the menu opens, once the plan is shared (sharing is what puts it in the Library),
   // and after Stop sharing for everyone, which turns the link off.
   const [unshared, setUnshared] = useState(0);
+  // Stop sharing and build stopped sharing but built nothing: the personal doc reads differently.
+  const [personalDiffers, setPersonalDiffers] = useState(false);
   const link = useShareLink(shareLink, `${sharingOpen}:${!!receivedPlan.gate}:${unshared}`);
   const [briefOpen, setBriefOpen] = useState(false);
   const [stripHost, setStripHost] = useState<HTMLDivElement | null>(null);
@@ -617,8 +632,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     } catch (e) {
       writes.end(null);
       refused?.(e);
-      if (alive.current) setError(e instanceof DaemonError && e.code === "gate_unverified" ? message(e) : e instanceof DaemonError && e.status === 409 && e.code !== "gate_closed" && e.code !== "review_closed" ? "This plan changed since you opened it (a new revision, or it was already decided). It is being read again."
-        : e instanceof DaemonError && e.status === 403 ? `The Library refused this for your account: ${message(e)}` : `Couldn't send: ${message(e)}`);
+      if (alive.current) setError(refusal(e));
       return null;
     } finally {
       if (alive.current) setBusy(false);
@@ -794,10 +808,13 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const said = !!note.trim() || pending || edited || differs;
   const canRequest = said;
   const drafts = Object.fromEntries(plan.decisions.flatMap((d) => (drafted(d) ? [[d.id, drafted(d)!]] : [])));
-  const decide = async (approved: boolean) => {
-    if (historical || !client || (approved && reviewBlocked)) return;
+  /* `shared`: false once the person stopped sharing it, when it is approved as a personal doc, with no
+     frozen version to wait for or to name. */
+  const decide = async (approved: boolean, shared = true) => {
+    if (historical || !client || (approved && shared && reviewBlocked)) return;
     setSending(approved ? "approve" : "changes");
-    const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(reviewVersion === undefined ? {} : { version: reviewVersion }), ...(attached.length ? { attachments: attached } : {}) }));
+    const version = shared ? reviewVersion : undefined;
+    const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(version === undefined ? {} : { version }), ...(attached.length ? { attachments: attached } : {}) }));
     if (!alive.current) return;
     setSending(null);
     if (now) {
@@ -817,11 +834,19 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (now) setNote("");
   };
   /* The plan becomes a personal doc, then the person's sign-off starts the build. */
+  /* Built only when the personal doc it becomes reads as the text on screen (the live draft's, or a
+     frozen version's). If it doesn't, nothing is built: the personal revision is shown, said so, for
+     the person to read and Approve. */
   const stopSharing = async () => {
     if (historical) return;
+    const read = shownTexts;
     setSending("approve");
     const now = await send(() => sharing!.stopSharingPlan!(plan.id, plan.rev));
-    if (now) await decide(true);
+    if (now && read && [...read].some(([id, text]) => (id === LEDE ? now.lede : now.sections.find((s) => s.id === id)?.markdown) !== text)) {
+      if (alive.current) { setSending(null); setPersonalDiffers(true); }
+      return;
+    }
+    if (now) await decide(true, false);
     else if (alive.current) setSending(null);
   };
   const signOff = async () => {
@@ -1015,6 +1040,11 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         </div>
       )}
       {open && gate?.approval_refused && <p className="m-0 font-sans text-[12.5px] text-sap" data-testid="plan-approval-refused">{gate.approval_refused}</p>}
+      {open && !gate && personalDiffers && (
+        <p role="status" className="m-0 font-sans text-[12.5px] text-sap" data-testid="plan-personal-differs">
+          Sharing stopped, but nothing was built: the plan kept here reads differently from the shared text you were reading. Read it as it is now, then Approve to build it.
+        </p>
+      )}
     </>
   );
   // What a highlight offers, over the words.

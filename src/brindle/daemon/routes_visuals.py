@@ -409,7 +409,7 @@ def decide_plan(db: DB, params: dict, body: dict) -> Any:
 
     p = plans.decide(db, params["id"], body.get("rev"), _get(body, "approved", bool, required=True),
                      body.get("picks"), body.get("comments"), _get(body, "note"), person=True,
-                     attachments=_get(body, "attachments", list))
+                     attachments=_get(body, "attachments", list), version=body.get("version"))
     return plans.to_dto(db, p)
 
 
@@ -784,7 +784,8 @@ def plan_stop_sharing(db: DB, params: dict, body: dict) -> Any:
 
 
 def plan_sign_off(db: DB, params: dict, body: dict) -> Any:
-    return _library(db, params["id"], lambda sd: sd.sign_off(db, params["id"], body.get("rev")))
+    return _library(db, params["id"], lambda sd: sd.sign_off(db, params["id"], body.get("rev"),
+                                                             version=body.get("version")))
 
 
 def plan_policy_override(db: DB, params: dict, body: dict) -> Any:
@@ -1011,7 +1012,12 @@ def shared_design_answer_change(db: DB, params: dict, body: dict) -> Any:
 
 
 def shared_design_sign_off(db: DB, params: dict, body: dict) -> Any:
-    return _shared_design(_get(body, "repo"), lambda r: r.sign_off(params["doc_id"], body.get("rev")))
+    """A teammate's sign-off. On a live doc the app names the frozen version on
+    screen: that version is what they read (its own text), so it is the one
+    signed, even if their read of the revision came before the freeze."""
+    version = body.get("version")
+    return _shared_design(_get(body, "repo"), lambda r: r.sign_off(
+        params["doc_id"], body.get("rev") if version is None else version))
 
 
 def shared_design_access(db: DB, params: dict, body: dict) -> Any:

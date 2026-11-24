@@ -39,6 +39,7 @@ it("shows the signed-in person's initials from their name, and the email's first
 it.each(["shared", "author"])("keeps reviewers in Share and bounds the %s reader's named comments and header", async (reader) => {
   const name = `David ${"Longsurname".repeat(12)} Jones`;
   const decisionTitle = "Longdecision".repeat(30);
+  let listed: Promise<unknown> | undefined;
   const plan = doc(1, "Read this", { title: "Longtitle".repeat(40),
     decisions: [{ id: "long", title: decisionTitle, options: [{ id: "a", label: "Longoption".repeat(30) }], votes: { a: ["teammate:63a34f9d"] } }],
     gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["63a34f9d"], reviewers: [{ sub: "63a34f9d", required: true, status: "waiting" }] },
@@ -46,7 +47,7 @@ it.each(["shared", "author"])("keeps reviewers in Share and bounds the %s reader
   const client = { ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan,
     sharePlan: async () => plan, setPlanReviewers: async () => plan, syncPlan: async () => plan, signOffPlan: async () => plan, overridePlanPolicy: async () => plan, docScopes: async () => ({ scopes: [] }),
     sharedDesign: async () => ({ ...plan, me: "me", author: "63a34f9d" }), writeSharedDesign: async () => ({ ...plan, me: "me" }),
-    libraryPeople: async () => ({ people: [{ sub: "63a34f9d", email: "david@example.test", first_name: "David", last_name: name.slice(6), name: "Dave" }] }) };
+    libraryPeople: () => (listed = Promise.resolve({ people: [{ sub: "63a34f9d", email: "david@example.test", first_name: "David", last_name: name.slice(6), name: "Dave" }] })) };
   render(reader === "shared" ? <SharedDesignReader client={client} docId={plan.id} onBack={() => {}} />
     : <PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
   const share = await screen.findByRole("button", { name: "Share" });
@@ -59,6 +60,7 @@ it.each(["shared", "author"])("keeps reviewers in Share and bounds the %s reader
   const comment = await screen.findByTestId("thread-1");
   expect(comment.querySelector("span[style][title]")?.textContent).toBe("DJ");
   expect(within(comment).getByText(name).className).toContain("truncate");
+  await act(async () => { await listed; });          // the people read names the voter
   const decision = screen.getByRole("radiogroup", { name: decisionTitle });
   expect(decision.className).toContain("[overflow-wrap:anywhere]");
   expect(within(decision).getByTitle(name).textContent).toBe("DJ");

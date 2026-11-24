@@ -1411,18 +1411,34 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
     return {**link(db, p["id"]), "pulled": pulled, "pushed": pushed}
 
 
-def sign_off(db: DB, plan_id: str, rev: Any, *, client=None, store=None) -> dict:
+def sign_off(db: DB, plan_id: str, rev: Any, *, version: Any = None, client=None, store=None) -> dict:
     """The person's own sign-off on the revision on screen (``rev``), for when
     they are one of its reviewers. The revision is sent first if the Library
-    doesn't have it, so what they read is what they sign. Returns the link."""
+    doesn't have it, so what they read is what they sign. On a live doc,
+    ``version`` is the frozen version on screen: the sync may bring it in as a
+    new revision, which is then the one signed. Returns the link."""
     p = plan_docs._plan(db, plan_id)
     _review_open(p)
+    version = plans._version(version)
+    if plans.came_in_as(db, p, version):
+        rev = p["rev"]          # an earlier sync brought the version on screen in: it is this revision
     plan_docs._on_screen(p, rev)
-    doc_templates.require(db, p["id"], doc_templates.SIGN_OFF, plan_docs.current(db, p)["sections"])
+    if version is None:
+        doc_templates.require(db, p["id"], doc_templates.SIGN_OFF, plan_docs.current(db, p)["sections"])
     client, store = ad._session(client, store)
-    share_ = sync(db, p["id"], client=client, store=store)
+    sync(db, p["id"], client=client, store=store)
+    p = plans.caught_up(db, p, rev, version)
+    # The Library revision signed is read once, here: a sync landing later can't change what is sent,
+    # and the Library refuses it (stale) if its head has moved on since.
+    share_ = link(db, p["id"])
+    if version is not None and (share_ is None or share_["remote_rev"] != version):
+        raise ServiceError("stale", f"version {version} isn't the one out for sign-off now; read the plan again",
+                           409, rev=p["rev"])
     if share_["local_rev"] != p["rev"]:
         raise RuntimeError(f"r{p['rev']} isn't the Library's current revision, so it can't be signed off")
+    if version is not None:     # the frozen version is signed as its own text: the revision it came in as here
+        doc_templates.require(db, p["id"], doc_templates.SIGN_OFF,
+                              plan_docs.revision(db, p["id"], share_["local_rev"])["sections"])
     if _remember(db, p["id"], review_policies.ask(db, p, "POST", _path(share_["doc_id"], "/sign-offs"),
                                                   {"rev": share_["remote_rev"]}, client=client, store=store)):
         plan_docs._changed(db, p, p["rev"])
