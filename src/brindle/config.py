@@ -764,11 +764,13 @@ def _sync_setting(key: str) -> None:
 _REPO_WRITE = threading.Lock()
 
 
-def _change_json(path: Path, change, *, lock=_REPO_WRITE) -> bool:
+def _change_json(path: Path, change, *, lock=None) -> bool:
     """Read ``path``, apply ``change`` to its dict and replace the file, one at a
     time (daemon actions run in threads) through a unique temp file in the same
-    directory, so a reader never sees half a file and no write is lost."""
-    with lock:
+    directory, so a reader never sees half a file and no write is lost. The
+    repo lock is looked up when called (not bound as a default), so the module's
+    current ``_REPO_WRITE`` is the one every writer shares."""
+    with (lock if lock is not None else _REPO_WRITE):
         data = _read_json(path)
         if change(data) is KEEP_SETTING:
             return False
@@ -777,7 +779,7 @@ def _change_json(path: Path, change, *, lock=_REPO_WRITE) -> bool:
         return True
 
 
-def _update_setting(path: Path, key: str, change, *, lock=_REPO_WRITE) -> bool:
+def _update_setting(path: Path, key: str, change, *, lock=None) -> bool:
     def apply(data):
         value = change(data.get(key))
         if value is KEEP_SETTING:
