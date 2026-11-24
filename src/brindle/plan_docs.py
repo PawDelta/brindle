@@ -345,7 +345,10 @@ def current(db: DB, p: dict, replica=None) -> dict:
     """What the person reads and writes on: the current revision, with the
     live draft's text in place of its lede and sections when it has one."""
     cur = revision(db, p["id"])
-    replica = replica or draft(db, p)
+    return _with_draft(cur, replica or draft(db, p))
+
+
+def _with_draft(cur: dict, replica) -> dict:
     if replica is None:
         return cur
     texts = replica.sections()
@@ -1168,7 +1171,7 @@ def fields(db: DB, p: dict) -> dict:
     sections (the live draft's text, when it has one), its decisions with
     their votes, every revision, the threads."""
     replica = draft(db, p)
-    cur = current(db, p, replica)
+    cur = _with_draft(revision(db, p["id"]), replica)
     from brindle import plan_answers
 
     votes = _votes(db, p)
