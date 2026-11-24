@@ -257,7 +257,8 @@ def test_asking_someone_to_sign_off_keeps_their_access_on_either_library(compat,
     assert seen["can_edit"] is (access == "edit") and seen["can_comment"] and seen["can_sign_off"]
 
 
-def test_an_older_client_still_gets_access_and_sign_off_from_the_current_library(compat, backend):
+@pytest.mark.variant("a pinned older client's request and reader against the current Library's wire shapes")
+def test_an_older_client_still_gets_access_and_sign_off_from_the_current_library(compat):
     """brindle before this branch (shared_docs.set_reviewer at 851fb558): its
     request, pinned here, against the current Library's per-person route, and
     its reader (share_access.summary) of the answer."""
