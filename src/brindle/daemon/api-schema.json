@@ -11630,6 +11630,11 @@
               "default": null,
               "title": "Agent"
             },
+            "locked": {
+              "default": false,
+              "title": "Locked",
+              "type": "boolean"
+            },
             "order": {
               "items": {
                 "type": "string"
@@ -12331,6 +12336,11 @@
           "default": null,
           "title": "Agent"
         },
+        "locked": {
+          "default": false,
+          "title": "Locked",
+          "type": "boolean"
+        },
         "order": {
           "items": {
             "type": "string"
@@ -12401,6 +12411,11 @@
               ],
               "default": null,
               "title": "Agent"
+            },
+            "locked": {
+              "default": false,
+              "title": "Locked",
+              "type": "boolean"
             },
             "order": {
               "items": {

@@ -2239,9 +2239,9 @@ export class FakeDaemon {
       for (const scope of ROUTING_SCOPES) {
         const file = savedFiles[scope];
         const shared = file.routing?.[size];
-        if (shared) saved.push({ scope, setting: "routing", order: shared });
+        if (shared) saved.push({ scope, setting: "routing", order: shared, locked: file.routing_locked?.includes(size) ?? false });
         for (const [agent, pools] of Object.entries(file.agent_models ?? {})) {
-          if (pools[size]) saved.push({ scope, setting: "agent_models", agent, order: pools[size] });
+          if (pools[size]) saved.push({ scope, setting: "agent_models", agent, order: pools[size], locked: false });
         }
       }
       return [size, { recommended: DEFAULT_ROUTING[size], saved }];
@@ -2391,6 +2391,7 @@ export class FakeDaemon {
     // Per kind (routes_actions.put_routing's `kinds`): a weight's model and fallbacks become its tier list,
     // the reviewer's model the reviewer, the supervisor's the user's pick. A choice locks the kind unless `locked` is given.
     const lockChanges = new Map<string, boolean>();
+    const keepOrders: Record<string, string[]> = {};
     const extras: Record<string, KindExtras> = {};
     const kindFallbacks: Record<string, string[]> = {};
     let supervisor: string | null = null;
@@ -2398,7 +2399,15 @@ export class FakeDaemon {
     const current = this.routing(repo, scope === "user");
     for (const [k, spec] of Object.entries((kinds ?? {}) as Record<string, unknown>)) {
       if (!ROUTING_KINDS.includes(k) || typeof spec !== "object" || spec === null) return error("invalid", `kind must be one of ${ROUTING_KINDS.join(", ")}, not '${k}'`, 400);
-      const { model, fallbacks, locked, effort, instructions } = spec as Record<string, unknown>;
+      const { model, fallbacks, locked, effort, instructions, keep_order } = spec as Record<string, unknown>;
+      if (keep_order !== undefined) {
+        if (keep_order !== true || scope !== "user" || !(WEIGHTS as readonly string[]).includes(k) ||
+            model != null || fallbacks != null || locked != null) {
+          return error("invalid", `${k}: keep_order requires a job size in user scope and no model, fallbacks or lock changes`, 400);
+        }
+        lockChanges.set(k, true);
+        keepOrders[k] = current.tiers[k].values;
+      }
       if (locked != null) {
         if (typeof locked !== "boolean") return error("invalid", `${k}: locked must be true or false`, 400);
         lockChanges.set(k, locked);
@@ -2465,8 +2474,9 @@ export class FakeDaemon {
       }
     }
     const updated: string[] = [];
-    if ((tiers && Object.keys(tiers).length > 0) || clearedTiers.size > 0) {
-      file.routing = { ...file.routing, ...(tiers as Record<string, string[]> | undefined) };
+    const snapshots = Object.fromEntries(Object.entries(keepOrders).filter(([size]) => !file.routing?.[size]));
+    if ((tiers && Object.keys(tiers).length > 0) || clearedTiers.size > 0 || Object.keys(snapshots).length > 0) {
+      file.routing = { ...snapshots, ...file.routing, ...(tiers as Record<string, string[]> | undefined) };
       for (const size of clearedTiers) delete file.routing[size];
       updated.push("routing");
     }

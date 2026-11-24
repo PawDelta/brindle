@@ -1583,6 +1583,7 @@ export interface RoutingSizeOrdersDTO {
  */
 export interface RoutingSavedOrderDTO {
   agent?: string | null;
+  locked?: boolean;
   order: string[];
   scope: "user" | "repo" | "local";
   setting: "routing" | "picker" | "agent_models";

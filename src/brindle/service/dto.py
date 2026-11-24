@@ -1003,6 +1003,7 @@ class RoutingSavedOrderDTO(_DTO):
     setting: Literal["routing", "picker", "agent_models"]
     agent: str | None = None
     order: list[str]
+    locked: bool = False
 
 
 class RoutingSizeOrdersDTO(_DTO):

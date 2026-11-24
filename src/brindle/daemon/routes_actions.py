@@ -1806,6 +1806,7 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
             else:
                 raise ServiceError("invalid", f"{size}: invalid saved order for {scope} scope")
     lock_changes: dict[str, bool] = {}
+    keep_orders: dict[str, list[str]] = {}
     overrides: dict[str, dict[str, str | None]] = {}    # kind -> effort / instructions (None clears)
     extra: dict[str, Any] = {}      # supervisor and reviewer settings the kinds ask for
     # A user-scope change builds on the person's own lists and library, never this repo's.
@@ -1814,6 +1815,13 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
         if kind not in config.ROUTING_KINDS or not isinstance(spec, dict):
             raise ServiceError("invalid", f"kind must be one of {', '.join(config.ROUTING_KINDS)}, not {kind!r}")
         model, fallbacks, locked = spec.get("model"), spec.get("fallbacks"), spec.get("locked")
+        if "keep_order" in spec:
+            if (spec["keep_order"] is not True or scope != "user" or kind not in config.WEIGHTS
+                    or any(value is not None for value in (model, fallbacks, locked))):
+                raise ServiceError("invalid", f"{kind}: keep_order requires a job size in user scope and no model, fallbacks or lock changes")
+            lock_changes[kind] = True
+            if not saved_picker_order(config.user_settings().get(f"routing_{kind}")):
+                keep_orders[kind] = cfg.routing[kind]
         for key in config.KIND_OVERRIDE_FIELDS:
             if key not in spec:
                 continue
@@ -1909,19 +1917,20 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     write, updated = setters[scope], []
     update = {"user": config.update_user, "local": functools.partial(config.update_local, repo),
               "repo": functools.partial(config.update_repo, repo)}[scope]
-    if tiers or clear_tiers:
+    if tiers or clear_tiers or keep_orders:
         replacements = {config.normalize_weight(tier): order for tier, order in (tiers or {}).items()}
 
         def update_tiers(value):
             routing = value if isinstance(value, dict) else {}
-            current = saved_profile_orders(routing, profile_root) if clear_tiers else {}
+            current = saved_profile_orders(routing, profile_root) if clear_tiers or keep_orders else {}
             matching = {size for size, order in clear_tiers.items() if current.get(size) == order}
-            changed_sizes = matching | replacements.keys()
+            snapshots = {size: order for size, order in keep_orders.items() if size not in current}
+            changed_sizes = matching | replacements.keys() | snapshots.keys()
             if not changed_sizes:
                 return config.KEEP_SETTING
             # Drop aliases for changed sizes, too, so they cannot override a canonical key.
             return {**{k: v for k, v in routing.items() if config.normalize_weight(k) not in changed_sizes},
-                    **replacements}
+                    **snapshots, **replacements}
 
         if scope == "user":
             for size in replacements:
