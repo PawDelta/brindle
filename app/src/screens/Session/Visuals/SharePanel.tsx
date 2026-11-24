@@ -35,8 +35,8 @@ export interface SharePeopleTarget {
   invites?(): Promise<{ people: ShareQueued[] }>;
   /* The panel has these answers: the daemon sends a change only once its receipt comes back. */
   ack?(receipts: string[]): Promise<unknown>;
-  /* `receipt`: the unconfirmed change shown, which alone is discarded (a newer one is refused, not lost). */
-  dismiss?(sub: string, receipt?: string | null): Promise<Plan>;
+  /* `rev`: the refused or unconfirmed change shown, which alone is let go (a newer one is refused, not lost). */
+  dismiss?(sub: string, rev: number): Promise<Plan>;
 }
 type Answer = Plan & { invite?: ShareQueued };
 
@@ -62,7 +62,7 @@ const list = (names: string[]) => names.length < 2 ? names.join("") : `${names.s
 /* `sent`: a change (`op`: an invite, or Stop sharing) the daemon is still sending, one the Library
    refused (failed), with why, or one not confirmed (its `receipt` not sent back): the person's to send or discard. */
 type Person = { sub: string; name: string; access: ShareAccessLevel | null; signOff: "required" | "optional" | null;
-  sent?: ShareQueued["state"] | "unconfirmed"; op?: ShareQueued["op"]; why?: string | null; receipt?: string | null };
+  sent?: ShareQueued["state"] | "unconfirmed"; op?: ShareQueued["op"]; why?: string | null; receipt?: string | null; rev?: number };
 type Work = { key: string; label: string; run(): Promise<Plan> };
 /* A write out now, or one the Library refused, kept so Try again sends the same one. */
 type Busy = Record<string, { state: "saving" | "failed"; refused?: Work; why?: string }>;
@@ -213,8 +213,8 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     const had = people.find((p) => p.sub === q.sub);
     const sent: Person["sent"] = q.state === "failed" ? "failed" : q.receipt && !confirming[q.receipt] ? "unconfirmed" : q.state;
     if (sent === "removing") { people = people.filter((p) => p.sub !== q.sub); continue; }
-    const row: Person = q.op === "remove" && had ? { ...had, sent, op: q.op, why: q.error, receipt: q.receipt }
-      : { sub: q.sub, name: had?.name ?? nameFor(q.sub), access: q.access, signOff: q.sign_off, sent, op: q.op, why: q.error, receipt: q.receipt };
+    const row: Person = q.op === "remove" && had ? { ...had, sent, op: q.op, why: q.error, receipt: q.receipt, rev: q.rev }
+      : { sub: q.sub, name: had?.name ?? nameFor(q.sub), access: q.access, signOff: q.sign_off, sent, op: q.op, why: q.error, receipt: q.receipt, rev: q.rev };
     people = had ? people.map((p) => p.sub === q.sub ? row : p) : [...people, row];
   }
   const scopes = access?.scopes ?? [];
@@ -337,11 +337,11 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
       ? <span className="st" title={p.why ?? undefined}><i className="spin" />{p.sent === "sharing" ? "Sharing…" : "Removing…"}</span>
       : p.sent === "unconfirmed" ? <><span className="st">{p.op === "remove" ? "Not stopped yet" : "Not sent yet"}</span>
         {target?.ack && p.receipt && <button className="sp-btn q" data-testid={`share-send-${key}`} onClick={() => confirm(p.receipt!)}>Send</button>}
-        {target?.dismiss && <button className="sp-btn q end" onClick={() => run(personWork(p.sub, "Couldn't discard", (t) => t.dismiss!(p.sub, p.receipt)))}>Discard</button>}</>
+        {target?.dismiss && p.rev !== undefined && <button className="sp-btn q end" onClick={() => run(personWork(p.sub, "Couldn't discard", (t) => t.dismiss!(p.sub, p.rev!)))}>Discard</button>}</>
       : p.sent !== "failed" ? null
       : p.op === "remove" ? <><span className="st bad">Couldn't stop sharing</span>
         <button className="sp-btn q" data-testid={`share-try-${key}`} onClick={() => run(personWork(p.sub, "Couldn't stop sharing", (t) => t.revoke(p.sub)))}>Try again</button>
-        {target?.dismiss && <button className="sp-btn q end" onClick={() => run(personWork(p.sub, "Couldn't save", (t) => t.dismiss!(p.sub)))}>Dismiss</button>}</>
+        {target?.dismiss && p.rev !== undefined && <button className="sp-btn q end" onClick={() => run(personWork(p.sub, "Couldn't save", (t) => t.dismiss!(p.sub, p.rev!)))}>Dismiss</button>}</>
       : <><span className="st bad">Couldn't add</span>
         <button className="sp-btn q" data-testid={`share-try-${key}`} onClick={() => run(personWork(p.sub, "Couldn't add", (t) => t.invite(p.sub, level ?? "comment", p.signOff === "required")))}>Try again</button>
         <button className="sp-btn q end" onClick={() => run(personWork(p.sub, "Couldn't stop sharing", (t) => t.revoke(p.sub)))}>Cancel</button></>;

@@ -218,7 +218,7 @@ it("shows an add from the daemon's answer while the Library can't be read, after
   // The daemon answers at once with the row it will send, and keeps it on this Mac until it lands.
   lib.target.invite = async (sub, access, signOff) => {
     lib.calls.push(`invite ${sub} ${access} ${signOff}`);
-    const q: ShareQueued = { sub, name: null, access, sign_off: signOff ? "required" : null, op: "invite", state: "sharing", error: null, receipt: `r-${sub}` };
+    const q: ShareQueued = { sub, name: null, access, sign_off: signOff ? "required" : null, op: "invite", state: "sharing", error: null, receipt: `r-${sub}`, rev: 1 };
     lib.queue.push(structuredClone(q));
     return { ...lib.plan(), invite: q };
   };
@@ -248,7 +248,7 @@ it("shows an add from the daemon's answer while the Library can't be read, after
   expect(row("lena").dataset.state).toBe("waiting");
 
   // One the Library refused says why, and Try again adds them again.
-  lib.queue.push({ sub: "sam", name: null, access: "view", sign_off: null, op: "invite", state: "failed", error: "The Library refused it.", receipt: null });
+  lib.queue.push({ sub: "sam", name: null, access: "view", sign_off: null, op: "invite", state: "failed", error: "The Library refused it.", receipt: null, rev: 2 });
   fireEvent.click(screen.getByRole("button", { name: "Close share" }));
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Open" })));
   expect(row("sam").dataset.state).toBe("failed");
@@ -263,7 +263,7 @@ it("shows an add from the daemon's answer while the Library can't be read, after
 it("never sends a change by itself that wasn't confirmed, and lets Send try a failed receipt again", async () => {
   // Sam's add was cancelled before its answer arrived: this Mac still has it, unconfirmed.
   const lib = library();
-  lib.queue.push({ sub: "sam", name: null, access: "view", sign_off: null, op: "invite", state: "sharing", error: null, receipt: "r-sam" });
+  lib.queue.push({ sub: "sam", name: null, access: "view", sign_off: null, op: "invite", state: "sharing", error: null, receipt: "r-sam", rev: 1 });
   const ack = lib.target.ack;
   let refuse = true;
   lib.target.ack = (receipts) => refuse ? Promise.reject(new Error("offline")) : ack(receipts);
@@ -280,7 +280,7 @@ it("never sends a change by itself that wasn't confirmed, and lets Send try a fa
 
 it("tries a refused removal again as a removal, never as an add", async () => {
   const lib = library({ people: [{ sub: "sam", name: null, access: "edit", sign_off: null }] });
-  lib.queue.push({ sub: "sam", name: null, access: "edit", sign_off: null, op: "remove", state: "failed", error: "The Library refused it.", receipt: null });
+  lib.queue.push({ sub: "sam", name: null, access: "edit", sign_off: null, op: "remove", state: "failed", error: "The Library refused it.", receipt: null, rev: 1 });
   const revoke = lib.target.revoke;
   lib.target.revoke = (sub) => { lib.queue.length = 0; return revoke(sub); };
   await act(async () => render(<Reader lib={lib} />));

@@ -93,7 +93,8 @@ def dto(row: dict) -> dict:
     state = "failed" if row["failed"] else "removing" if row["op"] == "remove" else "sharing"
     return {"sub": row["sub"], "name": None, "access": row["access"],
             "sign_off": "required" if row["sign_off"] else None, "op": row["op"], "state": state,
-            "error": row["failed"] or row["error"], "receipt": None if row["acked"] else row["receipt"]}
+            "error": row["failed"] or row["error"], "receipt": None if row["acked"] else row["receipt"],
+            "rev": row["id"]}
 
 
 def pending(db: DB, plan_id: str) -> list[dict]:
@@ -110,7 +111,7 @@ def merge(access: dict, rows: list[dict]) -> dict:
     removed is left out, unless that removal was refused."""
     people = {p["sub"]: p for p in access.get("people") or []}
     for row in rows:
-        shown = {k: v for k, v in dto(row).items() if k != "receipt"}
+        shown = {k: v for k, v in dto(row).items() if k not in ("receipt", "rev")}
         if row["op"] == "remove" and not row["failed"]:
             if row["acked"]:            # an unconfirmed removal hasn't been asked for yet: they keep it
                 people.pop(row["sub"], None)
@@ -236,26 +237,30 @@ def withdraw(db: DB, plan_id: str, sub: str, *, store=None) -> dict | None:
         return _insert(c, plan_id, sub, "remove", old["access"], old["sign_off"], *who)
 
 
-def dismiss(db: DB, plan_id: str, sub: str, receipt: Any = None, *, store=None) -> None:
+def dismiss(db: DB, plan_id: str, sub: str, rev: Any, *, store=None) -> None:
     """Let a refused change go (the Library keeps what it has), or discard
-    the unconfirmed change named by ``receipt`` (its answer may never have
-    reached the app), with any older unconfirmed ones. Refused when it isn't
-    the person's newest change any more: a newer one (another panel's, say)
-    is never discarded by a request about an older one."""
-    if receipt is not None and not isinstance(receipt, str):
-        raise ServiceError("invalid", "receipt is the one the change was shown with", 400)
+    an unconfirmed one (its answer may never have reached the app) with any
+    older unconfirmed ones. ``rev`` is the change the panel showed
+    (``dto``'s rev): refused when it isn't the person's newest change any
+    more, so a newer one (another panel's, say, sent or refused since) is
+    never let go by a request about an older one."""
+    try:
+        rev = int(rev)
+    except (TypeError, ValueError):
+        raise ServiceError("invalid", "rev is the change as the panel showed it", 400) from None
     who = _asker(db, plan_id, sub, store)
     with db.tx() as c:
         old = _newest(c, plan_id, sub)
         if old is None or not (old["failed"] or not old["acked"]):
             raise ServiceError("not_found", "nothing refused or unsent to let go for them", 404)
         _theirs(old, who)
+        if rev != old["id"]:
+            raise ServiceError("conflict", "they were changed again since: read the list again", 409)
         if old["failed"]:
             c.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=?", (plan_id, sub))
-            return
-        if receipt != old["receipt"]:
-            raise ServiceError("conflict", "they were changed again since: read the list again", 409)
-        c.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=? AND acked=0 AND id<=?", (plan_id, sub, old["id"]))
+        else:
+            c.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=? AND acked=0 AND id<=?",
+                      (plan_id, sub, old["id"]))
 
 
 def ack(db: DB, plan_id: str, receipts: Any) -> int:

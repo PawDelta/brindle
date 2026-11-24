@@ -186,17 +186,35 @@ def test_stop_sharing_while_an_earlier_grant_is_being_sent_is_a_removal(panel, b
     assert len(sent(backend, f"DELETE {BASE}/share/user/bo")) == 1 and person(app, pid, "bo") is None
 
 
-def test_discard_from_one_panel_never_loses_another_panels_newer_change(panel, backend, db):
+def rev(got):
+    return got.json()["invite"]["rev"]
+
+
+@pytest.mark.parametrize("newer_is", [
+    "unconfirmed",
+    pytest.param("refused", marks=pytest.mark.variant("the other panel's newer change was sent and refused before "
+                                                     "the stale Discard: its Try again must survive")),
+])
+def test_discard_from_one_panel_never_loses_another_panels_newer_change(panel, backend, db, newer_is):
     pid, library, app = panel
-    older = receipt(app.post(f"/v1/plans/{pid}/people", json=ANN))         # shown unconfirmed in one panel
+    older = rev(app.post(f"/v1/plans/{pid}/people", json=ANN))             # shown unconfirmed in one panel
     newer = app.put(f"/v1/plans/{pid}/people/ann", json={"access": "edit"})    # another panel, meanwhile
-    assert app.delete(f"/v1/plans/{pid}/invites/ann?receipt={older}").status_code == 409
-    ack(app, pid, receipt(newer))
+    if newer_is == "refused":
+        library.refuse_person = True
+        ack(app, pid, receipt(newer))
+        assert queued(app, pid)["ann"]["state"] == "failed"
+    assert app.delete(f"/v1/plans/{pid}/invites/ann?rev={older}").status_code == 409
+    library.refuse_person = False
+    if newer_is == "refused":
+        assert queued(app, pid)["ann"]["state"] == "failed"                 # still there to try again
+        assert add_person(app, pid, {"sub": "ann", "access": "edit"}).status_code == 202     # Try again
+    else:
+        ack(app, pid, receipt(newer))
     assert person(app, pid, "ann")["access"] == "edit" and share_invites.pending(db, pid) == []
 
     # Discarding the one shown when it is still the newest lets it go, unsent.
-    shown = receipt(app.post(f"/v1/plans/{pid}/people", json={"sub": "bo", "access": "view"}))
-    assert app.delete(f"/v1/plans/{pid}/invites/bo?receipt={shown}").status_code == 200
+    shown = rev(app.post(f"/v1/plans/{pid}/people", json={"sub": "bo", "access": "view"}))
+    assert app.delete(f"/v1/plans/{pid}/invites/bo?rev={shown}").status_code == 200
     assert share_invites.pending(db, pid) == [] and person(app, pid, "bo") is None
 
 
