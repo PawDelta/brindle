@@ -176,6 +176,7 @@ def held_refresh(backend, until):
     backend.routes["POST /token/refresh"] = refresh
 
 
+@pytest.mark.variant("race: concurrent callers after a suspend must share one rotation, never spend the token twice")
 def test_callers_on_an_expired_token_share_one_refresh(parts, backend, monkeypatch):
     client, store, holder = expired(parts, backend, monkeypatch)
     callers = 4
