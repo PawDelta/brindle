@@ -260,6 +260,24 @@ it("shows an add from the daemon's answer while the Library can't be read, after
   expect(lib.calls).toEqual(["invite lena comment false", "invite sam view false"]);
 });
 
+it("never sends a change by itself that wasn't confirmed, and lets Send try a failed receipt again", async () => {
+  // Sam's add was cancelled before its answer arrived: this Mac still has it, unconfirmed.
+  const lib = library();
+  lib.queue.push({ sub: "sam", name: null, access: "view", sign_off: null, op: "invite", state: "sharing", error: null, receipt: "r-sam" });
+  const ack = lib.target.ack;
+  let refuse = true;
+  lib.target.ack = (receipts) => refuse ? Promise.reject(new Error("offline")) : ack(receipts);
+  await act(async () => render(<Reader lib={lib} />));
+  expect(row("sam").dataset.state).toBe("unconfirmed");
+  expect(lib.acks).toEqual([]);                                           // shown, not sent
+  await act(async () => fireEvent.click(within(row("sam")).getByRole("button", { name: "Send" })));
+  expect(row("sam").dataset.state).toBe("unconfirmed");                  // its receipt didn't get through: still the person's
+  refuse = false;
+  await act(async () => fireEvent.click(within(row("sam")).getByRole("button", { name: "Send" })));
+  expect(lib.acks).toEqual(["r-sam"]);
+  expect(row("sam").dataset.state).toBe("sharing");
+});
+
 it("tries a refused removal again as a removal, never as an add", async () => {
   const lib = library({ people: [{ sub: "sam", name: null, access: "edit", sign_off: null }] });
   lib.queue.push({ sub: "sam", name: null, access: "edit", sign_off: null, op: "remove", state: "failed", error: "The Library refused it.", receipt: null });

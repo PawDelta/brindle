@@ -1382,15 +1382,15 @@ CREATE TABLE IF NOT EXISTS plan_invites (
     plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
     sub TEXT NOT NULL,
     receipt TEXT NOT NULL UNIQUE,        -- the app sends it back once it has the answer that named it
-    acked INTEGER NOT NULL DEFAULT 0,    -- 1 once it did: only then may it be sent
-    boot TEXT NOT NULL,                  -- the daemon that wrote it: an earlier one's unacknowledged rows are dropped
+    acked INTEGER NOT NULL DEFAULT 0,    -- 1 once it did, or the person sent it from the panel: only then is it sent
     op TEXT NOT NULL DEFAULT 'invite',   -- invite | remove
     access TEXT NOT NULL,                -- view | comment | edit
     sign_off INTEGER NOT NULL DEFAULT 0,
     owner TEXT NOT NULL,                 -- the account that asked: sent only as that account
     org_id TEXT,
     tries INTEGER NOT NULL DEFAULT 0,    -- since the person asked: the backoff and its limit
-    sent INTEGER NOT NULL DEFAULT 0,     -- 1 once any attempt for this person reached for the Library
+    sent INTEGER NOT NULL DEFAULT 0,     -- 1 while the Library may hold a grant for this person from here:
+                                         -- set by any attempt to share, kept by later changes, cleared by a removal
     due_at REAL NOT NULL,
     error TEXT,                          -- why the last attempt didn't land; it is still being tried
     failed TEXT,                         -- the Library refused it: shown with Try again, not sent until then

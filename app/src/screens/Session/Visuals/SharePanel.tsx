@@ -58,9 +58,10 @@ const scopeKey = (s: Scope) => `${s.kind}:${s.id}`;
 const fromDirectory = (p: LibraryPerson): SharePerson => ({ id: p.sub, display_name: p.display_name || p.name || "", email: p.email, teams: [], role: "", on_plan: false });
 const list = (names: string[]) => names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 
-/* `sent`: a change (`op`: an invite, or Stop sharing) the daemon is still sending, or the Library refused (failed), with why. */
+/* `sent`: a change (`op`: an invite, or Stop sharing) the daemon is still sending, one the Library
+   refused (failed), with why, or one not confirmed (its `receipt` not sent back): the person's to send or discard. */
 type Person = { sub: string; name: string; access: ShareAccessLevel | null; signOff: "required" | "optional" | null;
-  sent?: ShareQueued["state"]; op?: ShareQueued["op"]; why?: string | null };
+  sent?: ShareQueued["state"] | "unconfirmed"; op?: ShareQueued["op"]; why?: string | null; receipt?: string | null };
 type Work = { key: string; label: string; run(): Promise<Plan> };
 /* A write out now, or one the Library refused, kept so Try again sends the same one. */
 type Busy = Record<string, { state: "saving" | "failed"; refused?: Work; why?: string }>;
@@ -112,10 +113,23 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const latest = useRef({ target, writes, onBusy, onStopAll });
   latest.current = { target, writes, onBusy, onStopAll };
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; accessGeneration.current++; searchGeneration.current++; invitesGeneration.current++; }; }, []);
-  // The daemon sends a change only once its answer reached the panel: each one it shows is sent back.
-  const receive = (rows: ShareQueued[]) => {
-    const receipts = rows.map((q) => q.receipt).filter((r): r is string => !!r);
-    if (receipts.length) latest.current.target?.ack?.(receipts).catch(() => {});
+  // The daemon sends a change only once the receipt its answer carried comes back: the panel sends it
+  // for each answer it gets, and for an unconfirmed one when the person chooses Send. A receipt that
+  // couldn't be sent leaves the change unconfirmed, with Send to try again.
+  const [confirming, setConfirming] = useState<Record<string, true>>({});
+  const confirm = (receipt: string) => {
+    const ack = latest.current.target?.ack;
+    if (!ack) return;
+    setConfirming((old) => ({ ...old, [receipt]: true }));
+    const settled = (ok: boolean) => {
+      if (!mounted.current) return;
+      setConfirming((old) => { const next = { ...old }; delete next[receipt]; return next; });
+      if (ok) {
+        invitesGeneration.current++;
+        setQueued((old) => Object.fromEntries(Object.entries(old).map(([sub, q]) => [sub, q.receipt === receipt ? { ...q, receipt: null } : q])));
+      }
+    };
+    ack([receipt]).then(() => settled(true), () => settled(false));
   };
   useEffect(() => {
     if (!visible) return;
@@ -140,15 +154,14 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     // What is still being sent comes from this Mac: it shows while the Library can't be reached.
     target.invites?.().then((got) => {
       if (invitesGeneration.current !== invitesAt) return;
+      // One still unconfirmed here (its answer may never have reached the app) waits for the person.
       setQueued(Object.fromEntries(got.people.map((q) => [q.sub, q])));
-      // A change whose own answer never arrived (the app went away meanwhile) is shown now: the person has it.
-      receive(got.people);
     }, () => {});
   }, [visible, target, reload, shared]);
   // A change the daemon is still sending lands in the background: the plan changes when it does
   // (or is refused), so the list is read again then.
   const sending = useRef(false);
-  sending.current = Object.values(queued).some((q) => q.state !== "failed")
+  sending.current = Object.values(queued).some((q) => q.state !== "failed" && !q.receipt)
     || !!access?.people.some((p) => p.state === "sharing" || p.state === "removing");
   useEffect(() => {
     if (sending.current) setReload((n) => n + 1);
@@ -193,12 +206,13 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   ];
   people.push(...Object.values(added).filter((a) => !people.some((p) => p.sub === a.sub)));
   // Then what is still being sent: an invite at the access asked for; someone being removed leaves the
-  // list, unless the Library refused it (they still have it).
+  // list, unless the Library refused it or it isn't confirmed yet (they still have it).
   for (const q of Object.values(queued)) {
     const had = people.find((p) => p.sub === q.sub);
-    if (q.op === "remove" && q.state !== "failed") { people = people.filter((p) => p.sub !== q.sub); continue; }
-    const row: Person = q.op === "remove" && had ? { ...had, sent: q.state, op: q.op, why: q.error }
-      : { sub: q.sub, name: had?.name ?? nameFor(q.sub), access: q.access, signOff: q.sign_off, sent: q.state, op: q.op, why: q.error };
+    const sent: Person["sent"] = q.state === "failed" ? "failed" : q.receipt && !confirming[q.receipt] ? "unconfirmed" : q.state;
+    if (sent === "removing") { people = people.filter((p) => p.sub !== q.sub); continue; }
+    const row: Person = q.op === "remove" && had ? { ...had, sent, op: q.op, why: q.error, receipt: q.receipt }
+      : { sub: q.sub, name: had?.name ?? nameFor(q.sub), access: q.access, signOff: q.sign_off, sent, op: q.op, why: q.error, receipt: q.receipt };
     people = had ? people.map((p) => p.sub === q.sub ? row : p) : [...people, row];
   }
   const scopes = access?.scopes ?? [];
@@ -247,10 +261,10 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const personWork = (sub: string, label: string, call: (t: SharePeopleTarget) => Promise<Answer>): Work =>
     ({ key: `person:${sub}`, label, run: async () => {
       const got = await call(latest.current.target!);
-      if (got.invite) receive([got.invite]);
       if (mounted.current) {
         invitesGeneration.current++;
         setQueued((old) => { const next = { ...old }; if (got.invite) next[sub] = got.invite; else delete next[sub]; return next; });
+        if (got.invite?.receipt) confirm(got.invite.receipt);      // this answer arrived: its change may go
       }
       return got;
     } });
@@ -315,8 +329,13 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     const why = busy[key]?.state === "failed" ? busy[key]?.why : p.sent === "failed" ? p.why ?? undefined : undefined;
     // The daemon's own answer for an add it sends in the background: a refusal keeps Try again and Cancel.
     // A refused removal is tried again as a removal, never as an add: they may only lose access here.
+    // One not confirmed (its answer may never have reached the app, or its receipt couldn't be sent)
+    // is never sent by itself: Send confirms it, Discard lets it go.
     const sentStatus = () => p.sent === "sharing" || p.sent === "removing"
       ? <span className="st" title={p.why ?? undefined}><i className="spin" />{p.sent === "sharing" ? "Sharing…" : "Removing…"}</span>
+      : p.sent === "unconfirmed" ? <><span className="st">{p.op === "remove" ? "Not stopped yet" : "Not sent yet"}</span>
+        {target?.ack && p.receipt && <button className="sp-btn q" data-testid={`share-send-${key}`} onClick={() => confirm(p.receipt!)}>Send</button>}
+        {target?.dismiss && <button className="sp-btn q end" onClick={() => run(personWork(p.sub, "Couldn't discard", (t) => t.dismiss!(p.sub)))}>Discard</button>}</>
       : p.sent !== "failed" ? null
       : p.op === "remove" ? <><span className="st bad">Couldn't stop sharing</span>
         <button className="sp-btn q" data-testid={`share-try-${key}`} onClick={() => run(personWork(p.sub, "Couldn't stop sharing", (t) => t.revoke(p.sub)))}>Try again</button>

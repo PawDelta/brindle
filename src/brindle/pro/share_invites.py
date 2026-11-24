@@ -7,9 +7,10 @@ the daemon lands it in the background with share_access.plan_write.
   (``ack``). HTTP can't say whether an answer reached the app (a server
   writes to a closed connection without an error), so the app's own receipt
   is the confirmation. One it never got (the app went away, the request was
-  cancelled) is never sent: it stays unacknowledged, shown with its receipt
-  when the panel next reads it (which then acknowledges it, the person having
-  now seen it), and the next daemon drops the ones an earlier one left.
+  cancelled), or whose receipt couldn't be sent back, is never sent by
+  itself: it stays unconfirmed, a restart included, and the panel shows it
+  as not sent, for the person to send (its receipt, explicitly) or discard
+  (``dismiss``).
 - One row per change, ``id`` never reused: a person's newest row is what the
   panel shows, and their newest acknowledged row is what is sent, so an
   acknowledged change is never held up by a newer one that isn't, and an
@@ -53,8 +54,6 @@ MOST_TRIES = 20             # about an hour and a quarter of no answer: then it 
 
 clock = time.time            # tests drive it
 
-BOOT = secrets.token_hex(8)  # this daemon: its own unacknowledged rows may still be acknowledged
-
 _locks: dict[str, threading.Lock] = {}
 _locks_lock = threading.Lock()
 
@@ -87,7 +86,10 @@ def _newest(c: sqlite3.Connection, plan_id: str, sub: str) -> dict | None:
 def dto(row: dict) -> dict:
     """A person's newest change as the panel shows it: ``op`` invite or
     remove; ``state`` sharing or removing (on its way), or failed (refused:
-    ``error`` says why); ``receipt`` while the app hasn't acknowledged it."""
+    ``error`` says why); ``receipt`` while it isn't confirmed. The app sends
+    the receipt back for an answer it got; one it reads here instead (its
+    answer may never have arrived: the request was cancelled) is the
+    person's to send or discard, never sent by itself."""
     state = "failed" if row["failed"] else "removing" if row["op"] == "remove" else "sharing"
     return {"sub": row["sub"], "name": None, "access": row["access"],
             "sign_off": "required" if row["sign_off"] else None, "op": row["op"], "state": state,
@@ -110,7 +112,8 @@ def merge(access: dict, rows: list[dict]) -> dict:
     for row in rows:
         shown = {k: v for k, v in dto(row).items() if k != "receipt"}
         if row["op"] == "remove" and not row["failed"]:
-            people.pop(row["sub"], None)
+            if row["acked"]:            # an unconfirmed removal hasn't been asked for yet: they keep it
+                people.pop(row["sub"], None)
             continue
         if row["sub"] in people:
             shown["name"] = people[row["sub"]].get("name")
@@ -146,10 +149,12 @@ def _identity(store=None) -> tuple[str, str | None]:
 
 def _insert(c: sqlite3.Connection, plan_id: str, sub: str, op: str, access: str, sign_off: int,
             owner: str, org_id: str | None) -> dict:
+    """A new change for the person, carrying whether the Library may already hold a grant for them."""
     now = clock()
-    c.execute("INSERT INTO plan_invites (plan_id, sub, receipt, boot, op, access, sign_off, owner, org_id, due_at,"
+    sent = c.execute("SELECT MAX(sent) FROM plan_invites WHERE plan_id=? AND sub=?", (plan_id, sub)).fetchone()[0]
+    c.execute("INSERT INTO plan_invites (plan_id, sub, receipt, op, access, sign_off, owner, org_id, sent, due_at,"
               " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-              (plan_id, sub, secrets.token_urlsafe(16), BOOT, op, access, sign_off, owner, org_id, now, now))
+              (plan_id, sub, secrets.token_urlsafe(16), op, access, sign_off, owner, org_id, sent or 0, now, now))
     return _newest(c, plan_id, sub)
 
 
@@ -170,8 +175,18 @@ def record(db: DB, plan_id: str, sub: Any, access: Any, sign_off: Any, *, store=
         return _insert(c, plan_id, sub, "invite", access, int(sign_off), owner, org_id)
 
 
-def _mine(old: dict, store) -> None:
-    if _identity(store) != (old["owner"], old["org_id"]):
+def _asker(db: DB, plan_id: str, sub: str, store) -> tuple[str, str | None] | None:
+    """The signed-in account, read before the write's transaction, which
+    compares it with the row it then reads; None when nothing is out for
+    ``sub`` (no sign-in needed then)."""
+    if _newest(db.conn, plan_id, sub) is None:
+        return None
+    return _identity(store)
+
+
+def _theirs(old: dict, who: tuple[str, str | None]) -> None:
+    """Only the account a pending change belongs to changes it, compared on the row read in the write itself."""
+    if (old["owner"], old["org_id"]) != who:
         raise AccountChanged()
 
 
@@ -185,47 +200,54 @@ def change(db: DB, plan_id: str, sub: str, field: str, value: Any, *, store=None
         value = sa._access(value)
     elif not isinstance(value, bool):
         raise ServiceError("invalid", "must is true or false", 400)
-    old = _newest(db.conn, plan_id, sub)
-    if old is None:
+    who = _asker(db, plan_id, sub, store)
+    if who is None:
         return None
-    _mine(old, store)
     with db.tx() as c:
         old = _newest(c, plan_id, sub)
         if old is None:
             return None             # it landed meanwhile: the route writes it now
+        _theirs(old, who)
         if old["op"] == "remove":
             raise ServiceError("conflict", "they're being removed from this plan", 409)
         new = {**old, field: int(value) if field == "sign_off" else value}
-        return _insert(c, plan_id, sub, "invite", new["access"], new["sign_off"], old["owner"], old["org_id"])
+        return _insert(c, plan_id, sub, "invite", new["access"], new["sign_off"], *who)
 
 
 def withdraw(db: DB, plan_id: str, sub: str, *, store=None) -> dict | None:
-    """Stop sharing with a person whose invite is still out: one never sent
-    is dropped here; one that may have landed is removed, sent after it (a
-    refused removal is asked again). None when nothing is out for them;
-    ``{}`` when it was dropped; else the removal's row."""
-    old = _newest(db.conn, plan_id, sub)
-    if old is None:
+    """Stop sharing with a person whose invite is still out: one the Library
+    can't hold a grant from (never sent, nothing landed) is dropped here;
+    otherwise it is removed, sent after what is out (a refused removal is
+    asked again). None when nothing is out for them; ``{}`` when it was
+    dropped; else the removal's row."""
+    who = _asker(db, plan_id, sub, store)
+    if who is None:
         return None
-    _mine(old, store)
     with db.tx() as c:
         old = _newest(c, plan_id, sub)
         if old is None:
             return None
-        sent = c.execute("SELECT MAX(sent) FROM plan_invites WHERE plan_id=? AND sub=?", (plan_id, sub)).fetchone()[0]
-        if old["op"] == "invite" and not sent:
+        _theirs(old, who)
+        if old["op"] == "invite" and not old["sent"]:
             c.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=?", (plan_id, sub))
             return {}
-        return _insert(c, plan_id, sub, "remove", old["access"], old["sign_off"], old["owner"], old["org_id"])
+        return _insert(c, plan_id, sub, "remove", old["access"], old["sign_off"], *who)
 
 
-def dismiss(db: DB, plan_id: str, sub: str) -> None:
-    """Let a refused change go: the Library keeps what it has."""
+def dismiss(db: DB, plan_id: str, sub: str, *, store=None) -> None:
+    """Let a refused change go (the Library keeps what it has), or discard
+    changes the person was never shown as sent (unconfirmed: their answer
+    may never have reached the app)."""
+    who = _asker(db, plan_id, sub, store)
     with db.tx() as c:
         old = _newest(c, plan_id, sub)
-        if old is None or not old["failed"]:
-            raise ServiceError("not_found", "nothing refused to dismiss for them", 404)
-        c.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=?", (plan_id, sub))
+        if old is None or not (old["failed"] or not old["acked"]):
+            raise ServiceError("not_found", "nothing refused or unsent to let go for them", 404)
+        _theirs(old, who)
+        if old["failed"]:
+            c.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=?", (plan_id, sub))
+        else:
+            c.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=? AND acked=0", (plan_id, sub))
 
 
 def ack(db: DB, plan_id: str, receipts: Any) -> int:
@@ -255,12 +277,6 @@ def drop_all(db: DB, plan_id: str) -> None:
     db.conn.execute("DELETE FROM plan_invites WHERE plan_id=?", (plan_id,))
 
 
-def _drop_earlier(db: DB) -> None:
-    """Changes an earlier daemon wrote that the app never acknowledged: no
-    answer naming them can reach it now, so they are let go."""
-    db.conn.execute("DELETE FROM plan_invites WHERE acked=0 AND boot!=?", (BOOT,))
-
-
 # -- the daemon's side: sent in the background --------------------------------------------
 
 
@@ -288,9 +304,7 @@ _DUE = ("SELECT * FROM plan_invites p WHERE plan_id=? AND acked=1 AND failed IS 
 def run(db: DB, plan_id: str | None = None, *, now: float | None = None, client=None, store=None) -> int:
     """Send the due changes, of ``plan_id`` or (the watch) every plan; how many landed."""
     now = clock() if now is None else now
-    if plan_id is None:
-        _drop_earlier(db)
-    ids = [plan_id] if plan_id else [r[0] for r in db.conn.execute(
+    ids =[plan_id] if plan_id else [r[0] for r in db.conn.execute(
         "SELECT DISTINCT plan_id FROM plan_invites WHERE acked=1 AND failed IS NULL AND due_at<=?", (now,))]
     landed = 0
     for pid in ids:
@@ -322,8 +336,13 @@ def _run_plan(db: DB, plan_id: str, now: float, client, store) -> int:
             db.conn.execute("UPDATE plan_invites SET failed=?, error=NULL WHERE id=?", (why, row["id"]))
         else:
             landed += 1
-            db.conn.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=? AND id<=?",
-                            (plan_id, row["sub"], row["id"]))
+            with db.tx() as c:
+                # What the Library now holds for them, for any newer change still out: a grant after
+                # an invite (so Stop sharing then is sent, never dropped), none after a removal.
+                c.execute("UPDATE plan_invites SET sent=? WHERE plan_id=? AND sub=? AND id>?",
+                          (int(row["op"] == "invite"), plan_id, row["sub"], row["id"]))
+                c.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=? AND id<=?",
+                          (plan_id, row["sub"], row["id"]))
         _changed(db, plan_id)
 
 

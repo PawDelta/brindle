@@ -625,12 +625,13 @@ def plan_invites(db: DB, request: Request) -> Any:
 
 
 def plan_invite_dismiss(db: DB, params: dict, body: dict) -> Any:
-    """Let a refused change to one person go; the Library keeps what it has."""
+    """Let a refused change to one person go, or discard one never confirmed;
+    the Library keeps what it has."""
     from brindle import plan_docs
     from brindle.pro import share_invites
 
     plan_docs._plan(db, params["id"])
-    share_invites.dismiss(db, params["id"], params["sub"])
+    _library_call(lambda sd: share_invites.dismiss(db, params["id"], params["sub"]))
     return _plan_now(db, params["id"])
 
 
