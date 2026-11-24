@@ -91,13 +91,21 @@ def _must(raw: Any) -> str:
     return "required" if raw else "none"
 
 
-def invite(call: Call, sub: Any, access: Any, sign_off: Any) -> dict | None:
+def _design(call: Call, answer: dict) -> dict:
+    """The design view a share or unshare answered with, read again when the
+    Library's answer leaves it out (one older than per-person sharing): the
+    review state kept here must show the sign-off that write just asked for."""
+    design = answer.get("design")
+    return design if isinstance(design, dict) else call("GET", "/design")
+
+
+def invite(call: Call, sub: Any, access: Any, sign_off: Any) -> dict:
     """Give one person the plan at ``access``, with or without sign-off, in
     one Library transaction: read access never shows before the sign-off it
     comes with. The design view after it."""
     sub, access = _sub(sub), _access(access)
-    return call("POST", "/share", {"scope": {"kind": "user", "id": sub}, "access": access,
-                                   "sign_off": _must(sign_off)}).get("design")
+    return _design(call, call("POST", "/share", {"scope": {"kind": "user", "id": sub}, "access": access,
+                                                 "sign_off": _must(sign_off)}))
 
 
 def change(call: Call, sub: Any, access: Any) -> dict:
@@ -111,9 +119,9 @@ def sign_off(call: Call, sub: Any, must: Any) -> dict:
     return call("PUT", _person(_sub(sub)), {"sign_off": _must(must)})
 
 
-def revoke(call: Call, sub: Any) -> dict | None:
+def revoke(call: Call, sub: Any) -> dict:
     """Stop sharing with one person: their share, grants and sign-off go together."""
-    return call("DELETE", f"/share/user/{quote(_sub(sub), safe='')}").get("design")
+    return _design(call, call("DELETE", f"/share/user/{quote(_sub(sub), safe='')}"))
 
 
 def revoke_scope(call: Call, kind: Any, scope_id: Any) -> dict:
