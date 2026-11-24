@@ -1421,10 +1421,13 @@ def sign_off(db: DB, plan_id: str, rev: Any, *, version: Any = None, client=None
     if plans.came_in_as(db, p, version):
         rev = p["rev"]          # an earlier sync brought the version on screen in: it is this revision
     plan_docs._on_screen(p, rev)
-    doc_templates.require(db, p["id"], doc_templates.SIGN_OFF, plan_docs.current(db, p)["sections"])
+    if version is None:
+        doc_templates.require(db, p["id"], doc_templates.SIGN_OFF, plan_docs.current(db, p)["sections"])
     client, store = ad._session(client, store)
     sync(db, p["id"], client=client, store=store)
     p = plans.caught_up(db, p, rev, version)
+    if version is not None:     # the frozen version is signed as its own text, as it came in here
+        doc_templates.require(db, p["id"], doc_templates.SIGN_OFF, plan_docs.revision(db, p["id"])["sections"])
     share_ = link(db, p["id"])
     if share_["local_rev"] != p["rev"]:
         raise RuntimeError(f"r{p['rev']} isn't the Library's current revision, so it can't be signed off")

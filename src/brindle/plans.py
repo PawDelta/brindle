@@ -1120,15 +1120,20 @@ def settle_held_approval(db: DB, plan_id: str) -> None:
     found = gate(db, p)
     if found is None:
         return
+    version = wanted.get("version")
+    if version is not None:
+        # A frozen version approved: only that version, as it came in here (a new revision or not), is applied.
+        wanted["rev"] = p["rev"] if came_in_as(db, p, version) else None
     if wanted["rev"] != p["rev"]:
-        _drop_held_approval(db, p, f"Your approval of r{wanted['rev']} wasn't applied: the plan has changed since "
+        what = f"version {version}" if version is not None else f"r{wanted['rev']}"
+        _drop_held_approval(db, p, f"Your approval of {what} wasn't applied: the plan has changed since "
                                    "you approved it. Read the new revision and approve again.")
     elif found["state"] != "ready":
         _drop_held_approval(db, p, f"Your approval wasn't applied: {found['reason']}")
     else:
         try:
             decide(db, plan_id, wanted["rev"], True, wanted["picks"], wanted["comments"], wanted["note"],
-                   person=True, attachments=wanted["attachments"], confirmed=True)
+                   person=True, attachments=wanted["attachments"], confirmed=True, version=version)
         except ServiceError as e:
             _drop_held_approval(db, p, f"Your approval wasn't applied: {e.message}")
 
@@ -1161,10 +1166,14 @@ def caught_up(db: DB, p: dict, rev: int, version: int | None) -> dict:
 
 def came_in_as(db: DB, p: dict, version: int | None) -> bool:
     """Whether plan ``p``'s head is the Library's frozen ``version`` as it came in here."""
-    if version is None:
-        return False
-    share = db.conn.execute("SELECT remote_rev, local_rev FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
-    return share is not None and share["remote_rev"] == version and share["local_rev"] == p["rev"]
+    return version is not None and _is_version(db.conn, p["id"], p["rev"], version) is True
+
+
+def _is_version(c, plan_id: str, rev: int, version: int) -> bool | None:
+    """Whether revision ``rev`` is the Library's ``version`` here, read on
+    connection ``c``; None for a plan that isn't shared (it has no versions)."""
+    share = c.execute("SELECT remote_rev, local_rev FROM plan_shares WHERE plan_id=?", (plan_id,)).fetchone()
+    return None if share is None else share["remote_rev"] == version and share["local_rev"] == rev
 
 
 def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, comments: Any = None,
@@ -1215,7 +1224,7 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
         raise ServiceError("writing", "the supervisor is still writing this plan", 409)
     if p["state"] != "open":
         raise ServiceError("decided", "this revision is already decided", 409)
-    if approved:
+    if approved and version is None:
         doc_templates.require(db, p["id"], doc_templates.SIGN_OFF, plan_docs.current(db, p)["sections"])
     unconfirmed, was_ready = None, False
     if approved and not confirmed:
@@ -1226,6 +1235,9 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
             # The sync may have brought in the version on screen as a new revision: judge that one.
             p = caught_up(db, p, rev, version)
             rev = p["rev"]
+    if approved and version is not None and unconfirmed is None:
+        # A frozen version is approved as its own text, as it came in here, never the draft's cached one.
+        doc_templates.require(db, p["id"], doc_templates.SIGN_OFF, plan_docs.revision(db, p["id"])["sections"])
     titles = anchors(p)
     from brindle import plan_answers
 
@@ -1240,8 +1252,9 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     visuals._refuse_secrets([("your note", note), *((f"your comment on {titles[c['section']]}", c["text"])
                                                     for c in comments)])
     if unconfirmed is not None:
-        held = _hold_approval(db, p, unconfirmed, was_ready, {"rev": rev, "picks": picks, "comments": comments,
-                                                              "note": note, "attachments": attachments})
+        held = _hold_approval(db, p, unconfirmed, was_ready, {"rev": rev, "version": version, "picks": picks,
+                                                              "comments": comments, "note": note,
+                                                              "attachments": attachments})
         raise ServiceError("gate_unverified", UNCONFIRMED[unconfirmed], 503, reason=unconfirmed, approval_held=held)
     files = plan_docs._attachments(db, p, attachments)
     at = time.time()
@@ -1259,6 +1272,9 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
             shut = _gate(c, p)
             if shut is not None and shut["state"] in GATE_SHUT:
                 raise ServiceError("gate_closed", shut["reason"], 409)
+            if version is not None and _is_version(c, p["id"], rev, version) is False:
+                raise ServiceError("stale", f"version {version} isn't the one out for sign-off now; read the plan "
+                                   "again", 409, rev=rev)
         claimed = c.execute("UPDATE plans SET state=?, decision=?, updated_at=? WHERE id=? AND rev=? AND state='open'",
                             (state, record, at, p["id"], rev)).rowcount == 1
         if claimed:
