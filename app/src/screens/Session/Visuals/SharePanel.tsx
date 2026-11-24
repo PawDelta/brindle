@@ -79,6 +79,8 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const [highlight, setHighlight] = useState(0);
   const [found, setFound] = useState<SharePerson[]>([]);
   const [searchState, setSearchState] = useState<"loading" | "ready" | "error">("ready");
+  /* Why the last search failed, as the daemon said: a sign-in held up on this Mac reads differently from a refusal. */
+  const [searchWhy, setSearchWhy] = useState("");
   const [again, setAgain] = useState(0);
   const [adding, setAdding] = useState<{ sub: string; name: string; email: string; access: ShareAccessLevel; signOff: boolean } | null>(null);
   const [busy, setBusy] = useState<Busy>({});
@@ -129,7 +131,11 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
       setFound(r.people);
       setHighlight(0);
       setSearchState("ready");
-    }, () => { if (searchGeneration.current === generation) setSearchState("error"); });
+    }, (e: unknown) => {
+      if (searchGeneration.current !== generation) return;
+      setSearchWhy(e instanceof Error ? e.message : "");
+      setSearchState("error");
+    });
   }, [searching, shared, typed, team, again]);
   const local = directory.map(fromDirectory).filter((p) => !typed.trim() || `${p.display_name} ${p.email}`.toLowerCase().includes(typed.trim().toLowerCase()));
   const results = shared ? found : local;
@@ -328,7 +334,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
       </div>
         : !searching ? (!listed && <p className="hint">Only you can open this plan. Add a person or a team to share it.</p>)
         : searchState === "loading" && shared ? <div data-testid="share-search-loading"><div className="sweep" /><div className="rows">{[96, 132, 78].map((w) => <div className="r" key={w}><i className="av skv" /><i className="sk" style={{ width: w }} /></div>)}</div></div>
-        : searchState === "error" && shared ? <div className="msg bad" role="alert" data-testid="share-search-error"><span className="grow">Couldn't search people.</span><button className="sp-btn q end" onClick={() => setAgain((n) => n + 1)}>Try again</button></div>
+        : searchState === "error" && shared ? <div className="msg bad" role="alert" data-testid="share-search-error"><span className="grid grow">Couldn't search people.{searchWhy && <span className="note">{searchWhy}</span>}</span><button className="sp-btn q end" onClick={() => setAgain((n) => n + 1)}>Try again</button></div>
         : <div className="rows">
           {teamHits.map((t) => teamRow(t, true))}
           {results.map((p, i) => <div key={p.id} className={`r ${onPlan(p) ? "dim" : i === highlight ? "act" : ""}`} onMouseEnter={() => setHighlight(i)} data-testid={`share-result-${p.id}`}>

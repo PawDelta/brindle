@@ -221,6 +221,15 @@ it("discards a stale search", async () => {
   expect(screen.getByTestId("share-result-lena")).toBeTruthy();
 });
 
+it("says why a search failed", async () => {
+  const lib = library();
+  const target: SharePeopleTarget = { ...lib.target, search: () => Promise.reject(new Error("the daemon's reason")) };
+  await act(async () => render(<SharePanel plan={empty} target={target} writes={{ begin: () => true, end: () => {} }}
+    nameOf={(s) => s} onBusy={() => {}} visible onClose={() => {}} />));
+  await act(async () => fireEvent.focus(screen.getByTestId("share-search")));
+  expect(screen.getByTestId("share-search-error").textContent).toContain("the daemon's reason");
+});
+
 it("updates link view and edit access while retaining the URL, and rolls back a refused change", async () => {
   let stored: DesignShareLink = { available: true, link: { url: "https://plans.pawdelta.com/b/dsl_one", access: "anyone", permission: "view" } };
   let refuse = false;

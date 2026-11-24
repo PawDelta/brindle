@@ -9,6 +9,7 @@ people", and adding the owner failed with a timeout.
   (409 not_in_library), and Try again was refused while the claim stood.
 """
 
+from brindle import spawn
 from brindle.pro import auth
 from pro_fixtures import backend, pro_env, signing_key  # noqa: F401
 from test_plans import session  # noqa: F401
@@ -67,3 +68,16 @@ def test_a_timed_out_first_add_still_searches_and_try_again_lands_on_the_one_doc
     assert len(sent(backend, "POST /analysis-docs")) == 1
     assert sent(backend, f"POST {BASE}/share") == [{"scope": {"kind": "user", "id": "owner_1"}, "access": "comment",
                                                     "sign_off": "none"}]
+
+
+def test_the_refresh_lock_holder_never_waits_for_room(tmp_path, monkeypatch):
+    """Background work on a busy machine holds the sign-in's refresh lock while its keychain read
+    queues for room: every other brindle's request then waits on the lock until lock_timeout."""
+    monkeypatch.setattr(auth, "lock_path", lambda: tmp_path / "refresh.lock")
+    monkeypatch.setattr(spawn, "_gated", True)
+    monkeypatch.setattr(spawn, "_running", 1)
+    monkeypatch.setattr(spawn, "room", lambda: 0.0)          # the machine is busy: nothing that waits may start
+    limit = 0.2                                               # the read's own budget, waiting for room included
+    with spawn.waits_for_room(), auth.refresh_lock():
+        done = spawn.read(["true"], timeout=limit)
+    assert not done.returncode
