@@ -187,14 +187,18 @@ def test_a_request_never_sends_for_a_sign_in_replaced_under_it(parts, backend, m
     # Another account signs in between the request's session (client, entitlement) and its token.
     view, record = auth.warm_pin(store)
     client = auth.Client(record["base_url"], backend)
-    login_elsewhere()
+    new = login_elsewhere()
     sent = len(backend.calls)
     with pytest.raises(auth.AuthError) as changed:
         auth.authed(client, view, "GET", "/me")
     assert changed.value.code == "record_changed" and len(backend.calls) == sent
+    # The next request is the new account's, though this process's keychain cache still has the old one.
+    assert store.load()["access_token"] == record["access_token"]
+    view, _ = auth.warm_pin(store)
+    assert auth.authed(client, view, "GET", "/me")[0] == 200 and bearer(backend) == new
 
     # A 401 that comes back once another account has been taken up is not sent again as that account.
-    view, _ = auth.warm_pin(store)
+    backend.calls.clear()
     me = backend.routes["GET /me"]
 
     def refused_meanwhile(form, headers):
@@ -343,25 +347,6 @@ def test_a_refused_refresh_signs_out_once(parts, backend, monkeypatch):
     assert again.value.code == "not_logged_in"
     assert refreshes(backend) == 1               # signed out once: nothing more is sent...
     assert (keychain.reads, keychain.writes) == io       # ... or read
-
-
-def test_a_login_elsewhere_replaces_the_sign_in_while_the_old_one_is_cached(parts, backend, monkeypatch):
-    keychain = Keychain(monkeypatch)
-    store = credentials.KeychainStore()
-    store.save(parts[2]["store"].load())
-    holder = warm(monkeypatch, store, backend, Clock())
-    holder.renew()
-    old = store.load()["access_token"]
-    t = backend.issue()                         # another brindle logs in as someone else
-    keychain.put({"access_token": t["access_token"], "refresh_token": t["refresh_token"],
-                  "access_expires_at": time.time() + 900, "base_url": BASE,
-                  "entitlement": sign(backend.key, claims(sub="user_2", features=list(TEAM_LOGIN)))})
-    with auth.refresh_lock():
-        auth._note_signin()
-    assert store.load()["access_token"] == old             # this process's cache still has the old one
-    assert auth.authed(parts[2]["client"], store, "GET", "/me")[0] == 200
-    assert bearer(backend) == t["access_token"]
-    assert holder.view.load()["access_token"] == t["access_token"]
 
 
 def test_the_background_renewal_rotates_before_expiry_for_every_brindle(parts, backend, monkeypatch):
