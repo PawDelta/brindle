@@ -657,8 +657,47 @@ def plan_unshare(db: DB, params: dict, body: dict) -> Any:
 
 @_json
 def plan_people(db: DB, request: Request) -> Any:
-    return _shared_design(request.query_params.get("repo") or None,
-                          lambda r: r.people(_plan_doc(db, request.path_params["id"]), dict(request.query_params)))
+    """People to add to the plan: the Library's search of its doc, or the
+    org's member list when the search is for anyone in the org and the doc
+    can't answer it. That is a plan with no Library doc of this account yet
+    (a first share still uploading, or one whose upload timed out), or a
+    sharer the Library won't let list people through the doc (that needs a
+    Members-page permission, 403 forbidden) though the org's member list is
+    open to every member. The Library still decides who may be added."""
+    from brindle import plan_docs
+    from brindle.pro import share_links
+
+    repo, query = request.query_params.get("repo") or None, dict(request.query_params)
+    plan_docs._plan(db, request.path_params["id"])
+    anyone = query.get("include_unshared") == "true" and not any(query.get(k) for k in ("team", "role", "on_plan"))
+    doc = share_links.plan_doc(db, request.path_params["id"])
+    if doc is None:
+        if anyone:
+            return _org_people(repo, query.get("q") or "")
+        _plan_doc(db, request.path_params["id"])        # raises: not in this account's Library
+    try:
+        return _shared_design(repo, lambda r: r.people(doc, query))
+    except ServiceError as e:
+        if not (anyone and e.http_status == 403 and e.code == "forbidden"):
+            raise
+        return _org_people(repo, query.get("q") or "")
+
+
+def _org_people(repo: str | None, q: str) -> dict:
+    """The org's people matching ``q``, as the Library's search answers. Who
+    already has the plan isn't known here: the panel marks them from its access list."""
+    from brindle.service.dto import SharePeopleDTO
+
+    _, members = _org_members(repo)
+    rows = []
+    for m in members:
+        name = f"{m.get('first_name') or ''} {m.get('last_name') or ''}".strip() or m.get("name") \
+            or m.get("display_name") or m["email"] or m["sub"]
+        if q.strip().casefold() in f"{name} {m['email']}".casefold():
+            rows.append({"id": m["sub"], "display_name": name, "email": m["email"], "teams": [],
+                         "role": m.get("role") or "", "on_plan": False})
+    rows.sort(key=lambda r: (r["display_name"].casefold(), r["id"]))
+    return SharePeopleDTO.model_validate({"people": rows}).model_dump()
 
 
 def plan_sync(db: DB, params: dict, body: dict) -> Any:
@@ -1027,18 +1066,28 @@ def library_people(db: DB, request: Request) -> Any:
     """The people of the person's org, to pick reviewers from, leaving out
     the person (``me``). ``admin_org``: the org whose review rules the doc
     offers them an override of. Only what to show: the Library decides who may."""
+    ent, members = _org_members(request.query_params.get("repo") or None)
+    if not ent.org_id:
+        return {"people": []}
+    return {"people": [{k: v for k, v in m.items() if k != "role"} for m in members],
+            "me": ent.sub, "admin_org": ent.org_id if ent.role in ("owner", "admin") else None}
+
+
+def _org_members(repo: str | None) -> tuple[Any, list[dict]]:
+    """The entitlement and the people of its org, leaving out the person."""
     from urllib.parse import quote
 
     from brindle.daemon import routes_actions as actions
 
-    ent = actions._docs_entitlement(request.query_params.get("repo") or None)
+    ent = actions._docs_entitlement(repo)
     if not ent.org_id:
-        return {"people": []}
+        return ent, []
     members = actions.docs_api("GET", f"/orgs/{quote(ent.org_id, safe='')}/members").get("members")
-    return {"people": [{"sub": m["sub"], "email": m.get("email") or "",
-                        **{k: m[k] for k in ("display_name", "first_name", "last_name", "name") if isinstance(m.get(k), str)}} for m in members or []
-                       if isinstance(m, dict) and isinstance(m.get("sub"), str) and m["sub"] != ent.sub],
-            "me": ent.sub, "admin_org": ent.org_id if ent.role in ("owner", "admin") else None}
+    return ent, [{"sub": m["sub"], "email": m.get("email") or "",
+                  **{k: m[k] for k in ("display_name", "first_name", "last_name", "name") if isinstance(m.get(k), str)},
+                  "role": next((m[k] for k in ("policy_role", "role") if isinstance(m.get(k), str) and m[k]), "")}
+                 for m in members or []
+                 if isinstance(m, dict) and isinstance(m.get("sub"), str) and m["sub"] != ent.sub]
 
 
 @_json

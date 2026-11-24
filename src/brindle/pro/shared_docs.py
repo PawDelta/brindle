@@ -416,20 +416,20 @@ def _grant(db: DB, p: dict, doc_id: str, reviewers: list[dict], permissions: dic
 # -- sharing -----------------------------------------------------------------------------
 
 
-def _claim_new(db: DB, plan_id: str, owner: str, org_id: str, now: float) -> tuple[dict, bool]:
-    """The plan's link, claimed if the Library has no document for it yet: a
-    second share while the first is creating it is refused, so one plan never
-    becomes two documents. A claim older than CLAIM_FOR is taken over, and
-    the second value says so: that create may have reached the Library."""
+def _claim_new(db: DB, plan_id: str, owner: str, org_id: str, now: float) -> tuple[dict, bool | None]:
+    """The plan's link, claimed if the Library has no document for it yet,
+    so one plan never becomes two documents. A claim older than CLAIM_FOR is
+    taken over, and the second value is True: that create may have reached
+    the Library. A newer claim is still someone's create, or one whose answer
+    never came (a timeout), which may yet commit: the second value is None,
+    and a share may only look for the document it made, never make one."""
     with db.tx() as c:
         resumed = c.execute("UPDATE plan_shares SET claimed_at=? WHERE plan_id=? AND doc_id IS NULL AND claimed_at<?",
                             (now, plan_id, now - CLAIM_FOR)).rowcount == 1
         won = c.execute("INSERT OR IGNORE INTO plan_shares (plan_id, owner, org_id, claimed_at) VALUES (?,?,?,?)",
                         (plan_id, owner, org_id, now)).rowcount == 1
     share = link(db, plan_id)
-    if share["doc_id"] is None and not (won or resumed):
-        raise RuntimeError("this plan is already being shared")
-    return share, resumed
+    return share, (resumed if share["doc_id"] is not None or won or resumed else None)
 
 
 def _find(owner: str, p: dict, client, store) -> str | None:
@@ -452,14 +452,17 @@ def _linked(db: DB, plan_id: str, doc_id: str, remote_rev: int, local_rev: int) 
     return doc_id
 
 
-def _create(db: DB, p: dict, owner: str, cur: dict, content: dict, resumed: bool, client, store) -> str:
+def _create(db: DB, p: dict, owner: str, cur: dict, content: dict, resumed: bool | None, client, store) -> str:
     """The plan's document in ``owner``'s Library: the one an interrupted
     create already made (at the revision it sent, the Library's first), else
     a new one. Only a refusal gives the claim up. When the outcome is unknown
-    (no answer, or a server error) the row stays, for a later share to look."""
-    found = _find(owner, p, client, store) if resumed else None
+    (no answer, or a server error) the row stays, for a later share to look.
+    ``resumed`` None: another create holds the claim, so look and never make one."""
+    found = _find(owner, p, client, store) if resumed is not False else None
     if found is not None:
         return _linked(db, p["id"], found, FIRST_REVISION, link(db, p["id"])["local_rev"])
+    if resumed is None:
+        raise RuntimeError("this plan is already being shared: its upload hasn't reached your Library yet")
     sent = _payload(content, client)
     # The plan's own title: without it the Library names the doc by the text's first # heading, which a
     # plan's text (its lede and ## sections) seldom has, else by the plan's id.

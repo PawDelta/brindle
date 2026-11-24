@@ -1396,13 +1396,17 @@ def test_an_interrupted_share_or_send_keeps_one_document_and_one_revision(db, pa
         sd.share(db, pid, TEAM, now=now, **net)
     lib.lose_create = False
     assert sd.link(db, pid)["doc_id"] is None
-    with pytest.raises(RuntimeError):
+    # While the claim stands, a share only looks: one that hasn't landed yet makes no second document.
+    planned, lib.plan = lib.plan, None
+    with pytest.raises(RuntimeError, match="already being shared"):
         sd.share(db, pid, TEAM, now=now + 1, **net)
+    lib.plan = planned
 
-    # When the Library can't say whether it landed, nothing is created.
+    # When the Library can't say whether it landed, nothing is created, during the claim or after it.
     lib.list_status = 500
-    with pytest.raises(RuntimeError):
-        sd.share(db, pid, TEAM, now=now + sd.CLAIM_FOR + 1, **net)
+    for at in (now + 1, now + sd.CLAIM_FOR + 1):
+        with pytest.raises(RuntimeError):
+            sd.share(db, pid, TEAM, now=at, **net)
     lib.list_status = 200
     assert len(sent(backend, "POST /analysis-docs")) == 3 and sd.link(db, pid)["doc_id"] is None
 
