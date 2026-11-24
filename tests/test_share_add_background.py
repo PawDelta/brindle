@@ -43,6 +43,8 @@ def offline(backend, library, db, *, after_commit=False):
     return back
 
 
+@pytest.mark.variant("a route that still sent the invite inside the request passes every TestClient test, "
+                     "which waits for the background send; only a direct call sees the reply come first")
 def test_invite_answers_before_the_library_is_asked(panel, backend, db):
     pid, library, app = panel
     got = routes_visuals.plan_person_invite(db, {"id": pid}, dict(ANN))
@@ -56,6 +58,8 @@ def test_invite_answers_before_the_library_is_asked(panel, backend, db):
     assert ann["access"] == "comment" and "state" not in ann                # the Library's own row now
 
 
+@pytest.mark.variant("an invite sent again before its backoff is due (due_at ignored) hammers an offline Library; "
+                     "other tests only send again when the person asks")
 def test_an_offline_invite_lands_once_the_library_is_back(panel, backend, db, clock):
     pid, library, app = panel
     back = offline(backend, library, db)
@@ -73,6 +77,8 @@ def test_an_offline_invite_lands_once_the_library_is_back(panel, backend, db, cl
     assert share_invites.pending(db, pid) == []
 
 
+@pytest.mark.variant("a create that committed with its answer lost, then Add again while the first is pending: "
+                     "a second row or a fresh create would share twice")
 def test_a_lost_answer_and_a_second_add_make_one_doc_and_one_person(panel, backend, db, clock):
     pid, library, app = panel
     back = offline(backend, library, db, after_commit=True)
