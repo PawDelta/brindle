@@ -30,6 +30,7 @@ import type {
   ProfileDTO,
   RoutingAgentDTO,
   RoutingDTO,
+  RoutingSavedOrderDTO,
   RoutingKindDTO,
   RoutingLockDTO,
   RoutingPolicyDTO,
@@ -43,7 +44,7 @@ import type {
 import { LOGIN_PROVIDERS } from "../api/client";
 import { hunksOf, parseDiff } from "../screens/Branch/parseDiff";
 import type { DocFormat, DocFormatView } from "../api/client";
-import type { AccountInfo, ConnectionReady, Cost, DebugEntry, ProviderConnection, DebugState, Diff, DoctorCheck, KbHit, KbSource, KeyInfo, KindExtras, Meta, PreflightItem, ProfileDetail, ProviderInstalled, Repo, RoutingScope, RulePackInfo, Usage, UserSettings } from "../api/client";
+import type { AccountInfo, ConnectionReady, Cost, DebugEntry, ProviderConnection, DebugState, Diff, DoctorCheck, KbHit, KbSource, KeyInfo, KindExtras, Meta, PreflightItem, ProfileDetail, ProviderInstalled, Repo, RoutingPut, RoutingScope, RulePackInfo, Usage, UserSettings } from "../api/client";
 
 export const BASE_URL = "http://127.0.0.1:47321";
 export const TOKEN = "test-token";
@@ -2180,7 +2181,7 @@ export class FakeDaemon {
      the default, per tier), the reviewer and the excluded providers likewise
      (config.setting_source), and every profile with `excluded` from the latter.
      `userOnly` (scope=user): the user's file alone; `learn` false (learned=0): no learned picks. */
-  private routing(repo: string, userOnly = false, learn = true): RoutingDTO {
+  private routing(repo: string, userOnly = false, learn = true, includeRepoOrders = false): RoutingDTO {
     const files = this.routingFiles(repo, userOnly);
     const precedence: RoutingScope[] = ["local", "repo", "user"];
     const byName = new Map(this.data.routingProfiles.map((p) => [p.name, p]));
@@ -2232,12 +2233,26 @@ export class FakeDaemon {
       const models = Object.fromEntries(Object.entries(pools).map(([size, names]) => [size, { model: names[0] ?? null, fallbacks: names.slice(1), locked: true, learned: null }]));
       agents[p.name] = { description: p.description ?? "", rules: p.rules ?? [], role: p.role ?? null, builtin: p.builtin ?? false, kind: "agent", models };
     }
+    const savedFiles = includeRepoOrders ? this.routingFiles(repo) : files;
+    const orders = Object.fromEntries(WEIGHTS.map((size) => {
+      const saved: RoutingSavedOrderDTO[] = [];
+      for (const scope of ROUTING_SCOPES) {
+        const file = savedFiles[scope];
+        const shared = file.routing?.[size];
+        if (shared) saved.push({ scope, setting: "routing", order: shared, locked: file.routing_locked?.includes(size) ?? false });
+        for (const [agent, pools] of Object.entries(file.agent_models ?? {})) {
+          if (pools[size]) saved.push({ scope, setting: "agent_models", agent, order: pools[size], locked: false });
+        }
+      }
+      return [size, { recommended: DEFAULT_ROUTING[size], saved }];
+    }));
     return {
       tiers,
       reviewer,
       exclude_providers: excluded,
       kinds,
       agents,
+      orders,
       profiles: this.data.routingProfiles.map((p) => ({
         ...p,
         provider_name: CLI_NAMES[p.provider] ?? p.provider,
@@ -2376,6 +2391,7 @@ export class FakeDaemon {
     // Per kind (routes_actions.put_routing's `kinds`): a weight's model and fallbacks become its tier list,
     // the reviewer's model the reviewer, the supervisor's the user's pick. A choice locks the kind unless `locked` is given.
     const lockChanges = new Map<string, boolean>();
+    const keepOrders: Record<string, string[]> = {};
     const extras: Record<string, KindExtras> = {};
     const kindFallbacks: Record<string, string[]> = {};
     let supervisor: string | null = null;
@@ -2383,7 +2399,15 @@ export class FakeDaemon {
     const current = this.routing(repo, scope === "user");
     for (const [k, spec] of Object.entries((kinds ?? {}) as Record<string, unknown>)) {
       if (!ROUTING_KINDS.includes(k) || typeof spec !== "object" || spec === null) return error("invalid", `kind must be one of ${ROUTING_KINDS.join(", ")}, not '${k}'`, 400);
-      const { model, fallbacks, locked, effort, instructions } = spec as Record<string, unknown>;
+      const { model, fallbacks, locked, effort, instructions, keep_order } = spec as Record<string, unknown>;
+      if (keep_order !== undefined) {
+        if (keep_order !== true || scope !== "user" || !(WEIGHTS as readonly string[]).includes(k) ||
+            model != null || fallbacks != null || locked != null) {
+          return error("invalid", `${k}: keep_order requires a job size in user scope and no model, fallbacks or lock changes`, 400);
+        }
+        lockChanges.set(k, true);
+        keepOrders[k] = current.tiers[k].values;
+      }
       if (locked != null) {
         if (typeof locked !== "boolean") return error("invalid", `${k}: locked must be true or false`, 400);
         lockChanges.set(k, locked);
@@ -2439,9 +2463,21 @@ export class FakeDaemon {
       if (why) return error("forbidden", why, 403);
     }
     const file = this.routingFiles(repo)[scope as RoutingScope];
+    const clearOrders = body.clear_orders as RoutingPut["clear_orders"];
+    const clearedTiers = new Set<string>();
+    for (const [size, entries] of Object.entries(clearOrders ?? {})) {
+      for (const { setting, agent, order } of entries) {
+        const current = setting === "routing" ? file.routing?.[size] : agent ? file.agent_models?.[agent]?.[size] : undefined;
+        if (current?.length !== order.length || !current.every((name, index) => name === order[index])) continue;
+        if (setting === "routing") clearedTiers.add(size);
+        if (setting === "agent_models" && agent) (agentChanges[agent] ??= {})[size] = null;
+      }
+    }
     const updated: string[] = [];
-    if (tiers && Object.keys(tiers).length > 0) {
-      file.routing = { ...file.routing, ...(tiers as Record<string, string[]>) };
+    const snapshots = Object.fromEntries(Object.entries(keepOrders).filter(([size]) => !file.routing?.[size]));
+    if ((tiers && Object.keys(tiers).length > 0) || clearedTiers.size > 0 || Object.keys(snapshots).length > 0) {
+      file.routing = { ...snapshots, ...file.routing, ...(tiers as Record<string, string[]> | undefined) };
+      for (const size of clearedTiers) delete file.routing[size];
       updated.push("routing");
     }
     if (reviewer != null) {
@@ -2488,7 +2524,9 @@ export class FakeDaemon {
       file.agent_models = stored;
       updated.push("agent_models");
     }
-    if (updated.length === 0) return error("invalid", "give tiers, reviewer, exclude_providers, kinds or agents", 400);
+    if (updated.length === 0 && !Object.values(clearOrders ?? {}).some((entries) => entries.length > 0)) {
+      return error("invalid", "give tiers, reviewer, exclude_providers, kinds, agents or clear_orders", 400);
+    }
     return json({ updated, path });
   }
 
@@ -3045,7 +3083,7 @@ export class FakeDaemon {
       case "/profiles":
         return json((repo && d.profilesByRepo[repo]) || d.profiles);
       case "/routing":
-        return needRepo() ?? json(this.routing(repo, query.scope === "user", query.learned !== "0"));
+        return needRepo() ?? json(this.routing(repo, query.scope === "user", query.learned !== "0", query.include_repo_orders === "1"));
       case "/routing/goal":
         return needRepo() ?? (d.routingGoal ? json(d.routingGoal) : error("not_found", "no route GET /routing/goal", 404));
       case "/rules":

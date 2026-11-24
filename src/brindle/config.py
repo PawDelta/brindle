@@ -693,6 +693,7 @@ def opencode_permission_mode() -> str:
 
 
 _USER_WRITE = threading.Lock()
+KEEP_SETTING = object()
 
 
 def set_user(key: str, value: object) -> Path:
@@ -703,18 +704,15 @@ def set_user(key: str, value: object) -> Path:
 def update_user(key: str, change) -> Path:
     """Set one key in ``~/.brindle/config.json`` to ``change(its value now)``,
     read and written under the one writer lock, so a change to part of a
-    nested setting never loses another made at the same time."""
+    nested setting never loses another made at the same time. Return
+    ``KEEP_SETTING`` from ``change`` to leave the file untouched."""
     path = user_config_path()
     if os.environ.get("BRINDLE_AGENT_ID"):
         # A brindle agent's CLI call must not change the person's own settings.
         print("brindle: running as an agent, so ~/.brindle/config.json was not changed", file=sys.stderr)
         return path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with _USER_WRITE:   # daemon actions run in threads: one read-modify-replace at a time
-        data = _read_json(path)
-        data[key] = change(data.get(key))
-        _replace_json(path, data)
-    _sync_setting(key)
+    if _update_setting(path, key, change, lock=_USER_WRITE):
+        _sync_setting(key)
     return path
 
 
@@ -733,16 +731,17 @@ def _replace_json(path: Path, data: dict) -> None:
         raise
 
 
-def forget_user(key: str) -> bool:
+def forget_user(key: str, *, matches=None) -> bool:
     """Remove one key from ``~/.brindle/config.json``; True once it's gone.
     Only for a setting an org applied that its fresh setup no longer has
     (``company_login.clear_env(stale=True)``): removing it only stops it
     being applied, so unlike :func:`set_user` this also runs in an agent's
-    CLI call (``brindle doctor`` from a session)."""
+    CLI call (``brindle doctor`` from a session). When given, ``matches``
+    checks the current value under the writer lock before removing it."""
     path = user_config_path()
     with _USER_WRITE:
         data = _read_json(path)
-        if key not in data:
+        if key not in data or (matches is not None and not matches(data[key])):
             return False
         del data[key]
         _replace_json(path, data)
@@ -765,14 +764,29 @@ def _sync_setting(key: str) -> None:
 _REPO_WRITE = threading.Lock()
 
 
-def _change_json(path: Path, change) -> None:
+def _change_json(path: Path, change, *, lock=None) -> bool:
     """Read ``path``, apply ``change`` to its dict and replace the file, one at a
     time (daemon actions run in threads) through a unique temp file in the same
-    directory, so a reader never sees half a file and no write is lost."""
-    with _REPO_WRITE:
+    directory, so a reader never sees half a file and no write is lost. The
+    repo lock is looked up when called (not bound as a default), so the module's
+    current ``_REPO_WRITE`` is the one every writer shares."""
+    with (lock if lock is not None else _REPO_WRITE):
         data = _read_json(path)
-        change(data)
+        if change(data) is KEEP_SETTING:
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
         _replace_json(path, data)
+        return True
+
+
+def _update_setting(path: Path, key: str, change, *, lock=None) -> bool:
+    def apply(data):
+        value = change(data.get(key))
+        if value is KEEP_SETTING:
+            return KEEP_SETTING
+        data[key] = value
+
+    return _change_json(path, apply, lock=lock)
 
 
 def set_local(repo_root: str | Path, key: str, value: object) -> Path:
@@ -782,13 +796,11 @@ def set_local(repo_root: str | Path, key: str, value: object) -> Path:
 
 
 def update_local(repo_root: str | Path, key: str, change) -> Path:
-    base = config_root(repo_root) / CONFIG_DIR
-    base.mkdir(parents=True, exist_ok=True)
-    path = base / LOCAL_CONFIG_FILE
-    _change_json(path, lambda data: data.__setitem__(key, change(data.get(key))))
-    ignore = base / ".gitignore"
-    if not ignore.exists():
-        ignore.write_text(f"{LOCAL_CONFIG_FILE}\n", encoding="utf-8")
+    path = scope_paths(repo_root)["local"]
+    if _update_setting(path, key, change):
+        ignore = path.with_name(".gitignore")
+        if not ignore.exists():
+            ignore.write_text(f"{LOCAL_CONFIG_FILE}\n", encoding="utf-8")
     return path
 
 
@@ -800,8 +812,7 @@ def set_repo(repo_root: str | Path, key: str, value: object) -> Path:
 
 def update_repo(repo_root: str | Path, key: str, change) -> Path:
     path = scope_paths(repo_root)["repo"]
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _change_json(path, lambda data: data.__setitem__(key, change(data.get(key))))
+    _update_setting(path, key, change)
     return path
 
 

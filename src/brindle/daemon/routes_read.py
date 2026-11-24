@@ -732,7 +732,9 @@ def get_routing(db: DB, request: Request) -> Any:
     A registered worktree path in ``repo`` previews its launch defaults.
     ``scope=user``: the person's own view, as every repo starts from it (their
     ~/.brindle/config.json and their library, never this repo's files); the
-    repo still gives the org policy and what learning knows. ``learned=0``
+    repo still gives the org policy and what learning knows.
+    ``include_repo_orders=1`` also lists saved repo and local orders in the
+    order metadata, without changing the user view's effective routing. ``learned=0``
     answers at once, for the app to read the rest after the page is up: no
     learned picks (each kind's ``learned`` is null; working them out
     resolves the dispatch for every candidate) and no sign-in probe (each
@@ -750,7 +752,9 @@ def _routing(db: DB, request: Request, learn: bool) -> Any:
     from concurrent.futures import ThreadPoolExecutor
 
     from brindle import autopilot, model_catalog, providers
-    from brindle.service.routing import RoutingPolicy, agent_model_orders, legacy_medium_override, provider_name
+    from brindle.service.routing import (
+        RoutingPolicy, agent_model_orders, legacy_medium_override, provider_name, saved_routing_orders,
+    )
 
     repo = _need_repo(request)
     workspace = db.workspace_by_path(repo)
@@ -833,7 +837,9 @@ def _routing(db: DB, request: Request, learn: bool) -> Any:
         tiers=tiers,
         reviewer=RoutingSettingDTO(values=[cfg.reviewer], source=source("reviewer")),
         exclude_providers=RoutingSettingDTO(values=cfg.exclude_providers, source=source("exclude_providers")),
-        profiles=rows, policy=policy.to_dto(every), kinds=kinds, agents=agent_rows).to_json()
+        profiles=rows, policy=policy.to_dto(every), kinds=kinds, agents=agent_rows,
+        orders=saved_routing_orders(repo, user_only=user and request.query_params.get("include_repo_orders") != "1"),
+    ).to_json()
 
 
 def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str, learn: bool = True, *,

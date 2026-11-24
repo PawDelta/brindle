@@ -26,8 +26,8 @@
    ~/.brindle: agents are theirs, one list whatever the repos) and the page
    reads GET /v1/routing again: the rows at once, what learning runs after. */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { DaemonClient, KindPut, RulePackInfo, RoutingPut, WorksLike } from "../../api/client";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { DaemonClient, KindPut, RulePackInfo, RoutingPut, RoutingScope, WorksLike } from "../../api/client";
 import type { RoutingDTO } from "../../api/schema";
 import { openExternal } from "../../api/open";
 import { plain } from "../../api/wording";
@@ -490,7 +490,7 @@ function SizeRow({ size, state, choiceOf: info, choices, missing, panel, adding,
           {learned && (
             <span className="pl-[22px] text-xs text-ink-3" data-testid="learned">
               brindle learned it does better here ·{" "}
-              <button type="button" className={link} disabled={busy} onClick={() => put({ locked: true })}>
+              <button type="button" className={link} disabled={busy} onClick={() => put({ keep_order: true })}>
                 use mine instead
               </button>
             </span>
@@ -907,14 +907,14 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
     const mine = ++seq.current;
     // The rows first: what learning runs instead resolves the dispatch for
     // every candidate (seconds), so it fills in after, and only the newest load's.
-    return Promise.all([client.routing(repo, { scope: "user", learned: false }), client.profiles().catch(() => []), client.rulePacks(repo).catch(() => [])]).then(
+    return Promise.all([client.routing(repo, { scope: "user", learned: false, includeRepoOrders: true }), client.profiles().catch(() => []), client.rulePacks(repo).catch(() => [])]).then(
       ([r, ps, rs]) => {
         if (mine !== seq.current) return;
         setRouting((prev) => keepLearned(r, prev));
         setDescribe(Object.fromEntries(ps.map((p) => [p.name, p.description])));
         setRules(rs);
         setLoadError(null);
-        client.routing(repo, { scope: "user" }).then(
+        client.routing(repo, { scope: "user", includeRepoOrders: true }).then(
           (full) => mine === seq.current && setRouting(full),
           () => {}, // the rows stand without what learning runs instead
         );
@@ -948,6 +948,17 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   );
   const policy = routing?.policy;
   const frozen = !!policy?.applies && policy.editable === false;
+  const savedOrders = SIZES.flatMap((size) => {
+    const orders = routing?.orders?.[size];
+    if (!orders) return [];
+    const { recommended, saved } = orders;
+    return saved.map((entry) => ({
+      size,
+      ...entry,
+      differs: entry.order.length !== recommended.length || entry.order.some((name, i) => name !== recommended[i]),
+    }));
+  });
+  const differences = savedOrders.filter((entry) => entry.differs);
   const missing = providersOf(profiles).filter((p) => !connected.has(p) && p !== "native");
   const offered = (k: Kind) => offeredFor(k, profiles).map((p) => choiceOf(p, connected, describe));
   const pinnedOf = (a: AgentRow) => (a.pinned ? info(a.name) : null);
@@ -963,6 +974,29 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
       .finally(() => setBusy(false));
   };
   const put = (size: Size, change: KindPut) => save({ kinds: { [size]: change } });
+
+  const resetOrders = async () => {
+    if (!repo || frozen || busy) return;
+    const byScope = new Map<RoutingScope, NonNullable<RoutingPut["clear_orders"]>>();
+    for (const { scope, size, setting, agent, order } of differences) {
+      const orders = byScope.get(scope) ?? {};
+      (orders[size] ??= []).push({ setting, agent, order });
+      byScope.set(scope, orders);
+    }
+    const started = seq.current;
+    setBusy(true);
+    setSaveError(null);
+    const results = await Promise.allSettled(
+      Array.from(byScope, ([scope, clear_orders]) => client.putRouting({ repo, scope, clear_orders })),
+    );
+    if (started !== seq.current) return;
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed) setSaveError(message(failed.reason));
+    const reload = load();
+    const reloading = seq.current;
+    await reload;
+    if (reloading === seq.current) setBusy(false);
+  };
 
   /* An agent's own order for a size: the model picked, then the shared
      table's order behind it, less what the org refuses or no longer exists
@@ -1259,6 +1293,29 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
             </h2>
             <span className="text-sm text-ink-2">By job size, for every agent that follows it. When the first is at its limit, the next takes over.</span>
           </div>
+          {savedOrders.some((entry) => entry.locked || entry.differs) && (
+            <p className="pb-3 text-xs text-ink-3" data-testid="routing-differs">
+              {SIZES.map((size) => (
+                <Fragment key={size}>
+                  {savedOrders.some((entry) => entry.size === size && entry.locked) && (
+                    <span data-size={size} data-routing-notice="own-order">
+                      {KIND_INFO[size].name}: your own order (you chose it over the learned pick).{" "}
+                    </span>
+                  )}
+                  {differences.some((entry) => entry.size === size && !entry.locked) && (
+                    <span data-size={size} data-routing-notice="differs">
+                      Your routing differs from brindle's recommended order ({KIND_INFO[size].name}).{" "}
+                    </span>
+                  )}
+                </Fragment>
+              ))}
+              {differences.length > 0 && (
+                <button type="button" className={link} disabled={busy || frozen} onClick={() => void resetOrders()}>
+                  Reset to recommended
+                </button>
+              )}
+            </p>
+          )}
           <div className="grid grid-cols-[9.75rem_minmax(0,18.75rem)_minmax(0,1fr)_auto] gap-x-s3 pb-2" aria-hidden>
             <span className={label}>Job size</span>
             <span className={label}>Runs it</span>

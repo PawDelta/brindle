@@ -11616,6 +11616,59 @@
           "title": "RoutingProfileDTO",
           "type": "object"
         },
+        "RoutingSavedOrderDTO": {
+          "properties": {
+            "agent": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Agent"
+            },
+            "locked": {
+              "default": false,
+              "title": "Locked",
+              "type": "boolean"
+            },
+            "order": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Order",
+              "type": "array"
+            },
+            "scope": {
+              "enum": [
+                "user",
+                "repo",
+                "local"
+              ],
+              "title": "Scope",
+              "type": "string"
+            },
+            "setting": {
+              "enum": [
+                "routing",
+                "picker",
+                "agent_models"
+              ],
+              "title": "Setting",
+              "type": "string"
+            }
+          },
+          "required": [
+            "scope",
+            "setting",
+            "order"
+          ],
+          "title": "RoutingSavedOrderDTO",
+          "type": "object"
+        },
         "RoutingSettingDTO": {
           "properties": {
             "source": {
@@ -11635,6 +11688,30 @@
             "source"
           ],
           "title": "RoutingSettingDTO",
+          "type": "object"
+        },
+        "RoutingSizeOrdersDTO": {
+          "properties": {
+            "recommended": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Recommended",
+              "type": "array"
+            },
+            "saved": {
+              "items": {
+                "$ref": "#/$defs/RoutingSavedOrderDTO"
+              },
+              "title": "Saved",
+              "type": "array"
+            }
+          },
+          "required": [
+            "recommended",
+            "saved"
+          ],
+          "title": "RoutingSizeOrdersDTO",
           "type": "object"
         },
         "RoutingTierDTO": {
@@ -11740,6 +11817,14 @@
           },
           "default": {},
           "title": "Kinds",
+          "type": "object"
+        },
+        "orders": {
+          "additionalProperties": {
+            "$ref": "#/$defs/RoutingSizeOrdersDTO"
+          },
+          "default": {},
+          "title": "Orders",
           "type": "object"
         },
         "policy": {
@@ -12237,6 +12322,59 @@
       "title": "RoutingProfileDTO",
       "type": "object"
     },
+    "RoutingSavedOrderDTO": {
+      "properties": {
+        "agent": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent"
+        },
+        "locked": {
+          "default": false,
+          "title": "Locked",
+          "type": "boolean"
+        },
+        "order": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Order",
+          "type": "array"
+        },
+        "scope": {
+          "enum": [
+            "user",
+            "repo",
+            "local"
+          ],
+          "title": "Scope",
+          "type": "string"
+        },
+        "setting": {
+          "enum": [
+            "routing",
+            "picker",
+            "agent_models"
+          ],
+          "title": "Setting",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "setting",
+        "order"
+      ],
+      "title": "RoutingSavedOrderDTO",
+      "type": "object"
+    },
     "RoutingSettingDTO": {
       "properties": {
         "source": {
@@ -12256,6 +12394,85 @@
         "source"
       ],
       "title": "RoutingSettingDTO",
+      "type": "object"
+    },
+    "RoutingSizeOrdersDTO": {
+      "$defs": {
+        "RoutingSavedOrderDTO": {
+          "properties": {
+            "agent": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Agent"
+            },
+            "locked": {
+              "default": false,
+              "title": "Locked",
+              "type": "boolean"
+            },
+            "order": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Order",
+              "type": "array"
+            },
+            "scope": {
+              "enum": [
+                "user",
+                "repo",
+                "local"
+              ],
+              "title": "Scope",
+              "type": "string"
+            },
+            "setting": {
+              "enum": [
+                "routing",
+                "picker",
+                "agent_models"
+              ],
+              "title": "Setting",
+              "type": "string"
+            }
+          },
+          "required": [
+            "scope",
+            "setting",
+            "order"
+          ],
+          "title": "RoutingSavedOrderDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "recommended": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Recommended",
+          "type": "array"
+        },
+        "saved": {
+          "items": {
+            "$ref": "#/$defs/RoutingSavedOrderDTO"
+          },
+          "title": "Saved",
+          "type": "array"
+        }
+      },
+      "required": [
+        "recommended",
+        "saved"
+      ],
+      "title": "RoutingSizeOrdersDTO",
       "type": "object"
     },
     "RoutingTierDTO": {

@@ -99,7 +99,9 @@ export interface ApiSchema {
   RoutingModelOrderDTO: RoutingModelOrderDTO;
   RoutingPolicyDTO: RoutingPolicyDTO1;
   RoutingProfileDTO: RoutingProfileDTO;
+  RoutingSavedOrderDTO: RoutingSavedOrderDTO;
   RoutingSettingDTO: RoutingSettingDTO;
+  RoutingSizeOrdersDTO: RoutingSizeOrdersDTO;
   RoutingTierDTO: RoutingTierDTO;
   RoutingTierModelDTO: RoutingTierModelDTO;
   RuleDTO: RuleDTO;
@@ -1535,6 +1537,9 @@ export interface RoutingDTO {
   kinds?: {
     [k: string]: RoutingKindDTO;
   };
+  orders?: {
+    [k: string]: RoutingSizeOrdersDTO;
+  };
   policy?: RoutingPolicyDTO;
   profiles: RoutingProfileDTO[];
   reviewer: RoutingSettingDTO;
@@ -1563,6 +1568,25 @@ export interface RoutingKindDTO {
   learned?: string | null;
   locked?: boolean;
   model?: string | null;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "RoutingSizeOrdersDTO".
+ */
+export interface RoutingSizeOrdersDTO {
+  recommended: string[];
+  saved: RoutingSavedOrderDTO[];
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "RoutingSavedOrderDTO".
+ */
+export interface RoutingSavedOrderDTO {
+  agent?: string | null;
+  locked?: boolean;
+  order: string[];
+  scope: "user" | "repo" | "local";
+  setting: "routing" | "picker" | "agent_models";
 }
 /**
  * The org policy routing answers to. ``applies``: a Team or Enterprise
