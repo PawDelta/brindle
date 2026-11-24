@@ -902,12 +902,15 @@ export type PeopleQuery = { q?: string; team?: string; role?: string; on_plan?: 
 export type ShareAccessLevel = "view" | "comment" | "edit";
 /* Who has a plan (brindle/pro/share_access.py): the teams and org it is shared into, each person
    given it or asked to sign off (never its owner), and, before its first share, whether that share
-   uploads a plan kept on this Mac (null: can't be said). */
+   uploads a plan kept on this Mac (null: can't be said). A person added here whose invite the daemon
+   is still sending has `state` sharing (`error`: why it hasn't landed yet); one the Library refused,
+   failed (`error`: its reason). Once it lands the Library's own row, with no state, is listed. */
 export interface ShareAccess {
   shared: boolean;
   kept_here: boolean | null;
   scopes: { kind: string; id: string }[];
-  people: { sub: string; name: string | null; access: ShareAccessLevel; sign_off: "required" | "optional" | null }[];
+  people: { sub: string; name: string | null; access: ShareAccessLevel; sign_off: "required" | "optional" | null;
+    state?: "sharing" | "failed"; error?: string | null }[];
 }
 
 export interface DesignWorkItems {
@@ -2452,6 +2455,7 @@ export class DaemonClient {
     return this.get<ShareAccess>(`/plans/${encodeURIComponent(id)}/access`);
   }
 
+  /* Answered at once (202) with the plan as it is; the daemon sends the invite in the background. */
   invitePlanPerson(id: string, sub: string, access: ShareAccessLevel, signOff: boolean) {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/people`, { sub, access, sign_off: signOff });
   }

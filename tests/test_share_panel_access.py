@@ -132,8 +132,8 @@ def test_first_person_shares_the_plan_at_their_access_level(panel, backend, acce
     before = app.get(f"/v1/plans/{pid}/access").json()
     assert not before["shared"] and before["people"] == []
     added = app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": access})
-    assert added.status_code == 200, added.json()
-    assert added.json()["gate"] is not None                     # adding the first person shared it
+    assert added.status_code == 202, added.json()
+    assert app.get(f"/v1/plans/{pid}").json()["gate"] is not None     # adding the first person shared it
     assert sent(backend, f"POST {BASE}/share") == [{"scope": {"kind": "user", "id": "ann"}, "access": access,
                                                     "sign_off": "none"}]
     assert not sent(backend, f"PUT {DESIGN}/permissions")       # never the whole map
@@ -145,7 +145,7 @@ def test_first_person_shares_the_plan_at_their_access_level(panel, backend, acce
 
 def test_sign_off_is_kept_apart_from_access(panel, backend):
     pid, library, app = panel
-    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": "edit", "sign_off": True}).status_code == 200
+    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": "edit", "sign_off": True}).status_code == 202
     assert sent(backend, f"POST {BASE}/share")[-1] == {"scope": {"kind": "user", "id": "ann"}, "access": "edit",
                                                       "sign_off": "required"}       # one transaction, never read before sign-off
     assert person(app, pid, "ann")["sign_off"] == "required"
@@ -172,8 +172,8 @@ def test_sign_off_is_kept_apart_from_access(panel, backend):
 
 def test_stop_sharing_revokes_people_teams_and_the_whole_plan(panel):
     pid, library, app = panel
-    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": "comment"}).status_code == 200
-    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "bo", "access": "view", "sign_off": True}).status_code == 200
+    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": "comment"}).status_code == 202
+    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "bo", "access": "view", "sign_off": True}).status_code == 202
     assert app.post(f"/v1/plans/{pid}/share", json={"scope": TEAM}).status_code == 200
     assert app.get(f"/v1/plans/{pid}/access").json()["scopes"] == [TEAM]
     # One person: the others keep it.
@@ -196,7 +196,7 @@ def test_stop_sharing_revokes_people_teams_and_the_whole_plan(panel):
 @pytest.mark.parametrize("unlink", [200, 503])
 def test_stop_sharing_turns_the_link_off_or_fails_without_revoking_anyone(panel, unlink):
     pid, library, app = panel
-    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": "view"}).status_code == 200
+    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": "view"}).status_code == 202
     library.link, library.unlink_status = {"url": "https://plans.example/dsl_1"}, unlink
     assert as_(library, app, "stranger") is not None
     stopped = app.delete(f"/v1/plans/{pid}/access")

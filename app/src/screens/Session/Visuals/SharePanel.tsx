@@ -49,7 +49,9 @@ const scopeKey = (s: Scope) => `${s.kind}:${s.id}`;
 const fromDirectory = (p: LibraryPerson): SharePerson => ({ id: p.sub, display_name: p.display_name || p.name || "", email: p.email, teams: [], role: "", on_plan: false });
 const list = (names: string[]) => names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 
-type Person = { sub: string; name: string; access: ShareAccessLevel | null; signOff: "required" | "optional" | null };
+/* `sent`: an add the daemon is still sending (sharing) or the Library refused (failed), with why. */
+type Person = { sub: string; name: string; access: ShareAccessLevel | null; signOff: "required" | "optional" | null;
+  sent?: "sharing" | "failed"; why?: string | null };
 type Work = { key: string; label: string; run(): Promise<Plan> };
 /* A write out now, or one the Library refused, kept so Try again sends the same one. */
 type Busy = Record<string, { state: "saving" | "failed"; refused?: Work; why?: string }>;
@@ -118,6 +120,13 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
       if (accessGeneration.current === generation && e instanceof DaemonError && e.code === "busy") setAccessBusy(e.message);
     });
   }, [visible, target, reload, shared]);
+  // An add the daemon is still sending lands in the background: the plan changes when it does
+  // (or is refused), so the list is read again then.
+  const sending = useRef(false);
+  sending.current = !!access?.people.some((p) => p.state === "sharing");
+  useEffect(() => {
+    if (sending.current) setReload((n) => n + 1);
+  }, [plan]);
   // The rules a first share would meet, for the plan and revision they were asked for.
   useEffect(() => {
     if (!visible || shared || !previewRules) return;
@@ -152,7 +161,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const nameFor = (sub: string, given?: string | null) => names.get(sub) || given || nameOf(sub);
   // The Library's list, with anyone the gate names it hasn't been read for yet.
   const people: Person[] = [
-    ...(access?.people ?? []).map((p) => ({ sub: p.sub, name: nameFor(p.sub, p.name), access: p.access, signOff: p.sign_off })),
+    ...(access?.people ?? []).map((p) => ({ sub: p.sub, name: nameFor(p.sub, p.name), access: p.access, signOff: p.sign_off, sent: p.state, why: p.error })),
     ...gateRows.filter((r) => !access?.people.some((p) => p.sub === r.sub))
       .map((r) => ({ sub: r.sub, name: nameFor(r.sub), access: null, signOff: r.required ? "required" as const : "optional" as const })),
   ];
@@ -254,23 +263,30 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     const note = signNote(p);
     const r = reviewerOf(p.sub);
     const must = (p.signOff ?? (r?.required ? "required" : null)) === "required";
-    const state = busy[key]?.state ?? (r?.status === "signed_off" ? "signed_off" : "waiting");
+    const state = busy[key]?.state ?? p.sent ?? (r?.status === "signed_off" ? "signed_off" : "waiting");
     const level = p.access;
-    // Added here but not yet in the Library: nothing to change until the add lands.
-    const pending = !!added[p.sub] && !access?.people.some((a) => a.sub === p.sub);
-    const why = busy[key]?.state === "failed" ? busy[key]?.why : undefined;
+    // Added here but not yet in the Library (still being sent, or refused): nothing to change until the add lands.
+    const pending = (!!added[p.sub] && !access?.people.some((a) => a.sub === p.sub)) || !!p.sent;
+    const why = busy[key]?.state === "failed" ? busy[key]?.why : p.sent === "failed" ? p.why ?? undefined : undefined;
+    // The daemon's own answer for an add it sends in the background: a refusal keeps Try again and Cancel.
+    const sentStatus = () => p.sent === "sharing" ? <span className="st" title={p.why ?? undefined}><i className="spin" />Sharing…</span>
+      : p.sent === "failed" ? <><span className="st bad">Couldn't add</span>
+        <button className="sp-btn q" data-testid={`share-try-${key}`} onClick={() => run(personWork(p.sub, "Couldn't add", (t) => t.invite(p.sub, level ?? "comment", p.signOff === "required")))}>Try again</button>
+        <button className="sp-btn q end" onClick={() => run(personWork(p.sub, "Couldn't stop sharing", (t) => t.revoke(p.sub)))}>Cancel</button></>
+      : null;
     return <Fragment key={key}>
       <div className={`r who ${menu === key ? "act" : ""}`} data-testid={`share-person-${p.sub}`} data-state={state} data-access={level ?? ""} data-sign-off={p.signOff ?? (r ? (r.required ? "required" : "optional") : "none")}>
         <i className="av">{initials(p.name)}</i>
         <span className="grid grow"><span className="nm" title={p.name}>{p.name}</span>
           {why ? <span className="note bad" role="alert">{why}</span>
+            : p.sent === "sharing" && p.why ? <span className="note wait" title={p.why}>Waiting to reach your Library</span>
             : note && <span className={`note ${note.tone}`}>{note.tone === "ok" && <ShareCheck />}{note.text}</span>}</span>
-        {status(key, "Couldn't save", pending ? () => drop(p.sub) : undefined) ?? (signOff?.sub === p.sub && r?.status !== "signed_off"
+        {status(key, "Couldn't save", pending && !p.sent ? () => drop(p.sub) : undefined) ?? sentStatus() ?? (signOff?.sub === p.sub && r?.status !== "signed_off"
           ? <button className="sp-btn q end" disabled={signOff.disabled} onClick={signOff.run}>Sign off</button> : null)}
         {pending ? !busy[key] && level && <span className="st">{CAN[level]}</span> : target && level ? <button className="sel" aria-haspopup="menu" aria-expanded={menu === key} aria-label={`What ${p.name} can do`} disabled={busy[key]?.state === "saving"} onClick={() => setMenu(menu === key ? null : key)}>{CAN[level]}<ShareChevron /></button>
           : level && <span className="st">{CAN[level]}</span>}
       </div>
-      {menu === key && target && level && <div className="menu" role="menu" data-testid={`share-menu-${p.sub}`}>
+      {menu === key && target && level && !pending && <div className="menu" role="menu" data-testid={`share-menu-${p.sub}`}>
         <div className="ml">{firstWord(p.name)} can</div>
         {LEVELS.map((l) => <button key={l.id} className="mi" role="menuitemradio" aria-checked={level === l.id}
           onClick={() => level !== l.id && run(personWork(p.sub, "Couldn't change", (t) => t.change(p.sub, l.id)))}>{l.name}<span className="mx">{l.hint}{level === l.id && <ShareCheck />}</span></button>)}

@@ -55,7 +55,7 @@ function library(start: Partial<ShareAccess> = {}, signed: string[] = []) {
 function Reader({ lib, directory = [], onStopAll }: { lib: ReturnType<typeof library>; directory?: LibraryPerson[]; onStopAll?: () => void }) {
   const [plan, setPlan] = useState(lib.plan());
   const [visible, show] = useState(true);
-  return <><button onClick={() => show(true)}>Open</button><SharePanel plan={plan} target={lib.target} nameOf={(s) => s} onBusy={() => {}} owned onStopAll={onStopAll}
+  return <><button onClick={() => show(true)}>Open</button><button onClick={() => setPlan(lib.plan())}>Plan changed</button><SharePanel plan={plan} target={lib.target} nameOf={(s) => s} onBusy={() => {}} owned onStopAll={onStopAll}
     teams={teams} directory={directory} writes={{ begin: () => true, end: (p) => setPlan(p ?? lib.plan()) }} visible={visible} onClose={() => show(false)} /></>;
 }
 const row = (sub: string) => screen.getByTestId(`share-person-${sub}`);
@@ -194,6 +194,41 @@ it("shares a plan nobody has yet from the same panel, saying it uploads a plan k
   expect(lib.calls).toEqual(Array(3).fill("invite lena comment false"));
   expect(row("lena").dataset.access).toBe("comment");
   expect(screen.queryByTestId("share-upload")).toBeNull();
+});
+
+it("shows an add the daemon is still sending, reads it again when the plan changes, and offers Try again on a refusal", async () => {
+  const lib = library();
+  const sends = lib.target.invite;
+  // The daemon answers at once and sends it in the background: its list shows the person on their way.
+  const queued = (state: "sharing" | "failed", error: string | null) => (sub: string, access: "view" | "comment" | "edit", signOff: boolean) => {
+    lib.calls.push(`invite ${sub} ${access} ${signOff}`);
+    lib.state.people = [...lib.state.people.filter((p) => p.sub !== sub), { sub, name: null, access, sign_off: signOff ? "required" as const : null, state, error }];
+    return Promise.resolve(lib.plan());
+  };
+  lib.target.invite = queued("sharing", null);
+  await act(async () => render(<Reader lib={lib} />));
+  await act(async () => fireEvent.focus(screen.getByTestId("share-search")));
+  fireEvent.click(within(screen.getByTestId("share-result-lena")).getByRole("button"));
+  await act(async () => fireEvent.click(screen.getByTestId("share-add-confirm")));
+  expect(row("lena").dataset.state).toBe("sharing");
+  expect(within(row("lena")).queryByRole("button", { name: "What lena can do" })).toBeNull();     // nothing to change until it lands
+
+  // It lands: the plan changes, and the Library's own row replaces it.
+  delete lib.state.people[0].state;
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Plan changed" })));
+  expect(row("lena").dataset.state).toBe("waiting");
+
+  // A refusal stays on the row with the Library's reason; Try again sends the same add again.
+  lib.target.invite = queued("failed", "The Library refused it.");
+  await act(async () => fireEvent.focus(screen.getByTestId("share-search")));
+  fireEvent.click(within(screen.getByTestId("share-result-sam")).getByRole("button"));
+  await act(async () => fireEvent.click(screen.getByTestId("share-add-confirm")));
+  expect(row("sam").dataset.state).toBe("failed");
+  expect(within(row("sam")).getByRole("alert").textContent).toBe("The Library refused it.");
+  lib.target.invite = sends;
+  await act(async () => fireEvent.click(within(row("sam")).getByRole("button", { name: "Try again" })));
+  expect(row("sam").dataset.state).toBe("waiting");
+  expect(lib.calls).toEqual(["invite lena comment false", "invite sam comment false", "invite sam comment false"]);
 });
 
 it("a team is shared from the first panel and then listed as a row", async () => {

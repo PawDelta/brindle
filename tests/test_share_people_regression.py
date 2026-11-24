@@ -24,6 +24,7 @@ from brindle.daemon.app import build_app
 from brindle.pro import analysis_docs as ad
 from brindle.pro import auth, credentials, license
 from brindle.pro import share_access as sa
+from brindle.pro import share_invites
 from brindle.pro import shared_docs as sd
 from pro_fixtures import backend, pro_env, signing_key  # noqa: F401
 from test_plans import AUTH, TOKEN, session  # noqa: F401
@@ -62,7 +63,7 @@ def found(app, pid):
 def test_a_member_without_the_members_permission_can_still_find_the_owner(panel, backend):
     pid, _, app = panel
     SlowLibrary(backend)
-    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": "comment"}).status_code == 200
+    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": "comment"}).status_code == 202
     assert found(app, pid) == ["owner_1"]                 # the org's own list, never the person searching
 
 
@@ -71,14 +72,16 @@ def test_a_timed_out_first_add_still_searches_and_try_again_lands_on_the_one_doc
     library = SlowLibrary(backend)
     library.slow_create = True
     first = app.post(f"/v1/plans/{pid}/people", json={"sub": "owner_1", "access": "comment"})
-    assert first.status_code == 502 and "timed out" in first.json()["error"]["message"]
+    assert first.status_code == 202
+    owner = next(p for p in app.get(f"/v1/plans/{pid}/access").json()["people"] if p["sub"] == "owner_1")
+    assert owner["state"] == "sharing" and "timed out" in owner["error"]     # still on its way, saying why
     library.slow_create = False
     assert app.get(f"/v1/plans/{pid}").json()["gate"] is not None    # the panel now reads it as shared
     assert found(app, pid) == ["owner_1"]
 
     # Try again, straight away: the doc the timed-out create made is found, not refused and not made twice.
     again = app.post(f"/v1/plans/{pid}/people", json={"sub": "owner_1", "access": "comment"})
-    assert again.status_code == 200, again.json()
+    assert again.status_code == 202, again.json()
     assert len(sent(backend, "POST /analysis-docs")) == 1
     assert sent(backend, f"POST {BASE}/share") == [{"scope": {"kind": "user", "id": "owner_1"}, "access": "comment",
                                                     "sign_off": "none"}]
@@ -184,11 +187,11 @@ def test_an_air_gapped_search_reads_no_credential(parts, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("operation", ["search", "invite", "link"])
 @pytest.mark.variant("Search, invite and link reads have separate daemon error handlers")
-def test_a_blocked_refresh_is_busy_in_the_share_routes(panel, parts, monkeypatch, operation):
+def test_a_blocked_refresh_is_busy_in_the_share_routes(panel, parts, db, monkeypatch, operation):
     pid, _, app = panel
     path = f"/v1/plans/{pid}/people"
     invite = {"sub": "ann", "access": "comment"}
-    assert app.post(path, json=invite).status_code == 200
+    assert app.post(path, json=invite).status_code == 202
     store = parts[2]["store"]
     store.save({**store.load(), "access_expires_at": 0})
 
@@ -199,7 +202,11 @@ def test_a_blocked_refresh_is_busy_in_the_share_routes(panel, parts, monkeypatch
     if operation == "search":
         got = app.get(f"{path}?{SEARCH}")
     elif operation == "invite":
-        got = app.post(path, json=invite)
+        # Answered at once; the background send meets the busy sign-in and keeps it to send again, not refused.
+        assert app.post(path, json=invite).status_code == 202
+        row, = share_invites.pending(db, pid)
+        assert row["failed"] is None and "refreshing your sign-in" in row["error"]
+        return
     else:
         got = app.get(f"/v1/plans/{pid}/share-link")
     assert (got.status_code, got.json()["error"]["code"]) == (503, "busy")

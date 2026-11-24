@@ -606,7 +606,11 @@ def plan_access(db: DB, request: Request) -> Any:
     """Who has the plan and what each may do (pro/share_access.py)."""
     from brindle.pro import share_access
 
-    got = _library_call(lambda sd: share_access.plan_access(db, request.path_params["id"]))
+    from brindle.pro import share_invites
+
+    plan_id = request.path_params["id"]
+    got = _library_call(lambda sd: share_access.plan_access(db, plan_id))
+    got = share_invites.merge(got, share_invites.pending(db, plan_id))     # with the invites still on their way
     return {**got, "kept_here": None if got["shared"] else _kept_here()}
 
 
@@ -616,29 +620,51 @@ def _access_write(db: DB, plan_id: str, work: Callable[[Any], Any], first: bool 
     return _library(db, plan_id, lambda sd: share_access.plan_write(db, plan_id, work, first=first))
 
 
-def plan_person_invite(db: DB, params: dict, body: dict) -> Any:
-    """Give one person the plan: its first share, if nobody has it yet."""
-    from brindle.pro import share_access as sa
+def _invite_out(db: DB, plan_id: str, row: dict) -> JSONResponse:
+    """Answered before the Library hears of it (202): the plan now and the
+    person's row as it will show; the daemon sends it once this is written."""
+    from brindle.pro import share_invites
 
-    return _access_write(db, params["id"], lambda call: sa.invite(
-        call, body.get("sub"), body.get("access"), _get(body, "sign_off", bool, default=False)), first=True)
+    return JSONResponse({**_plan_now(db, plan_id), "invite": row}, 202,
+                        background=BackgroundTask(share_invites.kick, plan_id))
+
+
+def plan_person_invite(db: DB, params: dict, body: dict) -> Any:
+    """Give one person the plan (its first share, if nobody has it yet), in
+    the background: pro/share_invites.py."""
+    from brindle.pro import share_invites
+
+    return _invite_out(db, params["id"], share_invites.record(
+        db, params["id"], body.get("sub"), body.get("access"), _get(body, "sign_off", bool, default=False)))
 
 
 def plan_person_put(db: DB, params: dict, body: dict) -> Any:
     from brindle.pro import share_access as sa
+    from brindle.pro import share_invites
 
+    if row := share_invites.change(db, params["id"], params["sub"], access=body.get("access")):
+        return _invite_out(db, params["id"], row)       # after their invite, still out
     return _access_write(db, params["id"], lambda call: sa.change(call, params["sub"], body.get("access")))
 
 
 def plan_person_sign_off(db: DB, params: dict, body: dict) -> Any:
     from brindle.pro import share_access as sa
+    from brindle.pro import share_invites
 
+    if row := share_invites.change(db, params["id"], params["sub"], sign_off=body.get("must")):
+        return _invite_out(db, params["id"], row)
     return _access_write(db, params["id"], lambda call: sa.sign_off(call, params["sub"], body.get("must")))
 
 
 def plan_person_delete(db: DB, params: dict, body: dict) -> Any:
     from brindle.pro import share_access as sa
+    from brindle.pro import share_invites
 
+    row = share_invites.withdraw(db, params["id"], params["sub"])
+    if row:
+        return _invite_out(db, params["id"], row)
+    if row == {}:
+        return _plan_now(db, params["id"])              # never sent: nothing to take back
     return _access_write(db, params["id"], lambda call: sa.revoke(call, params["sub"]))
 
 
@@ -649,10 +675,14 @@ def plan_scope_delete(db: DB, params: dict, body: dict) -> Any:
 
 
 def plan_unshare(db: DB, params: dict, body: dict) -> Any:
-    """Stop sharing the plan with everyone it was shared with."""
+    """Stop sharing the plan with everyone it was shared with, invites still
+    out included: one being sent lands first, and is stopped with the rest."""
     from brindle.pro import share_access as sa
+    from brindle.pro import share_invites
 
-    return _access_write(db, params["id"], sa.stop)
+    with share_invites.held(params["id"]):
+        share_invites.drop_all(db, params["id"])
+        return _access_write(db, params["id"], sa.stop)
 
 
 @_json

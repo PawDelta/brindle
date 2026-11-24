@@ -115,14 +115,14 @@ def test_measure_share_speed(parts, backend, monkeypatch, tmp_path):
         measure("Directory preload for first search", [ok(partial(client.get, "/v1/library/people"))],
                 [ok(partial(client.get, "/v1/analysis-docs/scopes"))])
         measure("Unshared plan people endpoint, when called directly", [ok(query)])
-        measure("First invite reply", [ok(add)])
+        measure("First invite reply", [(add, 202)])     # TestClient also waits for the background send
         measure("First invite UI follow-up", [ok(access)], [ok(sync)])
         measure("Shared panel", [ok(access)])
         measure("Shared plan search", [ok(query)])
         with patch.dict(backend.routes, {search: [(403, {"error": "forbidden"})]}):
             measure("Shared plan search with members fallback", [ok(query)])
-        measure("Existing doc invite and refresh", [ok(partial(client.post, plan + "/people", json={
-            "sub": "u_second", "access": "comment"})), ok(access)])
+        measure("Existing doc invite and refresh", [(partial(client.post, plan + "/people", json={
+            "sub": "u_second", "access": "comment"}), 202), ok(access)])
         library.open_draft()
         measure("Owner sync, first draft", [ok(sync)])
         measure("Owner sync, cached draft", [ok(sync)])

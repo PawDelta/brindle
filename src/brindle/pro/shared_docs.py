@@ -501,7 +501,9 @@ def _create(db: DB, p: dict, claim: dict, cur: dict, content: dict, resumed: boo
     if status < 500:
         with db.tx() as c:
             c.execute("DELETE FROM plan_shares WHERE plan_id=? AND doc_id IS NULL", (p["id"],))
-    raise RuntimeError(made.get("error") or ad.why_refused(status, made, body))
+    # A Refused (still a RuntimeError) so a share in the background can tell a refusal from no answer.
+    raise ad.Refused(made.get("error") or ad.why_refused(status, made, body), status,
+                     made.get("error") if isinstance(made.get("error"), str) else None)
 
 
 def ensure_doc(db: DB, p: dict, team: str | None, folder: Any, *, client, store, now: float | None = None) -> str:
