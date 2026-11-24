@@ -1,12 +1,14 @@
 """Call counts for the plan sharing paths."""
 
-from threading import Barrier, BrokenBarrierError
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier, BrokenBarrierError, Event
 
 import pytest
 from starlette.testclient import TestClient
 
 from brindle import plan_docs, plans, spawn, visual_offers
 from brindle.daemon.app import build_app
+from brindle.db import DB
 from brindle.pro import auth, credentials, shared_docs, shared_reader
 from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401 - fixtures
 from test_plans import AUTH, TOKEN, session  # noqa: F401 - fixture
@@ -82,8 +84,8 @@ def test_access_overlaps_all_three_library_reads(shared, backend):
     assert deadlines[0] is not None and all(deadline is deadlines[0] for deadline in deadlines)
 
 
-def _add_teammate_comment(library):
-    library.threads.append({"id": 1, "kind": "comment", "rev": 1, "author": "u_e",
+def _add_teammate_comment(library, thread=1, author="u_e"):
+    library.threads.append({"id": thread, "kind": "comment", "rev": 1, "author": author,
                             "text": "Which VM?", "at": 5.0, "status": "open", "replies": [],
                             "anchor": {"kind": "section", "section": "summary"}})
 
@@ -131,6 +133,56 @@ def test_first_share_sync_can_return_access_with_one_set_of_reads(shared, backen
     assert sorted(backend.paths()) == sorted([f"GET {BASE}", f"GET {DESIGN}", f"GET {DESIGN}/people"])
 
 
+def test_overlapping_sync_recovers_names_for_a_newly_pulled_thread(shared, backend, db):
+    pid, library, net = shared
+    _add_teammate_comment(library)
+    directory = f"GET {DESIGN}/people"
+    backend.routes[directory] = lambda f, h: (503, {"error": "unavailable"})
+    assert shared_docs.sync(db, pid, **net)["pulled"]
+
+    older_is_waiting, release_older = Event(), Event()
+
+    def older_names(form, headers):
+        older_is_waiting.set()
+        assert release_older.wait(3)
+        return 200, {"people": [{"id": "u_e", "display_name": "Dana"}]}
+
+    def background_sync():
+        worker_db = DB()
+        try:
+            return shared_docs.sync(worker_db, pid, **net)
+        finally:
+            worker_db.conn.close()
+
+    backend.routes[directory] = older_names
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        older = pool.submit(background_sync)
+        try:
+            assert older_is_waiting.wait(3)
+            _add_teammate_comment(library, thread=2, author="u_f")
+            backend.routes[directory] = lambda f, h: (
+                200, {"people": [{"id": "u_f", "display_name": "Alex"}]})
+
+            def newer_design(form, headers):
+                release_older.set()
+                older.result(3)
+                return 200, library.view()
+
+            backend.routes[f"GET {DESIGN}"] = newer_design
+            with TestClient(build_app(TOKEN), headers=AUTH) as app:
+                response = app.post(f"/v1/plans/{pid}/sync", json={"include_access": True})
+            assert response.status_code == 200, response.text
+            assert len(response.json()["threads"]) == 2
+            assert "Alex" not in [row["author_name"] for row in response.json()["threads"]]
+        finally:
+            release_older.set()
+
+    backend.calls.clear()
+    shared_docs.sync(db, pid, **net)
+    assert backend.paths() == [f"GET {DESIGN}", directory]
+    assert "Alex" in [row["author_name"] for row in plan_docs.fields(db, plans.get(db, pid))["threads"]]
+
+
 def test_first_share_sync_applies_design_when_metadata_is_unavailable(shared, backend, db):
     pid, library, _ = shared
     _add_teammate_comment(library)
@@ -141,6 +193,7 @@ def test_first_share_sync_applies_design_when_metadata_is_unavailable(shared, ba
         assert response.status_code == 200, response.text
         assert "access" not in response.json()
         assert len(response.json()["threads"]) == 2
+        assert f"GET {BASE}" in backend.paths()
         assert f"POST {DESIGN}/comments" in backend.paths()
 
         backend.routes[f"GET {DESIGN}"] = lambda f, h: (403, {"error": "forbidden"})

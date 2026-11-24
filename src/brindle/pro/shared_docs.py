@@ -642,13 +642,14 @@ def member_names(doc_id: str, *, client=None, store=None) -> dict[str, str] | No
             for p in directory["people"]}
 
 
-def _remember_names(db: DB, share_: dict, names: dict[str, str]) -> bool:
+def _remember_names(db: DB, share_: dict, names: dict[str, str]) -> bool | None:
+    """Return whether names changed, or None if the directory response was discarded."""
     plan_id, doc_id = share_["plan_id"], share_["doc_id"]
     with db.tx() as c:
         # A late directory response cannot clear work left by a newer sync.
         if not c.execute("SELECT 1 FROM plan_shares WHERE plan_id=? AND doc_id=? AND names_pending IS ?",
                          (plan_id, doc_id, share_["names_pending"])).fetchone():
-            return False
+            return None
         before = c.total_changes
         c.executemany("INSERT INTO plan_teammate_names (plan_id, sub, name) VALUES (?,?,?)"
                       " ON CONFLICT(plan_id, sub) DO UPDATE SET name=excluded.name WHERE name<>excluded.name",
@@ -1424,11 +1425,12 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
     if not include_access and share_["doc_id"] == doc_id and (changes or imported or share_["names_pending"]):
         names_share = share_
         names = member_names(doc_id, client=client, store=store)
-    if names is not None:
-        changes += _remember_names(db, names_share, names)
-    elif changes or imported:
+    names_changed = _remember_names(db, names_share, names) if names is not None else None
+    if names_changed is None and (changes or imported):
+        # Another sync may have cleared the earlier token before we pulled these changes.
         db.conn.execute("UPDATE plan_shares SET names_pending=? WHERE plan_id=? AND doc_id=?",
                         (uuid4().hex, p["id"], doc_id))
+    changes += bool(names_changed)
     if changes:
         plan_docs._changed(db, p, p["rev"])
     pushed = _send(db, p, view, client, store, time.time() if now is None else now, acked)
