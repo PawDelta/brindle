@@ -266,6 +266,7 @@ def test_refresh_lock_stops_at_the_request_deadline(tmp_path, monkeypatch):
     assert now - started == pytest.approx(budget)
 
 
+@pytest.mark.variant("the root cause: a refresh-lock holder inside background work must not queue for CPU room")
 def test_the_refresh_lock_holder_never_waits_for_room(tmp_path, monkeypatch):
     """Background work on a busy machine holds the sign-in's refresh lock while its keychain read
     queues for room: every other brindle's request then waits on the lock until lock_timeout."""
