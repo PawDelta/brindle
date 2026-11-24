@@ -209,6 +209,11 @@ def uncached_reading() -> Iterator[None]:
         _uncached_reads.reset(token)
 
 
+def reading_uncached() -> bool:
+    """Whether this caller is inside :func:`uncached_reading` (holding a mutation lock)."""
+    return _uncached_reads.get()
+
+
 class CredentialError(Exception):
     """The store couldn't be used safely. Never contains a secret."""
 

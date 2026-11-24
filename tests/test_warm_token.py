@@ -1,33 +1,35 @@
-"""The daemon's warm brindle Pro sign-in: its Library requests take the access
-token from memory, so none waits on another brindle's refresh (2026-11-24,
-plan sharing), an expired token is refreshed once for every caller, and a
-refused refresh signs out once."""
+"""The daemon's warm brindle Pro sign-in: its Library requests take the sign-in
+and access token from memory, so none reads the keychain or waits on another
+brindle's refresh (2026-11-24, plan sharing); an expired token is refreshed
+once for every caller, each waiting no longer than its deadline; and a refused
+refresh signs out once."""
 
 import fcntl
 import os
+import re
 import threading
 import time
+from contextlib import contextmanager
+from subprocess import CompletedProcess
 
 import pytest
 
+from brindle import keystore, spawn
 from brindle.daemon import app as daemon_app
-from brindle.pro import auth
-from pro_fixtures import backend, pro_env, signing_key  # noqa: F401
+from brindle.pro import analysis_docs as ad
+from brindle.pro import auth, credentials
+from pro_fixtures import BASE, backend, claims, pro_env, sign, signing_key  # noqa: F401
 from test_plans import session  # noqa: F401
 from test_share_panel_access import panel  # noqa: F401
 from test_share_people_regression import SlowLibrary, found
-from test_shared_plan_docs import parts  # noqa: F401
+from test_shared_plan_docs import TEAM_LOGIN, parts  # noqa: F401
 
 try:
     from brindle.pro import warm_token
-except ImportError:     # the base before the warm sign-in: its requests refresh under the lock
+except ImportError:     # the base before the warm sign-in: its requests read and refresh the store
     warm_token = None
 
-
-@pytest.fixture
-def quick_requests(monkeypatch):
-    """Requests whose deadline ends soon: one that waits on the refresh lock fails fast."""
-    monkeypatch.setattr(daemon_app, "REQUEST_DEADLINE", 0.5)
+REAL_SESSION, REAL_ENTITLEMENT = ad._session, ad.require_entitlement
 
 
 class Clock:
@@ -36,6 +38,36 @@ class Clock:
 
     def __call__(self):
         return self.now
+
+
+class Keychain:
+    """The login keychain behind ``security``, counting reads and writes."""
+
+    def __init__(self, monkeypatch):
+        self.items, self.reads, self.writes = {}, 0, 0
+        monkeypatch.setattr(keystore, "_keychain_reads", {})
+        monkeypatch.setattr(keystore.KeychainStore, "_run", lambda store, args, stdin=None: self.run(store, args, stdin))
+
+    def run(self, store, args, stdin):
+        item = (store.service, store.account)
+        if args[0] == "find-generic-password":
+            self.reads += 1
+            blob = self.items.get(item)
+            return CompletedProcess(args, 44 if blob is None else 0, blob or "", "")
+        if args[0] == "-i":
+            self.writes += 1
+            self.items[item] = re.search(r'-w "([^"]*)"', stdin).group(1)
+        else:
+            self.items.pop(item, None)
+        return CompletedProcess(args, 0, "", "")
+
+    def put(self, record):
+        """Another process writes the sign-in (this one's cache doesn't see it)."""
+        self.items[(credentials.SERVICE, credentials.ACCOUNT)] = keystore._encode(record)
+
+    def expire_cache(self):
+        for read in keystore._keychain_reads.values():
+            read.invalidate()
 
 
 def warm(monkeypatch, store, backend, clock):
@@ -51,28 +83,62 @@ def refreshes(backend):
     return backend.paths().count("POST /token/refresh")
 
 
-@pytest.mark.variant("the 2026-11-24 incident end to end: a share route behind another brindle's held refresh lock")
-def test_a_people_search_near_expiry_never_waits_for_another_brindles_refresh(
-        quick_requests, panel, parts, backend, monkeypatch):
-    pid, _, app = panel
-    SlowLibrary(backend)
-    store, clock = parts[2]["store"], Clock()
-    warm(monkeypatch, store, backend, clock)
-    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": "comment"}).status_code == 200
-    # Thirty seconds of the token are left and its renewal hasn't run yet...
-    record = store.load()
-    clock.now = record["access_expires_at"] - 30
-    store.save({**record, "access_expires_at": time.time() + 30})
-    # ... while another brindle holds the refresh lock, its keychain reads queued behind a busy machine.
+def bearer(backend):
+    return backend.calls[-1][2]["Authorization"].removeprefix("Bearer ")
+
+
+@contextmanager
+def lock_held():
+    """Another brindle holds the refresh lock, its keychain reads queued behind a busy machine."""
     auth.lock_path().parent.mkdir(parents=True, exist_ok=True)
     held = os.open(auth.lock_path(), os.O_RDWR | os.O_CREAT, 0o600)
     fcntl.flock(held, fcntl.LOCK_EX)
     try:
-        assert found(app, pid) == ["owner_1"]
+        yield
     finally:
         fcntl.flock(held, fcntl.LOCK_UN)
         os.close(held)
-    assert refreshes(backend) == 0
+
+
+def landed(holder, flight):
+    with holder._cond:
+        assert holder._cond.wait_for(lambda: flight.done, 10)
+
+
+@pytest.fixture
+def quick_requests(monkeypatch):
+    """Requests whose deadline ends soon: one that waits on the refresh lock fails fast."""
+    monkeypatch.setattr(daemon_app, "REQUEST_DEADLINE", 0.5)
+
+
+@pytest.mark.variant("the 2026-11-24 incident end to end: a share route behind another brindle's held refresh lock")
+def test_a_people_search_near_expiry_reads_no_keychain_and_never_waits(quick_requests, panel, parts, backend,
+                                                                       monkeypatch):
+    pid, _, app = panel
+    SlowLibrary(backend)
+    keychain = Keychain(monkeypatch)
+    record = parts[2]["store"].load()
+    keychain.put(record)
+    monkeypatch.setattr(credentials, "default_store", lambda: credentials.KeychainStore())
+    monkeypatch.setattr(auth, "UrllibTransport", lambda **kw: backend)
+    monkeypatch.setattr(ad, "_session", REAL_SESSION)
+    monkeypatch.setattr(ad, "require_entitlement", REAL_ENTITLEMENT)
+    clock = Clock()
+    holder = warm(monkeypatch, credentials.KeychainStore(), backend, clock)
+    if holder is not None:
+        keychain.put({**record, "access_expires_at": time.time() + 30})       # persisted near expiry
+        holder.renew()              # the daemon's start: the token is rotated with one read and one write
+        assert (keychain.reads, keychain.writes, refreshes(backend)) == (1, 1, 1)
+    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": "comment"}).status_code == 200
+    # Thirty seconds of the token are left, its renewal hasn't run yet and the keychain cache has lapsed...
+    stored = keychain.items[(credentials.SERVICE, credentials.ACCOUNT)]
+    clock.now = keystore._decode(stored)["access_expires_at"] - 30
+    keychain.put({**keystore._decode(stored), "access_expires_at": time.time() + 30})
+    keychain.expire_cache()
+    before = (keychain.reads, refreshes(backend))
+    with lock_held():                                    # ... and another brindle holds the refresh lock
+        assert found(app, pid) == ["owner_1"]
+    assert (keychain.reads, refreshes(backend)) == before
 
 
 class CountingCondition(threading.Condition):
@@ -99,17 +165,22 @@ def expired(parts, backend, monkeypatch):
     return client, store, holder
 
 
-def test_callers_on_an_expired_token_share_one_refresh(parts, backend, monkeypatch):
-    client, store, holder = expired(parts, backend, monkeypatch)
-    callers = 4
-    holder._cond = CountingCondition(callers - 1)
+def held_refresh(backend, until):
+    """The backend answers a refresh only once ``until`` says so."""
     spend = backend.routes["POST /token/refresh"]
 
-    def refresh(form, headers):         # answers once every other caller is waiting on it
-        assert holder._cond.all_waiting.wait(10)
+    def refresh(form, headers):
+        assert until(10)
         return spend(form, headers)
 
     backend.routes["POST /token/refresh"] = refresh
+
+
+def test_callers_on_an_expired_token_share_one_refresh(parts, backend, monkeypatch):
+    client, store, holder = expired(parts, backend, monkeypatch)
+    callers = 4
+    holder._cond = CountingCondition(callers)
+    held_refresh(backend, holder._cond.all_waiting.wait)     # answered once every caller waits on it
     answers, errors = [], []
 
     def call():
@@ -128,6 +199,32 @@ def test_callers_on_an_expired_token_share_one_refresh(parts, backend, monkeypat
     assert store.load()["access_token"] == holder._token          # saved for the other brindles
 
 
+def test_a_caller_on_an_expired_token_stops_at_its_deadline(parts, backend, monkeypatch):
+    client, store, holder = expired(parts, backend, monkeypatch)
+    answered = threading.Event()
+    held_refresh(backend, answered.wait)
+    with spawn.deadline(0.05), pytest.raises(auth.AuthError) as busy:
+        auth.authed(client, store, "GET", "/me")
+    assert busy.value.code == "lock_timeout"
+    answered.set()                                  # the refresh it started still finishes, once
+    assert holder.access(client) == store.load()["access_token"]
+    assert refreshes(backend) == 1
+
+
+def test_a_401_on_an_unexpired_token_never_waits_for_the_lock(parts, backend, monkeypatch):
+    client, store = parts[2]["client"], parts[2]["store"]
+    holder = warm(monkeypatch, store, backend, Clock())
+    holder.renew()
+    backend.access_tokens.discard(holder._token)        # the backend no longer takes it
+    with lock_held():
+        assert auth.authed(client, store, "GET", "/me")[0] == 401
+        flight = holder._flight                          # the renewal it started waits for the lock
+        assert flight is not None and refreshes(backend) == 0
+    landed(holder, flight)
+    assert auth.authed(client, store, "GET", "/me")[0] == 200
+    assert refreshes(backend) == 1
+
+
 def test_a_refused_refresh_signs_out_once(parts, backend, monkeypatch):
     client, store, _ = expired(parts, backend, monkeypatch)
     backend.revoked = True                      # the session was ended elsewhere
@@ -139,6 +236,25 @@ def test_a_refused_refresh_signs_out_once(parts, backend, monkeypatch):
         auth.authed(client, store, "GET", "/me")
     assert again.value.code == "not_logged_in"
     assert refreshes(backend) == 1               # signed out once: nothing more is sent
+
+
+def test_a_login_elsewhere_replaces_the_sign_in_while_the_old_one_is_cached(parts, backend, monkeypatch):
+    keychain = Keychain(monkeypatch)
+    store = credentials.KeychainStore()
+    store.save(parts[2]["store"].load())
+    holder = warm(monkeypatch, store, backend, Clock())
+    holder.renew()
+    old = store.load()["access_token"]
+    t = backend.issue()                         # another brindle logs in as someone else
+    keychain.put({"access_token": t["access_token"], "refresh_token": t["refresh_token"],
+                  "access_expires_at": time.time() + 900, "base_url": BASE,
+                  "entitlement": sign(backend.key, claims(sub="user_2", features=list(TEAM_LOGIN)))})
+    with auth.refresh_lock():
+        auth._note_signin()
+    assert store.load()["access_token"] == old             # this process's cache still has the old one
+    assert auth.authed(parts[2]["client"], store, "GET", "/me")[0] == 200
+    assert bearer(backend) == t["access_token"]
+    assert holder.view.load()["access_token"] == t["access_token"]
 
 
 def test_the_background_renewal_rotates_before_expiry_for_every_brindle(parts, backend, monkeypatch):

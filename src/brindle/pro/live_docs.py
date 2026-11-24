@@ -1128,7 +1128,7 @@ def _bearer() -> tuple[str, str]:
 
     client, store = ad._session()
     ad.require_entitlement(store)
-    warm = auth.warm_access(client, store)     # the daemon's, from memory: no refresh lock
+    warm = auth.warm_access(client, store)     # the daemon's, from memory: no keychain, no refresh lock
     if warm is not None:
         return client.base, warm
     cur = store.load() or {}

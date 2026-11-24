@@ -781,6 +781,7 @@ def switch_org(client: Client, store, org_id: str | None, *,
         else:
             cur["org_id"] = org_id
         store.save(cur)
+        _note_signin()
     license.clear_cache()
     return got[1]
 
@@ -791,8 +792,15 @@ class WarmSignIn(Protocol):
     def serves(self, store) -> bool:
         """Whether this holder keeps ``store``'s sign-in."""
 
-    def access(self, client: Client, stale: str | None = None) -> str | None:
-        """An unexpired access token for ``client``'s backend (never ``stale``), or None."""
+    @property
+    def view(self):
+        """The store as this process's requests read it (from memory)."""
+
+    def access(self, client: Client) -> str | None:
+        """An unexpired access token for ``client``'s backend, or None."""
+
+    def refused(self, client: Client, stale: str) -> str | None:
+        """After a 401 for ``stale``: a newer token if one is ready, without waiting."""
 
 
 # The daemon's warm sign-in, when one is installed: its requests use the access token
@@ -800,24 +808,34 @@ class WarmSignIn(Protocol):
 _warm: WarmSignIn | None = None
 
 
-def warm_access(client: Client, store, stale: str | None = None) -> str | None:
+def _warm_for(store) -> WarmSignIn | None:
+    warm = _warm
+    return warm if warm is not None and warm.serves(store) else None
+
+
+def warm_view(store):
+    """``store`` as the warm sign-in that keeps it holds it in memory (its reads need
+    no keychain), or ``store`` itself when none does."""
+    warm = _warm_for(store)
+    return store if warm is None else warm.view
+
+
+def warm_access(client: Client, store) -> str | None:
     """The warm sign-in's access token for ``store`` at ``client``'s backend, or None
     when no warm sign-in keeps that store (the caller reads the store itself)."""
-    warm = _warm
-    if warm is None or not warm.serves(store):
-        return None
-    return warm.access(client, stale)
+    warm = _warm_for(store)
+    return None if warm is None else warm.access(client)
 
 
 def signin_marker() -> Path:
-    """Changed by every login and logout of this OS user's sign-in (beside its
-    refresh lock), never by a token rotation: a process holding an access token
-    in memory reads it to notice that the sign-in it holds was replaced."""
+    """Changed by every login, logout and org switch of this OS user's sign-in
+    (beside its refresh lock), never by a token rotation: a process holding the
+    sign-in in memory reads it to notice that what it holds was replaced."""
     return lock_path().with_name("signin.changed")
 
 
 def _note_signin() -> None:
-    """Mark the sign-in replaced (login, logout). Call with the refresh lock held."""
+    """Mark the sign-in replaced (login, logout, org switch). Call with the refresh lock held."""
     import secrets
 
     path = signin_marker()
@@ -835,16 +853,17 @@ def authed(client: Client, store, method: str, path: str, form: dict | None = No
     """Call a Bearer endpoint (with extra ``headers``), refreshing the access
     token first if it is about to expire and once more if the backend answers 401.
     With a warm sign-in for ``store`` (the daemon's), its in-memory token is used:
-    no store read and no refresh lock while it is unexpired."""
-    if now is None:
-        token = warm_access(client, store)
-        if token is not None:
-            status, body = client.call(method, path, form, token=token, headers=headers)
-            if status == 401:
-                token = warm_access(client, store, stale=token)
-                if token is not None:
-                    status, body = client.call(method, path, form, token=token, headers=headers)
-            return status, body
+    no store read and no refresh lock while it is unexpired, and a 401 is sent
+    again only with a newer token already at hand (else a renewal is started)."""
+    warm = _warm_for(store) if now is None else None
+    token = None if warm is None else warm.access(client)
+    if token is not None:
+        status, body = client.call(method, path, form, token=token, headers=headers)
+        if status == 401:
+            newer = warm.refused(client, token)
+            if newer is not None:
+                status, body = client.call(method, path, form, token=newer, headers=headers)
+        return status, body
     t = time.time() if now is None else now
     cur = store.load() or {}
     if not cur.get("refresh_token"):
