@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
-import { DaemonError, type DesignShareLink, type DocScope, type LibraryPerson, type Plan, type ShareAccess, type SharePerson } from "../../../api/client";
+import { DaemonError, type DesignShareLink, type DocScope, type LibraryPerson, type Plan, type ShareAccess, type SharePerson, type ShareQueued } from "../../../api/client";
 import { SharePanel, type SharePeopleTarget } from "./SharePanel";
 import { ShareLinkPanel, type ShareLinkTarget } from "./ShareLink";
 
@@ -48,14 +48,24 @@ function library(start: Partial<ShareAccess> = {}, signed: string[] = []) {
     revokeScope: (scope) => write(`revokeScope ${scope.kind}:${scope.id}`, scope.id, () => { state.scopes = state.scopes.filter((s) => s.id !== scope.id); }),
     shareScope: (scope) => write(`shareScope ${scope.kind}:${scope.id}`, scope.id, () => { state.shared = true; state.scopes = [...state.scopes, scope]; }),
     stopAll: () => write("stopAll", "all", () => { state.people = []; state.scopes = []; }),
+    // What the daemon is still sending, from this Mac: none unless a test queues some.
+    invites: async () => ({ people: structuredClone(queue) }),
+    ack: async (receipts) => {
+      acks.push(...receipts);
+      for (const q of queue) if (q.receipt && receipts.includes(q.receipt)) q.receipt = null;
+      return { acknowledged: receipts.length };
+    },
+    dismiss: (sub) => write(`dismiss ${sub}`, sub, () => { queue.splice(queue.findIndex((q) => q.sub === sub), 1); }),
   };
-  return { state, calls, target, refuse, plan, held, set hold(on: boolean) { hold = on; } };
+  const queue: ShareQueued[] = [];
+  const acks: string[] = [];
+  return { state, calls, target, refuse, plan, held, queue, acks, set hold(on: boolean) { hold = on; } };
 }
 
 function Reader({ lib, directory = [], onStopAll }: { lib: ReturnType<typeof library>; directory?: LibraryPerson[]; onStopAll?: () => void }) {
   const [plan, setPlan] = useState(lib.plan());
   const [visible, show] = useState(true);
-  return <><button onClick={() => show(true)}>Open</button><SharePanel plan={plan} target={lib.target} nameOf={(s) => s} onBusy={() => {}} owned onStopAll={onStopAll}
+  return <><button onClick={() => show(true)}>Open</button><button onClick={() => setPlan(lib.plan())}>Plan changed</button><SharePanel plan={plan} target={lib.target} nameOf={(s) => s} onBusy={() => {}} owned onStopAll={onStopAll}
     teams={teams} directory={directory} writes={{ begin: () => true, end: (p) => setPlan(p ?? lib.plan()) }} visible={visible} onClose={() => show(false)} /></>;
 }
 const row = (sub: string) => screen.getByTestId(`share-person-${sub}`);
@@ -194,6 +204,90 @@ it("shares a plan nobody has yet from the same panel, saying it uploads a plan k
   expect(lib.calls).toEqual(Array(3).fill("invite lena comment false"));
   expect(row("lena").dataset.access).toBe("comment");
   expect(screen.queryByTestId("share-upload")).toBeNull();
+});
+
+it("shows an add from the daemon's answer while the Library can't be read, after reopening too, until it lands", async () => {
+  const lib = library();
+  const sends = lib.target.invite;
+  const read = lib.target.access;
+  let down = true;
+  lib.target.access = async () => {
+    if (down) throw new DaemonError("busy", "Can't reach your Library.", 503);
+    return read();
+  };
+  // The daemon answers at once with the row it will send, and keeps it on this Mac until it lands.
+  lib.target.invite = async (sub, access, signOff) => {
+    lib.calls.push(`invite ${sub} ${access} ${signOff}`);
+    const q: ShareQueued = { sub, name: null, access, sign_off: signOff ? "required" : null, op: "invite", state: "sharing", error: null, receipt: `r-${sub}`, rev: 1 };
+    lib.queue.push(structuredClone(q));
+    return { ...lib.plan(), invite: q };
+  };
+  // This Mac's list of what is still being sent doesn't answer until the add has shown.
+  const listed = lib.target.invites;
+  const reads: (() => void)[] = [];
+  let holdReads = true;
+  lib.target.invites = () => holdReads ? new Promise((resolve) => reads.push(() => resolve(listed()))) : listed();
+  await act(async () => render(<Reader lib={lib} />));
+  await act(async () => fireEvent.focus(screen.getByTestId("share-search")));
+  fireEvent.click(within(screen.getByTestId("share-result-lena")).getByRole("button"));
+  await act(async () => fireEvent.click(screen.getByTestId("share-add-confirm")));
+  expect(row("lena").dataset.state).toBe("sharing");                     // from the add's own answer
+  expect(lib.acks).toEqual(["r-lena"]);                                   // whose receipt goes back, so it is sent
+  expect(within(row("lena")).queryByRole("button", { name: "What lena can do" })).toBeNull();     // nothing to change until it lands
+  holdReads = false;
+  await act(async () => reads.forEach((go) => go()));
+  fireEvent.click(screen.getByRole("button", { name: "Close share" }));
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Open" })));
+  expect(row("lena").dataset.state).toBe("sharing");
+
+  // It lands: the daemon lets it go, the Library lists her, and the plan changes.
+  down = false;
+  lib.queue.length = 0;
+  lib.state.people.push({ sub: "lena", name: null, access: "comment", sign_off: null });
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Plan changed" })));
+  expect(row("lena").dataset.state).toBe("waiting");
+
+  // One the Library refused says why, and Try again adds them again.
+  lib.queue.push({ sub: "sam", name: null, access: "view", sign_off: null, op: "invite", state: "failed", error: "The Library refused it.", receipt: null, rev: 2 });
+  fireEvent.click(screen.getByRole("button", { name: "Close share" }));
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Open" })));
+  expect(row("sam").dataset.state).toBe("failed");
+  expect(within(row("sam")).getByRole("alert").textContent).toBe("The Library refused it.");
+  lib.queue.length = 0;
+  lib.target.invite = sends;
+  await act(async () => fireEvent.click(within(row("sam")).getByRole("button", { name: "Try again" })));
+  expect([row("sam").dataset.state, row("sam").dataset.access]).toEqual(["waiting", "view"]);
+  expect(lib.calls).toEqual(["invite lena comment false", "invite sam view false"]);
+});
+
+it("never sends a change by itself that wasn't confirmed, and lets Send try a failed receipt again", async () => {
+  // Sam's add was cancelled before its answer arrived: this Mac still has it, unconfirmed.
+  const lib = library();
+  lib.queue.push({ sub: "sam", name: null, access: "view", sign_off: null, op: "invite", state: "sharing", error: null, receipt: "r-sam", rev: 1 });
+  const ack = lib.target.ack;
+  let refuse = true;
+  lib.target.ack = (receipts) => refuse ? Promise.reject(new Error("offline")) : ack(receipts);
+  await act(async () => render(<Reader lib={lib} />));
+  expect(row("sam").dataset.state).toBe("unconfirmed");
+  expect(lib.acks).toEqual([]);                                           // shown, not sent
+  await act(async () => fireEvent.click(within(row("sam")).getByRole("button", { name: "Send" })));
+  expect(row("sam").dataset.state).toBe("unconfirmed");                  // its receipt didn't get through: still the person's
+  refuse = false;
+  await act(async () => fireEvent.click(within(row("sam")).getByRole("button", { name: "Send" })));
+  expect(lib.acks).toEqual(["r-sam"]);
+  expect(row("sam").dataset.state).toBe("sharing");
+});
+
+it("tries a refused removal again as a removal, never as an add", async () => {
+  const lib = library({ people: [{ sub: "sam", name: null, access: "edit", sign_off: null }] });
+  lib.queue.push({ sub: "sam", name: null, access: "edit", sign_off: null, op: "remove", state: "failed", error: "The Library refused it.", receipt: null, rev: 1 });
+  const revoke = lib.target.revoke;
+  lib.target.revoke = (sub) => { lib.queue.length = 0; return revoke(sub); };
+  await act(async () => render(<Reader lib={lib} />));
+  expect([row("sam").dataset.state, row("sam").dataset.access]).toEqual(["failed", "edit"]);      // they still have it
+  await act(async () => fireEvent.click(within(row("sam")).getByRole("button", { name: "Try again" })));
+  expect(lib.calls).toEqual(["revoke sam"]);
+  expect(screen.queryByTestId("share-person-sam")).toBeNull();
 });
 
 it("a team is shared from the first panel and then listed as a row", async () => {

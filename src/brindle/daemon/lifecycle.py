@@ -1104,6 +1104,7 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
     switch_due = clock() + PROVIDER_SWITCH_EVERY
     update_policy_due = clock()
     sharing: asyncio.Task | None = None     # on its own task: a slow Library never holds up these checks
+    inviting: asyncio.Task | None = None
     updating: asyncio.Task | None = None
     while not server.should_exit:
         due = clock() + WATCH_INTERVAL      # the wait's deadline, before any maintenance below
@@ -1135,6 +1136,8 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
         if clock() >= shared_due and (sharing is None or sharing.done()):
             shared_due = clock() + SHARED_DOCS_EVERY
             sharing = asyncio.create_task(asyncio.to_thread(_sync_shared_docs))
+        if inviting is None or inviting.done():
+            inviting = asyncio.create_task(asyncio.to_thread(_send_share_invites))
         if install.changed():
             server.should_exit = True
         elif (idle_exit and activity.open == 0
@@ -1225,6 +1228,22 @@ def _sync_shared_docs() -> None:
     except Exception:  # noqa: BLE001 - a sync must never stop the watch
         log.debug("brindle: couldn't sync shared plans", exc_info=True)
     _poll_review_queue()
+
+
+def _send_share_invites() -> None:
+    """share_invites.run: the share panel's invites that are due, those a
+    restart left out included; a failure is only logged (the rows keep it)."""
+    from brindle.db import DB
+    from brindle.pro import share_invites
+
+    try:
+        db = DB()
+        try:
+            share_invites.run(db)
+        finally:
+            db.conn.close()
+    except Exception:  # noqa: BLE001 - sending must never stop the watch
+        log.debug("brindle: couldn't send the share panel's invites", exc_info=True)
 
 
 def _poll_review_queue() -> None:

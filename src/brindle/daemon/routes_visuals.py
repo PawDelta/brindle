@@ -604,10 +604,35 @@ def _kept_here() -> bool | None:
 @_json
 def plan_access(db: DB, request: Request) -> Any:
     """Who has the plan and what each may do (pro/share_access.py)."""
-    from brindle.pro import share_access
+    from brindle.pro import share_access, share_invites
 
-    got = _library_call(lambda sd: share_access.plan_access(db, request.path_params["id"]))
+    plan_id = request.path_params["id"]
+    got = _library_call(lambda sd: share_access.plan_access(db, plan_id))
+    got = share_invites.merge(got, share_invites.pending(db, plan_id))     # with the invites still on their way
     return {**got, "kept_here": None if got["shared"] else _kept_here()}
+
+
+@_json
+def plan_invites(db: DB, request: Request) -> Any:
+    """The share panel's changes still on their way to the Library, read
+    from this Mac alone: shown even while the Library can't be reached."""
+    from brindle import plan_docs
+    from brindle.pro import share_invites
+
+    plan_id = request.path_params["id"]
+    plan_docs._plan(db, plan_id)
+    return {"people": [share_invites.dto(r) for r in share_invites.pending(db, plan_id)]}
+
+
+def plan_invite_dismiss(db: DB, params: dict, body: dict) -> Any:
+    """Let a refused change to one person go, or discard one never confirmed;
+    the Library keeps what it has."""
+    from brindle import plan_docs
+    from brindle.pro import share_invites
+
+    plan_docs._plan(db, params["id"])
+    _library_call(lambda sd: share_invites.dismiss(db, params["id"], params["sub"], params.get("rev")))
+    return _plan_now(db, params["id"])
 
 
 def _access_write(db: DB, plan_id: str, work: Callable[[Any], Any], first: bool = False) -> Any:
@@ -616,29 +641,65 @@ def _access_write(db: DB, plan_id: str, work: Callable[[Any], Any], first: bool 
     return _library(db, plan_id, lambda sd: share_access.plan_write(db, plan_id, work, first=first))
 
 
-def plan_person_invite(db: DB, params: dict, body: dict) -> Any:
-    """Give one person the plan: its first share, if nobody has it yet."""
-    from brindle.pro import share_access as sa
+def _invite_out(db: DB, plan_id: str, row: dict) -> JSONResponse:
+    """Answered before the Library hears of it (202): the plan now and the
+    person's row as it will show, with the receipt the app sends back
+    (plan_invite_receipts) once it has this answer; only then is it sent."""
+    from brindle.pro import share_invites
 
-    return _access_write(db, params["id"], lambda call: sa.invite(
-        call, body.get("sub"), body.get("access"), _get(body, "sign_off", bool, default=False)), first=True)
+    return JSONResponse({**_plan_now(db, plan_id), "invite": share_invites.dto(row)}, 202)
+
+
+def plan_invite_receipts(db: DB, params: dict, body: dict) -> Any:
+    """The app has the answers that named these receipts: the daemon sends
+    those changes once this is answered (pro/share_invites.py)."""
+    from brindle import plan_docs
+    from brindle.pro import share_invites
+
+    plan_docs._plan(db, params["id"])
+    got = share_invites.ack(db, params["id"], body.get("receipts"))
+    return JSONResponse({"acknowledged": got}, background=BackgroundTask(share_invites.kick, params["id"]))
+
+
+def plan_person_invite(db: DB, params: dict, body: dict) -> Any:
+    """Give one person the plan (its first share, if nobody has it yet), in
+    the background, as the account signed in now: pro/share_invites.py."""
+    from brindle.pro import share_invites
+
+    sign_off = _get(body, "sign_off", bool, default=False)
+    return _invite_out(db, params["id"], _library_call(lambda sd: share_invites.record(
+        db, params["id"], body.get("sub"), body.get("access"), sign_off)))
 
 
 def plan_person_put(db: DB, params: dict, body: dict) -> Any:
     from brindle.pro import share_access as sa
+    from brindle.pro import share_invites
 
+    if row := _library_call(lambda sd: share_invites.change(db, params["id"], params["sub"], "access",
+                                                             body.get("access"))):
+        return _invite_out(db, params["id"], row)       # after their invite, still out
     return _access_write(db, params["id"], lambda call: sa.change(call, params["sub"], body.get("access")))
 
 
 def plan_person_sign_off(db: DB, params: dict, body: dict) -> Any:
     from brindle.pro import share_access as sa
+    from brindle.pro import share_invites
 
+    if row := _library_call(lambda sd: share_invites.change(db, params["id"], params["sub"], "sign_off",
+                                                             body.get("must"))):
+        return _invite_out(db, params["id"], row)
     return _access_write(db, params["id"], lambda call: sa.sign_off(call, params["sub"], body.get("must")))
 
 
 def plan_person_delete(db: DB, params: dict, body: dict) -> Any:
     from brindle.pro import share_access as sa
+    from brindle.pro import share_invites
 
+    row = _library_call(lambda sd: share_invites.withdraw(db, params["id"], params["sub"]))
+    if row:
+        return _invite_out(db, params["id"], row)
+    if row == {}:
+        return _plan_now(db, params["id"])              # never sent: nothing to take back
     return _access_write(db, params["id"], lambda call: sa.revoke(call, params["sub"]))
 
 
@@ -649,10 +710,14 @@ def plan_scope_delete(db: DB, params: dict, body: dict) -> Any:
 
 
 def plan_unshare(db: DB, params: dict, body: dict) -> Any:
-    """Stop sharing the plan with everyone it was shared with."""
+    """Stop sharing the plan with everyone it was shared with, invites still
+    out included: one being sent lands first, and is stopped with the rest."""
     from brindle.pro import share_access as sa
+    from brindle.pro import share_invites
 
-    return _access_write(db, params["id"], sa.stop)
+    with share_invites.held(params["id"]):
+        share_invites.drop_all(db, params["id"])
+        return _access_write(db, params["id"], sa.stop)
 
 
 @_json
@@ -1127,6 +1192,9 @@ ROUTES = [
     Route("/v1/library/designs/{id}/scopes/{kind}/{scope}", _endpoint(design_scope_delete), methods=["DELETE"]),
     Route("/v1/plans/{id}/access", plan_access),
     Route("/v1/plans/{id}/access", _endpoint(plan_unshare), methods=["DELETE"]),
+    Route("/v1/plans/{id}/invites", plan_invites),
+    Route("/v1/plans/{id}/invites/receipts", _endpoint(plan_invite_receipts), methods=["POST"]),
+    Route("/v1/plans/{id}/invites/{sub}", _endpoint(plan_invite_dismiss), methods=["DELETE"]),
     Route("/v1/plans/{id}/people", plan_people),
     Route("/v1/plans/{id}/people", _endpoint(plan_person_invite), methods=["POST"]),
     Route("/v1/plans/{id}/people/{sub}", _endpoint(plan_person_put), methods=["PUT"]),
