@@ -631,7 +631,7 @@ def plan_invite_dismiss(db: DB, params: dict, body: dict) -> Any:
     from brindle.pro import share_invites
 
     plan_docs._plan(db, params["id"])
-    _library_call(lambda sd: share_invites.dismiss(db, params["id"], params["sub"]))
+    _library_call(lambda sd: share_invites.dismiss(db, params["id"], params["sub"], params.get("receipt")))
     return _plan_now(db, params["id"])
 
 

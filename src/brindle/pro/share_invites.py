@@ -228,16 +228,22 @@ def withdraw(db: DB, plan_id: str, sub: str, *, store=None) -> dict | None:
         if old is None:
             return None
         _theirs(old, who)
-        if old["op"] == "invite" and not old["sent"]:
+        # Any of their changes may hold a grant: an older one being sent right now is marked on itself only.
+        sent = c.execute("SELECT MAX(sent) FROM plan_invites WHERE plan_id=? AND sub=?", (plan_id, sub)).fetchone()[0]
+        if old["op"] == "invite" and not sent:
             c.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=?", (plan_id, sub))
             return {}
         return _insert(c, plan_id, sub, "remove", old["access"], old["sign_off"], *who)
 
 
-def dismiss(db: DB, plan_id: str, sub: str, *, store=None) -> None:
+def dismiss(db: DB, plan_id: str, sub: str, receipt: Any = None, *, store=None) -> None:
     """Let a refused change go (the Library keeps what it has), or discard
-    changes the person was never shown as sent (unconfirmed: their answer
-    may never have reached the app)."""
+    the unconfirmed change named by ``receipt`` (its answer may never have
+    reached the app), with any older unconfirmed ones. Refused when it isn't
+    the person's newest change any more: a newer one (another panel's, say)
+    is never discarded by a request about an older one."""
+    if receipt is not None and not isinstance(receipt, str):
+        raise ServiceError("invalid", "receipt is the one the change was shown with", 400)
     who = _asker(db, plan_id, sub, store)
     with db.tx() as c:
         old = _newest(c, plan_id, sub)
@@ -246,8 +252,10 @@ def dismiss(db: DB, plan_id: str, sub: str, *, store=None) -> None:
         _theirs(old, who)
         if old["failed"]:
             c.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=?", (plan_id, sub))
-        else:
-            c.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=? AND acked=0", (plan_id, sub))
+            return
+        if receipt != old["receipt"]:
+            raise ServiceError("conflict", "they were changed again since: read the list again", 409)
+        c.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=? AND acked=0 AND id<=?", (plan_id, sub, old["id"]))
 
 
 def ack(db: DB, plan_id: str, receipts: Any) -> int:

@@ -2485,9 +2485,10 @@ export class DaemonClient {
     return this.post<{ acknowledged: number }>(`/plans/${encodeURIComponent(id)}/invites/receipts`, { receipts });
   }
 
-  /* Let a refused change to one person go: the Library keeps what it has. */
-  dismissPlanInvite(id: string, sub: string) {
-    return this.delete<Plan>(`/plans/${encodeURIComponent(id)}/invites/${encodeURIComponent(sub)}`, {});
+  /* Let a refused change to one person go (the Library keeps what it has), or discard the unconfirmed
+     change shown with `receipt`: refused (409) when they were changed again since. */
+  dismissPlanInvite(id: string, sub: string, receipt?: string | null) {
+    return this.delete<Plan>(`/plans/${encodeURIComponent(id)}/invites/${encodeURIComponent(sub)}${receipt ? `?receipt=${encodeURIComponent(receipt)}` : ""}`, {});
   }
 
   /* One person's access; the Library keeps their sign-off as it is, in the same write. */

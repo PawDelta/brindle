@@ -35,7 +35,8 @@ export interface SharePeopleTarget {
   invites?(): Promise<{ people: ShareQueued[] }>;
   /* The panel has these answers: the daemon sends a change only once its receipt comes back. */
   ack?(receipts: string[]): Promise<unknown>;
-  dismiss?(sub: string): Promise<Plan>;
+  /* `receipt`: the unconfirmed change shown, which alone is discarded (a newer one is refused, not lost). */
+  dismiss?(sub: string, receipt?: string | null): Promise<Plan>;
 }
 type Answer = Plan & { invite?: ShareQueued };
 
@@ -127,6 +128,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
       if (ok) {
         invitesGeneration.current++;
         setQueued((old) => Object.fromEntries(Object.entries(old).map(([sub, q]) => [sub, q.receipt === receipt ? { ...q, receipt: null } : q])));
+        setReload((n) => n + 1);    // what the daemon now has: a receipt for a change already gone confirms nothing
       }
     };
     ack([receipt]).then(() => settled(true), () => settled(false));
@@ -335,7 +337,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
       ? <span className="st" title={p.why ?? undefined}><i className="spin" />{p.sent === "sharing" ? "Sharing…" : "Removing…"}</span>
       : p.sent === "unconfirmed" ? <><span className="st">{p.op === "remove" ? "Not stopped yet" : "Not sent yet"}</span>
         {target?.ack && p.receipt && <button className="sp-btn q" data-testid={`share-send-${key}`} onClick={() => confirm(p.receipt!)}>Send</button>}
-        {target?.dismiss && <button className="sp-btn q end" onClick={() => run(personWork(p.sub, "Couldn't discard", (t) => t.dismiss!(p.sub)))}>Discard</button>}</>
+        {target?.dismiss && <button className="sp-btn q end" onClick={() => run(personWork(p.sub, "Couldn't discard", (t) => t.dismiss!(p.sub, p.receipt)))}>Discard</button>}</>
       : p.sent !== "failed" ? null
       : p.op === "remove" ? <><span className="st bad">Couldn't stop sharing</span>
         <button className="sp-btn q" data-testid={`share-try-${key}`} onClick={() => run(personWork(p.sub, "Couldn't stop sharing", (t) => t.revoke(p.sub)))}>Try again</button>

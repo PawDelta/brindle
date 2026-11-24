@@ -8,6 +8,7 @@ import json
 
 import pytest
 
+from brindle import spawn
 from brindle.db import DB
 from brindle.daemon import lifecycle
 from brindle.daemon.app import build_app
@@ -70,11 +71,20 @@ def ack(app, pid, *receipts):
 
 @pytest.mark.variant("the delivery gate, through the daemon's ASGI app: a 202 whose write is blocked and whose "
                      "client disconnects is never sent, by the watch or a restart; other tests always acknowledge")
-def test_an_add_whose_answer_never_reached_the_app_is_never_sent_by_itself(panel, backend, db):
+def test_an_add_whose_answer_never_reached_the_app_is_never_sent_by_itself(panel, backend, db, monkeypatch):
     pid, library, app = panel
     body = json.dumps(ANN).encode()
+    stop, noticed = spawn.Deadline.stop, {}
+
+    def stopped(self, reason="the request was abandoned"):
+        stop(self, reason)
+        if reason == "the client went away":
+            noticed["disconnect"].set()             # the daemon has handled the app going away
+
+    monkeypatch.setattr(spawn.Deadline, "stop", stopped)
 
     async def cut_off():
+        noticed["disconnect"] = asyncio.Event()
         written, messages = asyncio.Event(), [{"type": "http.request", "body": body, "more_body": False}]
 
         async def receive():
@@ -95,6 +105,9 @@ def test_an_add_whose_answer_never_reached_the_app_is_never_sent_by_itself(panel
                  "headers": [(b"authorization", f"Bearer {TOKEN}".encode()), (b"content-type", b"application/json")]}
         task = asyncio.create_task(build_app(TOKEN, port=8123)(scope, receive, send))
         await written.wait()
+        await noticed["disconnect"].wait()
+        await asyncio.to_thread(lifecycle._send_share_invites)     # the watch, while the answer is still stuck
+        assert not [k for k, _, _ in backend.calls if "analysis-docs" in k]
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -149,6 +162,42 @@ def test_stop_sharing_after_an_earlier_change_landed_is_sent_not_dropped(panel, 
     ack(app, pid, receipt(removed))
     assert len(sent(backend, f"DELETE {BASE}/share/user/bo")) == 1
     assert person(app, pid, "bo") is None and share_invites.pending(db, pid) == []
+
+
+@pytest.mark.variant("Stop sharing while an older change's grant is still being sent: only that change is marked "
+                     "sent, so checking the newest alone would drop everything while the grant lands")
+def test_stop_sharing_while_an_earlier_grant_is_being_sent_is_a_removal(panel, backend, db):
+    pid, library, app = panel
+    first = app.post(f"/v1/plans/{pid}/people", json={"sub": "bo", "access": "view"})
+    assert app.put(f"/v1/plans/{pid}/people/bo", json={"access": "edit"}).status_code == 202   # B, unconfirmed
+    share, withdrawn = backend.routes[f"POST {BASE}/share"], []
+
+    def meanwhile(form, headers):
+        own = DB()                                  # Stop sharing, from another request, while A is out
+        withdrawn.append(share_invites.withdraw(own, pid, "bo"))
+        own.conn.close()
+        return share(form, headers)
+
+    backend.routes[f"POST {BASE}/share"] = meanwhile
+    ack(app, pid, receipt(first))                   # A goes out
+    assert withdrawn[0] and withdrawn[0]["op"] == "remove"      # a removal to send, not a drop
+    backend.routes[f"POST {BASE}/share"] = share
+    ack(app, pid, withdrawn[0]["receipt"])
+    assert len(sent(backend, f"DELETE {BASE}/share/user/bo")) == 1 and person(app, pid, "bo") is None
+
+
+def test_discard_from_one_panel_never_loses_another_panels_newer_change(panel, backend, db):
+    pid, library, app = panel
+    older = receipt(app.post(f"/v1/plans/{pid}/people", json=ANN))         # shown unconfirmed in one panel
+    newer = app.put(f"/v1/plans/{pid}/people/ann", json={"access": "edit"})    # another panel, meanwhile
+    assert app.delete(f"/v1/plans/{pid}/invites/ann?receipt={older}").status_code == 409
+    ack(app, pid, receipt(newer))
+    assert person(app, pid, "ann")["access"] == "edit" and share_invites.pending(db, pid) == []
+
+    # Discarding the one shown when it is still the newest lets it go, unsent.
+    shown = receipt(app.post(f"/v1/plans/{pid}/people", json={"sub": "bo", "access": "view"}))
+    assert app.delete(f"/v1/plans/{pid}/invites/bo?receipt={shown}").status_code == 200
+    assert share_invites.pending(db, pid) == [] and person(app, pid, "bo") is None
 
 
 @pytest.mark.variant("an invite sent again before its backoff is due (due_at ignored) hammers an offline Library, "
