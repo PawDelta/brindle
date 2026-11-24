@@ -794,11 +794,14 @@ def review_policies_impact(db: DB, params: dict, body: dict) -> Any:
 
 
 def _shared_design(repo: str | None, work: Callable[[Any], Any]) -> Any:
-    from brindle import redact
+    from brindle import airgap, config, redact
     from brindle.daemon import routes_actions as actions
     from brindle.pro import analysis_docs, auth, shared_reader
 
-    actions._docs_entitlement(repo, analysis_docs._session()[1])   # signed out or not entitled: a 402, and the app drops the doc
+    if repo:
+        config.load_repo_config(repo)      # its air-gap setting applies before any credential is read
+    # Signed out or not entitled: a 402, and the app drops the doc. Air-gapped: refused before the store is opened.
+    actions._docs_entitlement(repo, None if airgap.enabled() else analysis_docs._session()[1])
     try:
         return work(shared_reader)
     except (RuntimeError, auth.TransportError) as e:    # unreachable or refused

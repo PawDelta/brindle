@@ -78,9 +78,15 @@ def test_a_timed_out_first_add_still_searches_and_try_again_lands_on_the_one_doc
                                                     "sign_off": "none"}]
 
 
-def test_a_second_invite_never_overlaps_a_create_still_out(db, parts, backend):
-    """The first invite's create has committed in the Library, its answer not back yet."""
-    pid, lib, net = parts
+def invite(db, parts, who):
+    pid, _, net = parts
+    return sa.plan_write(db, pid, lambda call: sa.invite(call, who, "comment", False), first=True, **net)
+
+
+def held_create(parts, backend, meanwhile):
+    """Ann's invite, whose create has committed in the Library and whose answer
+    is held while ``meanwhile`` runs; then the errors it ended with."""
+    lib = parts[1]
     created, release, failed = threading.Event(), threading.Event(), []
     commit = lib.create
 
@@ -92,14 +98,11 @@ def test_a_second_invite_never_overlaps_a_create_still_out(db, parts, backend):
 
     backend.routes["POST /analysis-docs"] = held
 
-    def invite(who, on):
-        return sa.plan_write(on, pid, lambda call: sa.invite(call, who, "comment", False), first=True, **net)
-
     def first():
         own = db_mod.DB()
         try:
-            invite("ann", own)
-        except Exception as e:  # noqa: BLE001 - checked below
+            invite(own, parts, "ann")
+        except Exception as e:  # noqa: BLE001 - returned to the test
             failed.append(e)
         finally:
             own.conn.close()
@@ -109,20 +112,69 @@ def test_a_second_invite_never_overlaps_a_create_still_out(db, parts, backend):
     out.start()
     try:
         created.wait()
-        # In this process the create is still out: the second invite waits for its answer.
-        with pytest.raises(RuntimeError, match="already being shared"):
-            invite("bo", db)
-        # Another brindle, with no create of its own, finds the committed doc and links it; a sync moves it on.
-        getattr(sd, "_creating", set()).discard(pid)     # the first create is parked in release.wait()
-        invite("bo", db)
-        db.conn.execute("UPDATE plan_shares SET remote_rev=2 WHERE plan_id=?", (pid,))
+        meanwhile()
     finally:
         release.set()
         out.join()
-    assert not failed
+    return failed
+
+
+def as_another_brindle(db, parts):
+    """Bo's invite from a brindle with no create of its own out (another process)."""
+    getattr(sd, "_creating", set()).discard(parts[0])     # the first create is parked in release.wait()
+    invite(db, parts, "bo")
+
+
+def test_a_second_invite_never_overlaps_a_create_still_out(db, parts, backend):
+    pid = parts[0]
+
+    def meanwhile():
+        # The claim has aged out, but this process's create is still out: a second invite waits for its
+        # answer, and its refusal leaves the claim as it was.
+        db.conn.execute("UPDATE plan_shares SET claimed_at=claimed_at-? WHERE plan_id=?", (sd.CLAIM_FOR + 1, pid))
+        claimed = sd.link(db, pid)["claimed_at"]
+        with pytest.raises(RuntimeError, match="already being shared"):
+            invite(db, parts, "bo")
+        assert sd.link(db, pid)["claimed_at"] == claimed
+        # Another brindle finds the committed doc and links it; a sync moves it on.
+        as_another_brindle(db, parts)
+        db.conn.execute("UPDATE plan_shares SET remote_rev=2 WHERE plan_id=?", (pid,))
+
+    assert held_create(parts, backend, meanwhile) == []
     share = sd.link(db, pid)
     assert (share["doc_id"], share["remote_rev"]) == (DOC, 2)       # the late answer kept the link and the sync
     assert len(sent(backend, "POST /analysis-docs")) == 1
+
+
+def test_a_late_create_answer_grants_nothing_once_its_claim_is_gone(db, parts, backend):
+    pid = parts[0]
+
+    def meanwhile():
+        as_another_brindle(db, parts)
+        db.conn.execute("DELETE FROM plan_shares WHERE plan_id=?", (pid,))   # e.g. the doc was deleted since
+
+    failed = held_create(parts, backend, meanwhile)
+    assert [type(e) for e in failed] == [RuntimeError]
+    assert [f["scope"]["id"] for f in sent(backend, f"POST {BASE}/share")] == ["bo"]     # never ann
+
+
+def test_an_air_gapped_search_reads_no_credential(parts, monkeypatch):
+    """An unlinked plan's search in an air-gapped repo: refused before the sign-in is read."""
+    from starlette.testclient import TestClient
+
+    from brindle import airgap
+    from brindle.daemon.app import build_app
+    from brindle.pro import analysis_docs as ad
+    from test_plans import AUTH, TOKEN
+
+    def opened(*a):
+        raise AssertionError("the credential store was opened")
+
+    monkeypatch.setattr(airgap, "enabled", lambda: True)
+    monkeypatch.setattr(ad, "_session", opened)
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        got = app.get(f"/v1/plans/{parts[0]}/people?{SEARCH}")
+    assert got.status_code == 402, got.json()
 
 
 def test_the_refresh_lock_holder_never_waits_for_room(tmp_path, monkeypatch):

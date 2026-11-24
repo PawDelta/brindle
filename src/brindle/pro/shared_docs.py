@@ -447,28 +447,38 @@ def _find(owner: str, p: dict, client, store) -> str | None:
     return min(hits, key=lambda d: d["created_at"])["doc_id"] if hits else None
 
 
-def _linked(db: DB, plan_id: str, doc_id: str, remote_rev: int, local_rev: int) -> str:
-    """Link the plan to ``doc_id``, unless a share elsewhere already linked
-    it: a late answer then keeps the link, and the revisions synced since."""
+def _linked(db: DB, claim: dict, doc_id: str, remote_rev: int, local_rev: int) -> str:
+    """Link the plan to ``doc_id`` under ``claim`` (the row its share claimed).
+    A share elsewhere that already linked this same doc keeps its link and the
+    revisions synced since. A claim that was given up, taken over, or replaced
+    meanwhile (another account's, or a link to another doc) stops the share
+    here, before anything is granted on it."""
+    plan_id = claim["plan_id"]
     with db.tx() as c:
-        if not c.execute("UPDATE plan_shares SET doc_id=?, remote_rev=?, local_rev=?, claimed_at=NULL"
-                         " WHERE plan_id=? AND doc_id IS NULL", (doc_id, remote_rev, local_rev, plan_id)).rowcount:
-            return link(db, plan_id)["doc_id"]
-        # Written before there was anyone to read it: linked to no Library thread, so it is never sent.
-        c.execute("INSERT OR IGNORE INTO plan_share_threads (plan_id, remote_id, local_id, status)"
-                  " SELECT plan_id, -id, id, status FROM plan_threads WHERE plan_id=?", (plan_id,))
+        mine = c.execute("UPDATE plan_shares SET doc_id=?, remote_rev=?, local_rev=?, claimed_at=NULL"
+                         " WHERE plan_id=? AND doc_id IS NULL AND owner=? AND claimed_at IS ?",
+                         (doc_id, remote_rev, local_rev, plan_id, claim["owner"], claim["claimed_at"])).rowcount
+        if mine:
+            # Written before there was anyone to read it: linked to no Library thread, so it is never sent.
+            c.execute("INSERT OR IGNORE INTO plan_share_threads (plan_id, remote_id, local_id, status)"
+                      " SELECT plan_id, -id, id, status FROM plan_threads WHERE plan_id=?", (plan_id,))
+    if not mine:
+        now = link(db, plan_id)
+        if now is None or now["owner"] != claim["owner"] or now["doc_id"] != doc_id:
+            raise RuntimeError("this plan's share changed while it was being saved: share it again")
     return doc_id
 
 
-def _create(db: DB, p: dict, owner: str, cur: dict, content: dict, resumed: bool | None, client, store) -> str:
+def _create(db: DB, p: dict, claim: dict, cur: dict, content: dict, resumed: bool | None, client, store) -> str:
     """The plan's document in ``owner``'s Library: the one an interrupted
     create already made (at the revision it sent, the Library's first), else
     a new one. Only a refusal gives the claim up. When the outcome is unknown
     (no answer, or a server error) the row stays, for a later share to look.
     ``resumed`` None: another create holds the claim, so look and never make one."""
+    owner = claim["owner"]
     found = _find(owner, p, client, store) if resumed is not False else None
     if found is not None:
-        return _linked(db, p["id"], found, FIRST_REVISION, link(db, p["id"])["local_rev"])
+        return _linked(db, claim, found, FIRST_REVISION, claim["local_rev"])
     if resumed is None:
         raise RuntimeError("this plan is already being shared: its upload hasn't reached your Library yet")
     sent = _payload(content, client)
@@ -487,7 +497,7 @@ def _create(db: DB, p: dict, owner: str, cur: dict, content: dict, resumed: bool
         if status == 200:
             _no_decision_section.add(_server_key(client))
     if status == 200:
-        return _linked(db, p["id"], made["id"], made["version"], cur["rev"])
+        return _linked(db, claim, made["id"], made["version"], cur["rev"])
     if status < 500:
         with db.tx() as c:
             c.execute("DELETE FROM plan_shares WHERE plan_id=? AND doc_id IS NULL", (p["id"],))
@@ -504,15 +514,16 @@ def ensure_doc(db: DB, p: dict, team: str | None, folder: Any, *, client, store,
     cur = plan_docs.revision(db, p["id"])
     content = _content(cur)          # a plan the API would refuse takes no claim
     with _creating_lock:
+        # First: a share refused because this process's create is still out must not touch its claim.
+        if p["id"] in _creating:
+            raise RuntimeError("this plan is already being shared")
         row, resumed = _claim_new(db, p["id"], ent.sub, ent.org_id, time.time() if now is None else now)
         _own(row, ent)
         if row["doc_id"]:
             return row["doc_id"]
-        if p["id"] in _creating:
-            raise RuntimeError("this plan is already being shared")
         _creating.add(p["id"])
     try:
-        return _create(db, p, ent.sub, cur, content, resumed, client, store)
+        return _create(db, p, row, cur, content, resumed, client, store)
     finally:
         with _creating_lock:
             _creating.discard(p["id"])
