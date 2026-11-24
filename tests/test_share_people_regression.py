@@ -177,6 +177,7 @@ def test_an_air_gapped_search_reads_no_credential(parts, monkeypatch):
     assert got.status_code == 402, got.json()
 
 
+@pytest.mark.variant("the root cause: a refresh-lock holder inside background work must not queue for CPU room")
 def test_the_refresh_lock_holder_never_waits_for_room(tmp_path, monkeypatch):
     """Background work on a busy machine holds the sign-in's refresh lock while its keychain read
     queues for room: every other brindle's request then waits on the lock until lock_timeout."""
