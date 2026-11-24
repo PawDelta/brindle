@@ -156,6 +156,7 @@ def test_a_people_search_near_expiry_reads_no_keychain_and_never_waits(route, ba
     assert (keychain.reads, refreshes(backend)) == before
 
 
+@pytest.mark.variant("the real people route with a lapsed entitlement in memory and the flock held")
 def test_a_lapsed_entitlement_is_reloaded_off_the_request_path(route, backend):
     pid, app, keychain, record, clock, holder = route
     now = int(time.time())
@@ -276,6 +277,7 @@ def test_the_no_entitlement_diagnostic_never_refreshes_on_the_request(parts, bac
     assert refreshes(backend) == 0 and holder._entitled(store.load(), current=True)
 
 
+@pytest.mark.variant("state: no entitlement at all, a reload that fails once, then repeated requests and diagnostics")
 def test_a_missing_entitlement_is_reloaded_and_recovers_after_a_failed_reload(parts, backend, monkeypatch):
     store, clock = parts[2]["store"], Clock()
     store.save({k: v for k, v in store.load().items() if k != "entitlement"})
@@ -298,6 +300,7 @@ def test_a_missing_entitlement_is_reloaded_and_recovers_after_a_failed_reload(pa
     assert backend.paths().count("GET /entitlement") == 2
 
 
+@pytest.mark.variant("state: the token in its last minute and the entitlement lapsed at once, after a suspend")
 def test_an_entitlement_due_with_the_token_gets_its_own_pass(parts, backend, monkeypatch):
     keychain, clock = Keychain(monkeypatch), Clock()
     monkeypatch.setattr(auth, "_signed_in_providers", lambda: [])
