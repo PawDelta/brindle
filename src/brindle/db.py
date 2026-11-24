@@ -1372,6 +1372,31 @@ CREATE TABLE IF NOT EXISTS plan_shares (
     access_refused TEXT,           -- the Library refused this account access; NULL once it next gives a whole answer
     review_asked INTEGER NOT NULL DEFAULT 0   -- 1 once any review state seen here had required reviewers or org rules
 );
+-- A change to one person's share still on its way to the Library
+-- (brindle.pro.share_invites): written before the Library hears of it, so
+-- the share panel answers at once and the daemon lands it in the background,
+-- after a restart too. One row per change: a person's newest row is what
+-- the panel shows, and their newest acknowledged row is what is sent.
+CREATE TABLE IF NOT EXISTS plan_invites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,   -- never reused: an answer to an older send never matches a newer change
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    sub TEXT NOT NULL,
+    receipt TEXT NOT NULL UNIQUE,        -- the app sends it back once it has the answer that named it
+    acked INTEGER NOT NULL DEFAULT 0,    -- 1 once it did, or the person sent it from the panel: only then is it sent
+    op TEXT NOT NULL DEFAULT 'invite',   -- invite | remove
+    access TEXT NOT NULL,                -- view | comment | edit
+    sign_off INTEGER NOT NULL DEFAULT 0,
+    owner TEXT NOT NULL,                 -- the account that asked: sent only as that account
+    org_id TEXT,
+    tries INTEGER NOT NULL DEFAULT 0,    -- since the person asked: the backoff and its limit
+    sent INTEGER NOT NULL DEFAULT 0,     -- 1 while the Library may hold a grant for this person from here:
+                                         -- set by any attempt to share, kept by later changes, cleared by a removal
+    due_at REAL NOT NULL,
+    error TEXT,                          -- why the last attempt didn't land; it is still being tried
+    failed TEXT,                         -- the Library refused it: shown with Try again, not sent until then
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS plan_invites_person ON plan_invites(plan_id, sub, id);
 -- The repo a Library folder was made for (brindle.pro.library_folders): the
 -- server keeps folders per person, team or org and refuses any other field,
 -- so which repo a folder belongs to is kept here, by the folder it names.

@@ -33,9 +33,9 @@ export interface DocSource<P extends Plan = Plan> {
 export function planSource(client: PlansClient & PlanDocClient & Partial<PlanSharingClient>, id: string): DocSource {
   return {
     id,
-    people: client.planPeople && client.planAccess && client.invitePlanPerson && client.setPlanPersonAccess && client.setPlanPersonSignOff
+    people: client.libraryPeople && client.planAccess && client.invitePlanPerson && client.setPlanPersonAccess && client.setPlanPersonSignOff
       && client.removePlanPerson && client.removePlanScope ? {
-      search: (query) => client.planPeople!(id, query),
+      members: () => client.libraryPeople!(),
       access: () => client.planAccess!(id),
       invite: (sub, access, signOff) => client.invitePlanPerson!(id, sub, access, signOff),
       change: (sub, access) => client.setPlanPersonAccess!(id, sub, access),
@@ -44,6 +44,9 @@ export function planSource(client: PlansClient & PlanDocClient & Partial<PlanSha
       revokeScope: (scope) => client.removePlanScope!(id, scope),
       shareScope: client.sharePlan && ((scope) => client.sharePlan!(id, scope)),
       stopAll: client.unsharePlan && (() => client.unsharePlan!(id)),
+      invites: client.planInvites && (() => client.planInvites!(id)),
+      ack: client.ackPlanInvites && ((receipts) => client.ackPlanInvites!(id, receipts)),
+      dismiss: client.dismissPlanInvite && ((sub, rev) => client.dismissPlanInvite!(id, sub, rev)),
     } : undefined,
     history: client.planHistory && client.planRevisionChanges ? {
       planHistory: (planId) => client.planHistory!(planId),
@@ -86,9 +89,9 @@ export function sharedSource(client: SharedDesignClient, id: string, repo?: stri
   const send = (tail: string, body: Record<string, unknown>) => client.writeSharedDesign(id, tail, repo ? { ...body, repo } : body);
   return {
     id,
-    people: client.designPeople && client.designAccess && client.inviteDesignPerson && client.setDesignPersonAccess && client.setDesignPersonSignOff
+    people: client.designAccess && client.inviteDesignPerson && client.setDesignPersonAccess && client.setDesignPersonSignOff
       && client.removeDesignPerson && client.removeDesignScope ? {
-      search: (query) => client.designPeople!(id, query, repo),
+      members: () => client.libraryPeople(repo),
       access: () => client.designAccess!(id, repo),
       invite: (sub, access, signOff) => client.inviteDesignPerson!(id, sub, access, signOff, repo),
       change: (sub, access) => client.setDesignPersonAccess!(id, sub, access, repo),

@@ -17,7 +17,10 @@ from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 from functools import wraps
 from pathlib import Path
+from threading import Lock
+from time import monotonic
 from typing import Any
+from urllib.parse import quote
 
 from starlette.requests import Request
 from starlette.background import BackgroundTask
@@ -604,10 +607,35 @@ def _kept_here() -> bool | None:
 @_json
 def plan_access(db: DB, request: Request) -> Any:
     """Who has the plan and what each may do (pro/share_access.py)."""
-    from brindle.pro import share_access
+    from brindle.pro import share_access, share_invites
 
-    got = _library_call(lambda sd: share_access.plan_access(db, request.path_params["id"]))
+    plan_id = request.path_params["id"]
+    got = _library_call(lambda sd: share_access.plan_access(db, plan_id))
+    got = share_invites.merge(got, share_invites.pending(db, plan_id))     # with the invites still on their way
     return {**got, "kept_here": None if got["shared"] else _kept_here()}
+
+
+@_json
+def plan_invites(db: DB, request: Request) -> Any:
+    """The share panel's changes still on their way to the Library, read
+    from this Mac alone: shown even while the Library can't be reached."""
+    from brindle import plan_docs
+    from brindle.pro import share_invites
+
+    plan_id = request.path_params["id"]
+    plan_docs._plan(db, plan_id)
+    return {"people": [share_invites.dto(r) for r in share_invites.pending(db, plan_id)]}
+
+
+def plan_invite_dismiss(db: DB, params: dict, body: dict) -> Any:
+    """Let a refused change to one person go, or discard one never confirmed;
+    the Library keeps what it has."""
+    from brindle import plan_docs
+    from brindle.pro import share_invites
+
+    plan_docs._plan(db, params["id"])
+    _library_call(lambda sd: share_invites.dismiss(db, params["id"], params["sub"], params.get("rev")))
+    return _plan_now(db, params["id"])
 
 
 def _access_write(db: DB, plan_id: str, work: Callable[[Any], Any], first: bool = False) -> Any:
@@ -616,29 +644,65 @@ def _access_write(db: DB, plan_id: str, work: Callable[[Any], Any], first: bool 
     return _library(db, plan_id, lambda sd: share_access.plan_write(db, plan_id, work, first=first))
 
 
-def plan_person_invite(db: DB, params: dict, body: dict) -> Any:
-    """Give one person the plan: its first share, if nobody has it yet."""
-    from brindle.pro import share_access as sa
+def _invite_out(db: DB, plan_id: str, row: dict) -> JSONResponse:
+    """Answered before the Library hears of it (202): the plan now and the
+    person's row as it will show, with the receipt the app sends back
+    (plan_invite_receipts) once it has this answer; only then is it sent."""
+    from brindle.pro import share_invites
 
-    return _access_write(db, params["id"], lambda call: sa.invite(
-        call, body.get("sub"), body.get("access"), _get(body, "sign_off", bool, default=False)), first=True)
+    return JSONResponse({**_plan_now(db, plan_id), "invite": share_invites.dto(row)}, 202)
+
+
+def plan_invite_receipts(db: DB, params: dict, body: dict) -> Any:
+    """The app has the answers that named these receipts: the daemon sends
+    those changes once this is answered (pro/share_invites.py)."""
+    from brindle import plan_docs
+    from brindle.pro import share_invites
+
+    plan_docs._plan(db, params["id"])
+    got = share_invites.ack(db, params["id"], body.get("receipts"))
+    return JSONResponse({"acknowledged": got}, background=BackgroundTask(share_invites.kick, params["id"]))
+
+
+def plan_person_invite(db: DB, params: dict, body: dict) -> Any:
+    """Give one person the plan (its first share, if nobody has it yet), in
+    the background, as the account signed in now: pro/share_invites.py."""
+    from brindle.pro import share_invites
+
+    sign_off = _get(body, "sign_off", bool, default=False)
+    return _invite_out(db, params["id"], _library_call(lambda sd: share_invites.record(
+        db, params["id"], body.get("sub"), body.get("access"), sign_off)))
 
 
 def plan_person_put(db: DB, params: dict, body: dict) -> Any:
     from brindle.pro import share_access as sa
+    from brindle.pro import share_invites
 
+    if row := _library_call(lambda sd: share_invites.change(db, params["id"], params["sub"], "access",
+                                                             body.get("access"))):
+        return _invite_out(db, params["id"], row)       # after their invite, still out
     return _access_write(db, params["id"], lambda call: sa.change(call, params["sub"], body.get("access")))
 
 
 def plan_person_sign_off(db: DB, params: dict, body: dict) -> Any:
     from brindle.pro import share_access as sa
+    from brindle.pro import share_invites
 
+    if row := _library_call(lambda sd: share_invites.change(db, params["id"], params["sub"], "sign_off",
+                                                             body.get("must"))):
+        return _invite_out(db, params["id"], row)
     return _access_write(db, params["id"], lambda call: sa.sign_off(call, params["sub"], body.get("must")))
 
 
 def plan_person_delete(db: DB, params: dict, body: dict) -> Any:
     from brindle.pro import share_access as sa
+    from brindle.pro import share_invites
 
+    row = _library_call(lambda sd: share_invites.withdraw(db, params["id"], params["sub"]))
+    if row:
+        return _invite_out(db, params["id"], row)
+    if row == {}:
+        return _plan_now(db, params["id"])              # never sent: nothing to take back
     return _access_write(db, params["id"], lambda call: sa.revoke(call, params["sub"]))
 
 
@@ -649,15 +713,19 @@ def plan_scope_delete(db: DB, params: dict, body: dict) -> Any:
 
 
 def plan_unshare(db: DB, params: dict, body: dict) -> Any:
-    """Stop sharing the plan with everyone it was shared with."""
+    """Stop sharing the plan with everyone it was shared with, invites still
+    out included: one being sent lands first, and is stopped with the rest."""
     from brindle.pro import share_access as sa
+    from brindle.pro import share_invites
 
-    return _access_write(db, params["id"], sa.stop)
+    with share_invites.held(params["id"]):
+        share_invites.drop_all(db, params["id"])
+        return _access_write(db, params["id"], sa.stop)
 
 
 @_json
 def plan_people(db: DB, request: Request) -> Any:
-    """People to add to the plan: the Library's search of its doc, or the
+    """Per-doc search for older clients: the Library's search of its doc, or the
     org's member list when the search is for anyone in the org and the doc
     can't answer it. That is a plan with no Library doc of this account yet
     (a first share still uploading, or one whose upload timed out), or a
@@ -684,15 +752,15 @@ def plan_people(db: DB, request: Request) -> Any:
         if not (anyone and e.http_status == 403 and e.code == "forbidden"):
             raise
         got = None
-    return _org_people(repo, query.get("q") or "") if got is None else got
+    return _org_people(request, query.get("q") or "") if got is None else got
 
 
-def _org_people(repo: str | None, q: str) -> dict:
+def _org_people(request: Request, q: str) -> dict:
     """The org's people matching ``q``, as the Library's search answers. Who
     already has the plan isn't known here: the panel marks them from its access list."""
     from brindle.service.dto import SharePeopleDTO
 
-    _, members = _org_members(repo)
+    _, members = _org_members(request)
     rows = []
     for m in members:
         name = f"{m.get('first_name') or ''} {m.get('last_name') or ''}".strip() or m.get("name") \
@@ -1079,28 +1147,61 @@ def library_people(db: DB, request: Request) -> Any:
     """The people of the person's org, to pick reviewers from, leaving out
     the person (``me``). ``admin_org``: the org whose review rules the doc
     offers them an override of. Only what to show: the Library decides who may."""
-    ent, members = _org_members(request.query_params.get("repo") or None)
+    ent, members = _org_members(request)
     if not ent.org_id:
         return {"people": []}
     return {"people": [{k: v for k, v in m.items() if k != "role"} for m in members],
             "me": ent.sub, "admin_org": ent.org_id if ent.role in ("owner", "admin") else None}
 
 
-def _org_members(repo: str | None) -> tuple[Any, list[dict]]:
-    """The entitlement and the people of its org, leaving out the person."""
-    from urllib.parse import quote
+class OrgMembersCache:
+    """Keep the active sign-in's directory briefly and coalesce concurrent reads."""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._key: tuple[str, str, str] | None = None
+        self._expires = 0.0
+        self._members: list[dict] = []
+
+    def read(self, client, store, ent) -> list[dict]:
+        from brindle.pro import analysis_docs
+
+        key = client.base, ent.sub, ent.org_id
+        with self._lock:
+            if key == self._key and monotonic() < self._expires:
+                return self._members
+            path = f"/orgs/{quote(ent.org_id, safe='')}/members"
+            response = analysis_docs.api("GET", path, client=client, store=store)
+            self._members = _directory_rows(response.get("members"), ent.sub)
+            self._key = key
+            self._expires = monotonic() + 60
+            return self._members
+
+
+def _org_members(request: Request) -> tuple[Any, list[dict]]:
+    """Check entitlement on every read, even when the directory is cached."""
 
     from brindle.daemon import routes_actions as actions
+    from brindle.pro import analysis_docs
 
-    ent = actions._docs_entitlement(repo)
+    ent = actions._docs_entitlement(request.query_params.get("repo") or None)
     if not ent.org_id:
         return ent, []
-    members = actions.docs_api("GET", f"/orgs/{quote(ent.org_id, safe='')}/members").get("members")
-    return ent, [{"sub": m["sub"], "email": m.get("email") or "",
-                  **{k: m[k] for k in ("display_name", "first_name", "last_name", "name") if isinstance(m.get(k), str)},
-                  "role": next((m[k] for k in ("policy_role", "role") if isinstance(m.get(k), str) and m[k]), "")}
-                 for m in members or []
-                 if isinstance(m, dict) and isinstance(m.get("sub"), str) and m["sub"] != ent.sub]
+
+    def read(_):
+        client, store = analysis_docs._session()
+        pinned = actions._docs_entitlement(None, store)
+        return pinned, request.app.state.org_members.read(client, store, pinned) if pinned.org_id else []
+
+    return _library_call(read)
+
+
+def _directory_rows(members: Any, sub: str) -> list[dict]:
+    return [{"sub": m["sub"], "email": m.get("email") or "",
+             **{k: m[k] for k in ("display_name", "first_name", "last_name", "name") if isinstance(m.get(k), str)},
+             "role": next((m[k] for k in ("policy_role", "role") if isinstance(m.get(k), str) and m[k]), "")}
+            for m in members or []
+            if isinstance(m, dict) and isinstance(m.get("sub"), str) and m["sub"] != sub]
 
 
 @_json
@@ -1133,6 +1234,9 @@ ROUTES = [
     Route("/v1/library/designs/{id}/scopes/{kind}/{scope}", _endpoint(design_scope_delete), methods=["DELETE"]),
     Route("/v1/plans/{id}/access", plan_access),
     Route("/v1/plans/{id}/access", _endpoint(plan_unshare), methods=["DELETE"]),
+    Route("/v1/plans/{id}/invites", plan_invites),
+    Route("/v1/plans/{id}/invites/receipts", _endpoint(plan_invite_receipts), methods=["POST"]),
+    Route("/v1/plans/{id}/invites/{sub}", _endpoint(plan_invite_dismiss), methods=["DELETE"]),
     Route("/v1/plans/{id}/people", plan_people),
     Route("/v1/plans/{id}/people", _endpoint(plan_person_invite), methods=["POST"]),
     Route("/v1/plans/{id}/people/{sub}", _endpoint(plan_person_put), methods=["PUT"]),
