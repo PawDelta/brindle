@@ -544,6 +544,7 @@ def login(client: Client, store, *, show: Callable[[str], None] = print,
             raise
         creds["entitlement"] = got[0]
         store.save(creds)
+        _note_signin()
     license.clear_cache()
     return got[1]
 
@@ -784,10 +785,66 @@ def switch_org(client: Client, store, org_id: str | None, *,
     return got[1]
 
 
+class WarmSignIn(Protocol):
+    """The process's warm sign-in (:mod:`brindle.pro.warm_token`, the daemon's)."""
+
+    def serves(self, store) -> bool:
+        """Whether this holder keeps ``store``'s sign-in."""
+
+    def access(self, client: Client, stale: str | None = None) -> str | None:
+        """An unexpired access token for ``client``'s backend (never ``stale``), or None."""
+
+
+# The daemon's warm sign-in, when one is installed: its requests use the access token
+# it holds in memory and never wait on the refresh lock while that token is unexpired.
+_warm: WarmSignIn | None = None
+
+
+def warm_access(client: Client, store, stale: str | None = None) -> str | None:
+    """The warm sign-in's access token for ``store`` at ``client``'s backend, or None
+    when no warm sign-in keeps that store (the caller reads the store itself)."""
+    warm = _warm
+    if warm is None or not warm.serves(store):
+        return None
+    return warm.access(client, stale)
+
+
+def signin_marker() -> Path:
+    """Changed by every login and logout of this OS user's sign-in (beside its
+    refresh lock), never by a token rotation: a process holding an access token
+    in memory reads it to notice that the sign-in it holds was replaced."""
+    return lock_path().with_name("signin.changed")
+
+
+def _note_signin() -> None:
+    """Mark the sign-in replaced (login, logout). Call with the refresh lock held."""
+    import secrets
+
+    path = signin_marker()
+    old = os.umask(0o077)
+    try:
+        path.write_text(secrets.token_hex(8))
+    except OSError:
+        log.debug("couldn't mark the sign-in changed")
+    finally:
+        os.umask(old)
+
+
 def authed(client: Client, store, method: str, path: str, form: dict | None = None,
            *, now: float | None = None, headers: dict | None = None) -> tuple[int, dict]:
     """Call a Bearer endpoint (with extra ``headers``), refreshing the access
-    token first if it is about to expire and once more if the backend answers 401."""
+    token first if it is about to expire and once more if the backend answers 401.
+    With a warm sign-in for ``store`` (the daemon's), its in-memory token is used:
+    no store read and no refresh lock while it is unexpired."""
+    if now is None:
+        token = warm_access(client, store)
+        if token is not None:
+            status, body = client.call(method, path, form, token=token, headers=headers)
+            if status == 401:
+                token = warm_access(client, store, stale=token)
+                if token is not None:
+                    status, body = client.call(method, path, form, token=token, headers=headers)
+            return status, body
     t = time.time() if now is None else now
     cur = store.load() or {}
     if not cur.get("refresh_token"):
@@ -827,6 +884,7 @@ def logout(client: Client | None, store) -> None:
             creds = {}
         _revoke_quietly(client, creds.get("refresh_token"))
         store.delete()
+        _note_signin()
     license.clear_cache()
 
 
