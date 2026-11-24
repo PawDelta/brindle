@@ -34,6 +34,7 @@ ANCHOR_FIELDS = ("kind", "section", "start", "end", "quote", "decision", "option
 ANCHOR_KINDS = ("text", "diagram", "decision", "section")
 REVISION_SOURCES = ("proposal", "edit", "suggestion")
 UNTITLED = "Plan"
+ON_PLAN_ROLES = ("author", "required", "optional", "editor", "suggester", "commenter")   # SharePersonDTO's
 
 
 def _who(sub: Any, me: str) -> str:
@@ -176,9 +177,16 @@ def _titled(doc_id: str, view: dict, client, store) -> dict:
 
 
 def _ask(doc_id: str, method: str, tail: str, body: dict | None, client, store) -> dict:
+    return _asked(doc_id, lambda call: call(method, tail, body), client, store)
+
+
+def _asked(doc_id: str, work, client, store) -> dict:
+    """The design as ``work`` leaves it: ``work(call)`` makes its Library calls
+    with ``call(method, tail, body)``, under the design, and returns the view."""
     client, store = ad._session(client, store)
     me = ad.require_entitlement(store).sub
-    view = ad.api(method, sd._path(doc_id, tail), body, client=client, store=store)
+    view = work(lambda method, tail, body=None: ad.api(method, sd._path(doc_id, tail), body,
+                                                       client=client, store=store))
     return _dto(doc_id, _titled(doc_id, view, client, store), me,
                 names=sd.member_names(doc_id, client=client, store=store))
 
@@ -210,6 +218,28 @@ def request_access(doc_id: str, role: Any, sub: str | None = None, *, action: st
     return _ask(doc_id, "POST", tail, {"role": role}, client, store)
 
 
+def _str(raw: Any) -> str:
+    return raw if isinstance(raw, str) else ""
+
+
+def _person(raw: Any) -> dict | None:
+    """One row of the Library's people search as the share panel reads it, or
+    None for a row nobody could be added by (no account id). A field an older
+    Library doesn't send takes its empty value, and a plan role a newer one
+    names that this brindle doesn't know reads as none (``on_plan`` still
+    says they have it): one such row must never fail the whole search."""
+    if not isinstance(raw, dict) or not _str(raw.get("id")):
+        return None
+    sub, email, role = raw["id"], _str(raw.get("email")), raw.get("on_plan_role")
+    teams = raw.get("teams") if isinstance(raw.get("teams"), list) else []
+    return {"id": sub, "display_name": _str(raw.get("display_name")).strip() or email or sub, "email": email,
+            "teams": [{"id": t["id"], "name": _str(t.get("name")) or t["id"]} for t in teams
+                      if isinstance(t, dict) and _str(t.get("id"))],
+            "role": _str(raw.get("role")),
+            "on_plan": raw["on_plan"] if isinstance(raw.get("on_plan"), bool) else bool(role),
+            "on_plan_role": role if role in ON_PLAN_ROLES else None}
+
+
 def people(doc_id: str, filters: dict, *, client=None, store=None) -> dict:
     """Search people the Library says can already read this design, or with
     ``include_unshared`` also the org's members who could be given it."""
@@ -217,15 +247,15 @@ def people(doc_id: str, filters: dict, *, client=None, store=None) -> dict:
     ad.require_entitlement(store)
     query = urlencode({k: v for k, v in filters.items() if k in ("q", "team", "role", "on_plan", "include_unshared")})
     got = ad.api("GET", sd._path(doc_id, "/people") + (f"?{query}" if query else ""), client=client, store=store)
-    return SharePeopleDTO.model_validate(got).model_dump()
+    rows = got.get("people") if isinstance(got.get("people"), list) else []
+    return SharePeopleDTO.model_validate({"people": [p for p in map(_person, rows) if p]}).model_dump()
 
 
 def reviewer(doc_id: str, sub: str, required: bool | None, *, client=None, store=None) -> dict:
     """Change one person without replacing anyone else's invitation."""
-    resource = "reviewers" if required is None else "permissions"
-    return _ask(doc_id, "DELETE" if required is None else "PUT",
-                f"/{resource}/{quote(sub, safe='')}",
-                None if required is None else {"role": "reviewer", "required": required}, client, store)
+    if required is None:
+        return _ask(doc_id, "DELETE", f"/reviewers/{quote(sub, safe='')}", None, client, store)
+    return _asked(doc_id, lambda call: sd.ask_to_sign(call, sub, required), client, store)
 
 
 def timeline(doc_id: str, *, client=None, store=None) -> dict:

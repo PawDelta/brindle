@@ -61,12 +61,12 @@ class AccessLibrary(Library):
         return self.read()
 
     def put_role(self, form, headers):
+        """``{sign_off}``: the access held is kept and a signer can comment and suggest."""
         self.revoke_edit()
-        role = form.get("role", "view")
-        self.permissions["reviewer"] = {"can_edit": role == "edit", "can_comment": role != "view",
-                                        "can_suggest": role in ("edit", "reviewer")}
-        self.reviewers = ([{"sub": "reviewer", "required": form.get("required", True)}]
-                          if role == "reviewer" else [])
+        self.permissions["reviewer"] = {"can_edit": False, **self.permissions.get("reviewer", {}),
+                                        "can_comment": True, "can_suggest": True}
+        self.reviewers = ([{"sub": "reviewer", "required": form["sign_off"] == "required"}]
+                          if form["sign_off"] != "none" else [])
         return self.read()
 
     def comment(self, form, headers):
