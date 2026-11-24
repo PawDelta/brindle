@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -160,20 +162,23 @@ def _dto(doc_id: str, view: dict, me: str, *, review: bool = True, names: dict |
                        for s in view.get("sign_offs") or [])).to_json()
 
 
-def _titled(doc_id: str, view: dict, client, store) -> dict:
-    """The design view with the doc's title: the Library's design view carries
-    none, its doc's own entry does. Without it (refused, unreachable) the view
-    stays as it is and the reader says ``UNTITLED``."""
+def _title(doc_id: str, client, store) -> str | None:
+    """Read the title from the doc's own entry, when available."""
     from brindle.pro import auth
 
-    if isinstance(view.get("title"), str) and view["title"].strip():
-        return view
     try:
         meta = ad.api("GET", ad._doc_path(doc_id), client=client, store=store)
     except (RuntimeError, auth.AuthError, auth.TransportError):
-        return view
+        return None
     title = meta.get("title")
-    return {**view, "title": mask(title)} if isinstance(title, str) and title.strip() else view
+    return mask(title) if isinstance(title, str) and title.strip() else None
+
+
+def _titled(doc_id: str, view: dict, client, store) -> dict:
+    if isinstance(view.get("title"), str) and view["title"].strip():
+        return view
+    title = _title(doc_id, client, store)
+    return {**view, "title": title} if title else view
 
 
 def _ask(doc_id: str, method: str, tail: str, body: dict | None, client, store) -> dict:
@@ -187,8 +192,8 @@ def _asked(doc_id: str, work, client, store) -> dict:
     me = ad.require_entitlement(store).sub
     view = work(lambda method, tail, body=None: ad.api(method, sd._path(doc_id, tail), body,
                                                        client=client, store=store))
-    return _dto(doc_id, _titled(doc_id, view, client, store), me,
-                names=sd.member_names(doc_id, client=client, store=store))
+    names = sd.member_names(doc_id, client=client, store=store) if _can(view, me, "can_edit") else None
+    return _dto(doc_id, _titled(doc_id, view, client, store), me, names=names)
 
 
 def _rev(rev: Any) -> int:
@@ -205,7 +210,16 @@ def _text(text: Any) -> str:
 
 def read(doc_id: str, *, client=None, store=None) -> dict:
     """The design as this account may read it now."""
-    return _ask(doc_id, "GET", "", None, client, store)
+    client, store = ad._session(client, store)
+    me = ad.require_entitlement(store).sub
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        title = pool.submit(copy_context().run, _title, doc_id, client, store)
+        view = ad.api("GET", sd._path(doc_id), client=client, store=store)
+        # The design carries the current permission. The directory requires edit access.
+        names = sd.member_names(doc_id, client=client, store=store) if _can(view, me, "can_edit") else None
+        if not (isinstance(view.get("title"), str) and view["title"].strip()) and (name := title.result()):
+            view = {**view, "title": name}
+    return _dto(doc_id, view, me, names=names)
 
 
 def request_access(doc_id: str, role: Any, sub: str | None = None, *, action: str = "grant", client=None, store=None) -> dict:
@@ -462,5 +476,5 @@ def _as_member(doc_id: str, title: Any, client, store) -> dict | None:
             raise ServiceError(e.code, "the organization's key for this plan is unavailable", 503) from e
         raise ServiceError("upstream", mask(str(e)), 502) from e
     named = {**view, "title": title} if isinstance(title, str) and title.strip() else view
-    return _dto(doc_id, _titled(doc_id, named, client, store), me,
-                names=sd.member_names(doc_id, client=client, store=store))
+    names = sd.member_names(doc_id, client=client, store=store) if _can(view, me, "can_edit") else None
+    return _dto(doc_id, _titled(doc_id, named, client, store), me, names=names)

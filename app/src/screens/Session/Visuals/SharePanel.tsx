@@ -18,6 +18,8 @@ export interface SharePeopleTarget {
   /* The org directory, loaded on open and filtered here. */
   members(): Promise<{ people: LibraryPerson[] }>;
   access(): Promise<ShareAccess>;
+  /* The owner's first share refresh also brings back any teammate changes. */
+  syncAccess?(): Promise<ShareAccess>;
   /* Give one person the plan; for a plan nobody has yet, this is its first share. The author's plan
      answers at once with `invite`, the change the daemon now sends in the background (as may change,
      signOff and revoke for a person whose invite is still out). */
@@ -109,6 +111,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const answered = useRef<Plan | null>(null);
   const mounted = useRef(true);
   const accessGeneration = useRef(0);
+  const wasShared = useRef(shared);
   const latest = useRef({ target, writes, onBusy, onStopAll });
   latest.current = { target, writes, onBusy, onStopAll };
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; accessGeneration.current++; invitesGeneration.current++; }; }, []);
@@ -142,12 +145,15 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   // Who has it, from the Library: when the panel opens and after each change made here. An answer
   // asked for before a later change is dropped, so it never paints over newer rows.
   useEffect(() => {
+    const firstShare = shared && !wasShared.current;
+    wasShared.current = shared;
     const generation = ++accessGeneration.current;
     const invitesAt = ++invitesGeneration.current;
     setAccessReadyFor(null);
     if (!visible || !target) return;
     setAccessError(null);
-    target.access().then((got) => {
+    const request = firstShare && target.syncAccess ? target.syncAccess() : target.access();
+    request.then((got) => {
       if (accessGeneration.current !== generation) return;
       setAccess(got);
       setAccessReadyFor({ target, reload, shared });
@@ -165,10 +171,13 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   // A change the daemon is still sending lands in the background: the plan changes when it does
   // (or is refused), so the list is read again then.
   const sending = useRef(false);
+  const previousPlan = useRef(plan);
   sending.current = Object.values(queued).some((q) => q.state !== "failed" && !q.receipt)
     || !!access?.people.some((p) => p.state === "sharing" || p.state === "removing");
   useEffect(() => {
-    if (sending.current) setReload((n) => n + 1);
+    // The transition to shared already refreshes access.
+    if (sending.current && !!previousPlan.current.gate === !!plan.gate) setReload((n) => n + 1);
+    previousPlan.current = plan;
   }, [plan]);
   // The rules a first share would meet, for the plan and revision they were asked for.
   useEffect(() => {

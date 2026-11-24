@@ -319,7 +319,7 @@ def on_merged(repo_root: str, docs: list[Doc]) -> None:
 def _session(client=None, store=None):
     from brindle.pro import auth, credentials
 
-    store = store or credentials.default_store()
+    store = store or credentials.request_store() or credentials.default_store()
     # The daemon's warm sign-in holds it in memory: its requests read no keychain, and the
     # client, entitlement and token all come from the one sign-in pinned here.
     pinned = auth.warm_pin(store)
@@ -329,7 +329,7 @@ def _session(client=None, store=None):
             client = auth.Client(creds.get("base_url"), auth.UrllibTransport(timeout=SEND_WAIT))
         return client, store
     if client is None:
-        creds = store.load() or {}
+        creds = credentials.request_load(store) or {}
         client = auth.Client(creds.get("base_url"), auth.UrllibTransport(timeout=SEND_WAIT))
     return client, store
 
@@ -347,11 +347,14 @@ def require_entitlement(store=None):
     if airgap.enabled():
         raise RuntimeError("air-gap mode is on: nothing is sent")
     try:
-        if store is None and auth._warm is not None:
-            # The daemon's warm sign-in holds the entitlement in memory: no keychain read.
-            default = credentials.default_store()
-            view = auth.warm_view(default)
-            store = None if view is default else view
+        if store is None:
+            store = credentials.request_store()
+            if auth._warm is not None:
+                # The daemon's warm sign-in holds the entitlement in memory.
+                default = store if store is not None else credentials.default_store()
+                view = auth.warm_view(default)
+                if view is not default:
+                    store = view
         ent = license.current(refresh=False, store=store)
     except Exception as e:  # noqa: BLE001
         if isinstance(e, license.LicenseError) and isinstance(e.__cause__, keystore.KeychainReadBlocked):

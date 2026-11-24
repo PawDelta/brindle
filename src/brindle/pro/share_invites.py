@@ -406,13 +406,13 @@ def _send(db: DB, row: dict, client, store) -> None:
         if share is None or share["doc_id"] is None:
             return                  # never shared: nobody to remove
         try:
-            sa.plan_write(db, plan_id, lambda call: sa.revoke(call, sub), client=client, store=store)
+            sa.plan_write(db, plan_id, lambda call: sa.revoke(call, sub), notify=False, client=client, store=store)
         except ad.Refused as e:
             if e.status != 404:     # never had it: removed already
                 raise
         return
     sa.plan_write(db, plan_id, lambda call: sa.invite(call, sub, row["access"], bool(row["sign_off"])),
-                  first=True, client=client, store=store)
+                  first=True, notify=False, client=client, store=store)
 
 
 def _outcome(e: BaseException) -> tuple[bool, str]:

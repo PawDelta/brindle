@@ -809,7 +809,7 @@ def _link_own(c, plan_id: str, owner: str, known: dict, threads: Any) -> None:
                 pair(r["id"], (parent["local_id"], "reply", r.get("text") or "", None, None, False), "open")
 
 
-def _pull(db: DB, p: dict, share_: dict, view: dict, names: dict[str, str]) -> int:
+def _pull(db: DB, p: dict, share_: dict, view: dict) -> int:
     rev, now = share_["local_rev"], time.time()
     cur = plan_docs.revision(db, p["id"], rev) if view.get("rev") == share_["remote_rev"] else None
     changes = 0
@@ -823,9 +823,6 @@ def _pull(db: DB, p: dict, share_: dict, view: dict, names: dict[str, str]) -> i
 
         changes += plan_answers.pull(c, p["id"], share_["owner"], view, now)
     changes += _remember(db, p["id"], view)
-    changes += _remember_names(db, p["id"], names)
-    if changes:
-        plan_docs._changed(db, p, p["rev"])
     return changes
 
 
@@ -1371,7 +1368,8 @@ def _trade(replica: DraftReplica, live: DraftLink) -> bool:
     return replica.sections() != before
 
 
-def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = None) -> dict:
+def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = None,
+         include_access: bool = False) -> dict:
     """Take a teammate's new text if the plan hasn't changed here, bring back
     what teammates wrote, then send what was done here; with a live draft,
     trade its updates on the document's relay (``relays``) last. Pulled first, so a refused send still
@@ -1381,16 +1379,23 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
     personal doc; any other failure is raised."""
     p = plan_docs._plan(db, plan_id)
     client, store = ad._session(client, store)
+    access, names = None, None
     try:
         share_ = _shared(db, p["id"], store)
-        view = review_policies.ask(db, p, "GET", _path(share_["doc_id"]), client=client, store=store)
+        doc_id = share_["doc_id"]
+        if include_access:
+            from brindle.pro import share_access
+
+            meta, view, names = share_access.plan_reads(db, p, doc_id, client, store)
+            access = {"shared": True, **share_access.summary(meta, view, names)}
+        else:
+            view = review_policies.ask(db, p, "GET", _path(doc_id), client=client, store=store)
     except RuntimeError as e:
         no_team = not isinstance(e, ad.Refused) or e.code == NO_FEATURE     # an outage or org rule says nothing of it
         if no_team and _note_ended(db, p, _issued(client, store)):
             return {**link(db, p["id"]), "pulled": 0, "pushed": False}
         raise
     _team_active(db, p, store)
-    names = member_names(share_["doc_id"], client=client, store=store)
     imported = _import(db, p, share_, view)
     share_ = link(db, p["id"])
     # The draft's updates go before the threads, so what those are anchored on is there.
@@ -1404,11 +1409,18 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
     imported += _carry_over(db, p, share_, view, replica)
     if imported:
         p, share_ = plan_docs._plan(db, p["id"]), link(db, p["id"])
-    pulled = imported + typed + _pull(db, p, share_, view, names)
+    changes = _pull(db, p, share_, view)
+    if names is None and (changes or imported):
+        names = member_names(doc_id, client=client, store=store)
+    if names is not None:
+        changes += _remember_names(db, p["id"], names)
+    if changes:
+        plan_docs._changed(db, p, p["rev"])
     pushed = _send(db, p, view, client, store, time.time() if now is None else now, acked)
     if pushed or imported or typed:
         plan_docs._changed(db, p, p["rev"])
-    return {**link(db, p["id"]), "pulled": pulled, "pushed": pushed}
+    return {**link(db, p["id"]), "pulled": imported + typed + changes, "pushed": pushed,
+            **({"access": access} if access is not None else {})}
 
 
 def sign_off(db: DB, plan_id: str, rev: Any, *, version: Any = None, client=None, store=None) -> dict:
@@ -1512,9 +1524,11 @@ def _note_unconfirmed(db: DB, plan_id: str, e: Exception, store) -> None:
 
 def account(store=None) -> str | None:
     """Who is signed in here, by the verified entitlement held; None if that can't be said."""
-    from brindle.pro import license
+    from brindle.pro import auth, credentials, license
 
     try:
+        if store is None and (current := credentials.request_store()) is not None:
+            store = auth.warm_view(current)
         return license.current(refresh=False, store=store).sub
     except Exception:  # noqa: BLE001 - nobody can be named
         return None

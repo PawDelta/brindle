@@ -22,6 +22,8 @@ a design someone else shared is changed by an editor of it, by its doc id.
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from typing import Any
 from urllib.parse import quote
 
@@ -170,22 +172,36 @@ def plan_access(db: DB, plan_id: str, *, client=None, store=None) -> dict:
         return {"shared": False, "scopes": [], "people": []}
     client, store = ad._session(client, store)
     share_ = sd._shared(db, p["id"], store)
-    names = sd.member_names(share_["doc_id"], client=client, store=store)
-    return {"shared": True, **read(_plan_call(db, p, share_["doc_id"], client, store), names)}
+    meta, view, names = plan_reads(db, p, share_["doc_id"], client, store)
+    return {"shared": True, **summary(meta, view, names)}
+
+
+def plan_reads(db: DB, p: dict, doc_id: str, client, store) -> tuple[dict, dict, dict[str, str]]:
+    """Read the panel's three inputs together, then record review state on the DB's thread."""
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        meta = pool.submit(copy_context().run, ad._call, "GET", ad._doc_path(doc_id),
+                           client=client, store=store)
+        design = pool.submit(copy_context().run, ad._call, "GET", sd._path(doc_id),
+                             client=client, store=store)
+        directory = pool.submit(copy_context().run, sd.member_names, doc_id, client=client, store=store)
+        result = review_policies.checked(db, p, meta.result())
+        view = review_policies.checked(db, p, design.result())
+        return result, view, directory.result()
 
 
 def plan_write(db: DB, plan_id: str, work: Callable[[Call], dict | None], *, first: bool = False,
-               client=None, store=None) -> dict | None:
+               notify: bool = True, client=None, store=None) -> dict | None:
     """Run one write on the plan's Library doc and keep the review state it
     answered with. ``first``: the write may be its first share, which
-    uploads the plan."""
+    uploads the plan. Queued invites publish once their queue entry is settled."""
     p = plan_docs._plan(db, plan_id)
     sd._review_open(p)
     client, store = ad._session(client, store)
     doc_id = (sd.ensure_doc(db, p, None, None, client=client, store=store) if first
               else sd._shared(db, p["id"], store)["doc_id"])
     design = work(_plan_call(db, p, doc_id, client, store))
-    if (isinstance(design, dict) and sd._remember(db, p["id"], design)) or first:
+    changed = isinstance(design, dict) and sd._remember(db, p["id"], design)
+    if notify and (changed or first):
         plan_docs._changed(db, p, p["rev"])
     return sd.link(db, p["id"])
 

@@ -2556,6 +2556,10 @@ export class DaemonClient {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/sync`, {});
   }
 
+  syncPlanAccess(id: string) {
+    return this.post<Plan & { access?: ShareAccess }>(`/plans/${encodeURIComponent(id)}/sync`, { include_access: true });
+  }
+
   /* Make a plan the Library can't confirm a personal doc. The engine says when it may be offered. */
   stopSharingPlan(id: string, rev: number) {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/stop-sharing`, { rev });

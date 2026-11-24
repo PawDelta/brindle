@@ -773,7 +773,16 @@ def _org_people(request: Request, q: str) -> dict:
 
 
 def plan_sync(db: DB, params: dict, body: dict) -> Any:
-    return _library(db, params["id"], lambda sd: sd.sync(db, params["id"]))
+    from brindle.pro import share_invites
+
+    plan_id = params["id"]
+    include_access = _get(body, "include_access", bool, default=False)
+    got = _library_call(lambda sd: sd.sync(db, plan_id, include_access=True) if include_access
+                        else sd.sync(db, plan_id))
+    plan = _plan_now(db, plan_id)
+    if include_access and (access := got.get("access")) is not None:
+        plan["access"] = {**share_invites.merge(access, share_invites.pending(db, plan_id)), "kept_here": None}
+    return plan
 
 
 def plan_stop_sharing(db: DB, params: dict, body: dict) -> Any:
