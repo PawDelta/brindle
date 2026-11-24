@@ -224,23 +224,29 @@ class WarmToken:
                     raise keystore.CredentialError(
                         f"couldn't read the brindle Pro sign-in ({getattr(flight.error, 'code', 'error')})")
             record = dict(self._record)
-            # One reload per entitlement a request finds lapsed (or missing); one that failed
-            # is tried again by the background passes, not by every request.
-            key = record.get("entitlement")
-            if self._flight is None and key != self._reload_failed and not self._entitled(record, current=False):
-                self._launch(None, entitlement=True)
+            self._reload_if_lapsed(record)
             return record, self._generation, self._signin
+
+    def _reload_if_lapsed(self, record: dict) -> None:
+        """One background reload per entitlement a request finds lapsed (or missing).
+        One whose reload failed is tried again by the background passes, not by every
+        request. Call holding the condition."""
+        key = record.get("entitlement")
+        if self._flight is None and key != self._reload_failed and not self._entitled(record, current=False):
+            self._launch(None, entitlement=True)
 
     def recover(self) -> BaseException | None:
         """For a request that found no usable entitlement: start its reload in the
-        background (never on the request) and say what the last refresh ran into:
-        None (nothing: it worked, or none ran yet) or its error."""
+        background (never on the request; once, as for :meth:`snapshot`) and say what
+        this sign-in's last refresh ran into: None (it worked, or none ran yet) or its error."""
         with self._cond:
             self._check_signin()
             if self._signed_out:
                 return auth.AuthError("not logged in to brindle Pro", code="not_logged_in")
-            if self._flight is None:
-                self._launch(None, entitlement=True)
+            if self._record is not None:
+                self._reload_if_lapsed(self._record)
+            elif self._flight is None:
+                self._launch(self._token)
             return self._last_error
 
     def _entitled(self, record: dict, *, current: bool) -> bool:
@@ -279,10 +285,15 @@ class WarmToken:
             return ""
 
     def _clear(self, signed_out: bool = False) -> None:
-        self._generation += 1
+        self._new_generation()
         self._record, self._base, self._token = None, None, None
         self._expires, self._renew_at, self._entitlement_at = 0.0, None, None
         self._signed_out = signed_out
+
+    def _new_generation(self) -> None:
+        """Another sign-in (or none): nothing learned about the previous one carries over."""
+        self._generation += 1
+        self._reload_failed, self._last_error = _NONE, None
 
     # -- refreshing --------------------------------------------------------------------------
 
@@ -296,26 +307,32 @@ class WarmToken:
 
     def _fly(self, flight: _Flight, stale: str | None, entitlement: bool) -> None:
         try:
-            base, record, signin = self._fetch(stale, entitlement)
+            base, record, signin, rotated = self._fetch(stale, entitlement)
         except BaseException as e:  # noqa: BLE001 - handed to every caller waiting on it
             with self._cond:
-                flight.error = self._last_error = e
-                if entitlement:
-                    self._reload_failed = (self._record or {}).get("entitlement")
+                flight.error = e
                 if isinstance(e, auth.AuthError) and (e.revoked or e.code == "not_logged_in"):
                     # Signed out only as of the sign-in the refresh found under the lock:
                     # a login since then is the sign-in now, and is read at the next request.
                     seen = getattr(e, "warm_signin", None)
                     self._clear(signed_out=seen is not None and self._read_marker() == seen)
                     self._signin = seen or ""
+                elif self._read_marker() == getattr(e, "warm_signin", self._signin):
+                    self._last_error = e                    # this sign-in's, never a replacement's
+                    if entitlement:
+                        self._reload_failed = (self._record or {}).get("entitlement")
                 self._land(flight)
             return
         with self._cond:
-            self._last_error = None
-            if entitlement and not self._entitled(record, current=False):
-                self._reload_failed = record.get("entitlement")
+            fetched = entitlement and not rotated       # the entitlement was asked for, not a token
             if self._read_marker() == signin:      # else a login replaced it meanwhile: read again
                 self._take(base, record, signin)
+                self._last_error = None
+                if fetched and not self._entitled(record, current=False):
+                    self._reload_failed = record.get("entitlement")
+                elif not fetched and self._fresh(record, None) and not self._entitled(record, current=True):
+                    # Still due (this pass had to rotate the token instead): its own pass, next.
+                    self._entitlement_at = self.clock()
             self._land(flight)
 
     def _land(self, flight: _Flight) -> None:
@@ -329,12 +346,14 @@ class WarmToken:
         return bool(token) and token != stale and \
             float(record.get("access_expires_at") or 0) > self.clock() + auth.ACCESS_SLACK
 
-    def _fetch(self, stale: str | None, entitlement: bool) -> tuple[str, dict, str]:
-        """(backend, stored sign-in with a usable access token, marker it was read under),
-        all under the refresh lock: one uncached store read, and one write if the token
-        has to be rotated. A token other than ``stale`` that is still fresh (another
-        brindle renewed it) is taken up as it is. With ``entitlement``, an entitlement
-        not renewed elsewhere is fetched and saved too. The backend is the record's own."""
+    def _fetch(self, stale: str | None, entitlement: bool) -> tuple[str, dict, str, bool]:
+        """(backend, stored sign-in with a usable access token, marker it was read under,
+        whether the token was rotated), all under the refresh lock: one uncached store
+        read, and at most one write. A token other than ``stale`` that is still fresh
+        (another brindle renewed it) is taken up as it is; else it is rotated. With
+        ``entitlement`` and no rotation, an entitlement not renewed elsewhere is fetched
+        and saved. The backend is the record's own."""
+        rotated = False
         with auth.refresh_lock():
             signin = self._read_marker()
             try:
@@ -351,13 +370,14 @@ class WarmToken:
                         self._signed_out = False
                     cur = auth._rotate(auth.Client(base, self.transport), self.store, cur, self.clock(),
                                        adopt=True)
+                    rotated = True
                 elif entitlement and not self._entitled(cur, current=True):
                     # Never together with a rotation: one write per refresh.
                     cur = self._renew_entitlement(auth.Client(base, self.transport), cur)
             except auth.AuthError as e:
                 e.warm_signin = signin
                 raise
-            return base, cur, signin
+            return base, cur, signin, rotated
 
     def _renew_entitlement(self, client: auth.Client, cur: dict) -> dict:
         from brindle.pro import license
@@ -375,7 +395,7 @@ class WarmToken:
     def _take(self, base: str, record: dict, signin: str) -> None:
         now = self.clock()
         if signin != self._signin:
-            self._generation += 1
+            self._new_generation()
         self._record, self._base, self._signin, self._signed_out = dict(record), base, signin, False
         self._token = record.get("access_token") or None
         self._expires = float(record.get("access_expires_at") or 0)
@@ -429,9 +449,9 @@ class WarmToken:
         """Renew whatever is due (holding nothing yet: take up the stored sign-in) now,
         and wait for it: the token first, the entitlement on a pass of its own. A failed
         token renewal is tried once more when the token expires, then waits for a change
-        (requests refresh an expired token themselves). An entitlement that isn't current
-        after a token pass is reloaded on the next pass, so one that failed is tried
-        again at each token renewal."""
+        (requests refresh an expired token themselves). An entitlement still due after a
+        flight that rotated the token (see :meth:`_fly`) gets the next pass, so one that
+        failed is tried again at each token renewal."""
         with self._cond:
             self._check_signin()
             if self._signed_out:
@@ -445,8 +465,6 @@ class WarmToken:
             if error is not None:
                 self._renew_at = self._expires if self._token and self._expires > now else None
                 self._entitlement_at = None
-            elif token_due and self._record is not None and not self._entitled(self._record, current=True):
-                self._entitlement_at = now
         if error is not None:
             log.info("couldn't renew the brindle Pro sign-in in the background (%s)",
                      getattr(error, "code", type(error).__name__))

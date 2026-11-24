@@ -107,6 +107,12 @@ def landed(holder, flight):
         assert holder._cond.wait_for(lambda: flight.done, 10)
 
 
+def settled(holder):
+    """Whatever refresh is out has landed."""
+    with holder._cond:
+        assert holder._cond.wait_for(lambda: holder._flight is None, 10)
+
+
 @pytest.fixture
 def quick_requests(monkeypatch):
     """Requests whose deadline ends soon: one that waits on the refresh lock fails fast."""
@@ -257,7 +263,9 @@ def test_a_replacement_found_by_a_renewal_never_goes_out_with_the_old_bearer(par
 
 
 def test_the_no_entitlement_diagnostic_never_refreshes_on_the_request(parts, backend, monkeypatch):
-    store = parts[2]["store"]
+    store, now = parts[2]["store"], int(time.time())
+    store.save({**store.load(), "entitlement": sign(backend.key, claims(iat=now - 7200, exp=now - 60))})
+    monkeypatch.setattr(auth, "_signed_in_providers", lambda: [])
     holder = warm(monkeypatch, store, backend, Clock())
     holder.renew()
     with lock_held(), spawn.deadline(0.05):
@@ -265,7 +273,7 @@ def test_the_no_entitlement_diagnostic_never_refreshes_on_the_request(parts, bac
         reload = holder._flight                 # renewed in the background once the lock is free
         assert reload is not None
     landed(holder, reload)
-    assert refreshes(backend) == 0
+    assert refreshes(backend) == 0 and holder._entitled(store.load(), current=True)
 
 
 def test_a_missing_entitlement_is_reloaded_and_recovers_after_a_failed_reload(parts, backend, monkeypatch):
@@ -277,17 +285,58 @@ def test_a_missing_entitlement_is_reloaded_and_recovers_after_a_failed_reload(pa
         else issue(f, h)
     holder = warm(monkeypatch, store, backend, clock)
     holder.renew()
-    assert holder.view.load().get("entitlement") is None
-    reload = holder._flight                     # a request found none: its reload fails once
-    assert reload is not None
-    landed(holder, reload)
+    assert holder.view.load().get("entitlement") is None     # a request found none: its reload fails once
+    settled(holder)
+    assert backend.paths().count("GET /entitlement") == 1
     holder.view.load()
-    assert holder._flight is None               # requests don't start it over and over...
-    clock.now += holder.due_in()
-    holder.renew()                              # ... the next token renewal is followed by a reload
-    holder.renew()
+    for _ in range(2):                          # requests and the diagnostic don't start it over and over...
+        assert sd._no_entitlement_why(store) == plans.SIGN_IN
+    assert holder._flight is None and backend.paths().count("GET /entitlement") == 1
+    assert holder.due_in() <= 0
+    holder.renew()                              # ... a background pass tries it again
     assert holder.view.load().get("entitlement")
     assert backend.paths().count("GET /entitlement") == 2
+
+
+def test_an_entitlement_due_with_the_token_gets_its_own_pass(parts, backend, monkeypatch):
+    keychain, clock = Keychain(monkeypatch), Clock()
+    monkeypatch.setattr(auth, "_signed_in_providers", lambda: [])
+    store, now = credentials.KeychainStore(), int(time.time())
+    store.save({**parts[2]["store"].load(),
+                "entitlement": sign(backend.key, claims(features=list(TEAM_LOGIN), iat=now - 2000, exp=now + 800))})
+    holder = warm(monkeypatch, store, backend, clock)
+    holder.renew()
+
+    def io():
+        return keychain.reads, keychain.writes, refreshes(backend), backend.paths().count("GET /entitlement")
+
+    clock.now += 860            # suspended: the token is in its last minute and the entitlement has lapsed
+    before = io()
+    holder.view.load()          # a request starts the entitlement's reload, which has to rotate the token
+    settled(holder)
+    assert [a - b for a, b in zip(io(), before)] == [1, 1, 1, 0]
+    assert holder.due_in() <= 0                 # the entitlement gets a pass of its own, straight away
+    before = io()
+    holder.renew()
+    assert [a - b for a, b in zip(io(), before)] == [1, 1, 0, 1]
+    assert holder._entitled(holder.view.load(), current=True)
+
+
+def test_a_new_sign_in_inherits_no_failed_reload(parts, backend, monkeypatch):
+    store = parts[2]["store"]
+    store.save({k: v for k, v in store.load().items() if k != "entitlement"})
+    monkeypatch.setattr(auth, "_signed_in_providers", lambda: [])
+    backend.routes["GET /entitlement"] = lambda f, h: (503, {"error": "unavailable"})
+    holder = warm(monkeypatch, store, backend, Clock())
+    holder.renew()
+    holder.view.load()
+    settled(holder)
+    assert sd._no_entitlement_why(store) == plans.SIGN_IN      # the failed reload, as this sign-in's
+    login_as(backend, store)                    # someone signs in afresh
+    with auth.refresh_lock():
+        auth._note_signin()
+    assert holder.recover() is None
+    settled(holder)
 
 
 @pytest.mark.variant("race: a login lands between a refused refresh releasing the lock and its sign-out")
