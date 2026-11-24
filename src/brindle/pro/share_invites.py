@@ -391,8 +391,14 @@ def _send(db: DB, row: dict, client, store) -> None:
     from brindle.pro import shared_docs as sd
 
     plan_id, sub = row["plan_id"], row["sub"]
+    from brindle.pro import auth
+
     client, store = ad._session(client, store)
-    store = _Bound(store, row["owner"], row["org_id"])
+    if auth.warm_for(store) is None:
+        store = _Bound(store, row["owner"], row["org_id"])
+    # else the daemon's warm sign-in pinned this view to the sign-in it holds now: every read, token
+    # and refresh through it fails closed once that sign-in is replaced, from memory (no keychain, no
+    # refresh lock), so the check below binds the whole send to the account that asked.
     if _identity(store) != (row["owner"], row["org_id"]):
         raise AccountChanged()
     if row["op"] == "remove":

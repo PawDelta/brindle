@@ -21,10 +21,11 @@ from brindle.pro import auth, credentials
 from brindle.pro import shared_docs as sd
 from pro_fixtures import BASE, backend, claims, pro_env, sign, signing_key  # noqa: F401
 from test_plans import session  # noqa: F401
-from test_share_panel_access import panel  # noqa: F401
+from test_share_panel_access import add_person, panel  # noqa: F401
 from test_share_people_regression import SlowLibrary, found
 from test_pro_remote_learning import login_as
-from test_shared_plan_docs import TEAM_LOGIN, parts  # noqa: F401
+from test_shared_plan_docs import BASE as DOC_BASE
+from test_shared_plan_docs import TEAM_LOGIN, parts, sent  # noqa: F401
 
 try:
     from brindle.pro import warm_token
@@ -144,7 +145,12 @@ def test_a_people_search_near_expiry_reads_no_keychain_and_never_waits(route, ba
         keychain.put({**record, "access_expires_at": time.time() + 30})       # persisted near expiry
         holder.renew()              # the daemon's start: the token is rotated with one read and one write
         assert (keychain.reads, keychain.writes, refreshes(backend)) == (1, 1, 1)
-    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": "comment"}).status_code == 200
+    reads = keychain.reads
+    # The Add answers at once (202); the app's receipt sends it: the grant reaches the Library from memory.
+    assert add_person(app, pid, {"sub": "ann", "access": "comment"}).status_code == 202
+    assert [f["scope"]["id"] for f in sent(backend, f"POST {DOC_BASE}/share")] == ["ann"]
+    if holder is not None:
+        assert (keychain.reads, refreshes(backend)) == (reads, 1)          # no keychain read, no refresh
     # Thirty seconds of the token are left, its renewal hasn't run yet and the keychain cache has lapsed...
     stored = keychain.items[(credentials.SERVICE, credentials.ACCOUNT)]
     clock.now = keystore._decode(stored)["access_expires_at"] - 30
