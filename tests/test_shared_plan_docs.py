@@ -836,8 +836,10 @@ def test_two_writers_in_one_shared_section_both_land_in_the_live_draft_and_only_
 
 
 @pytest.mark.parametrize("first", [
-    "approve",          # the approval's own sync brings the version in
-    "own_sign_off",     # the author is a reviewer too: their sign-off's sync brings it in, the approval follows
+    pytest.param("approve", marks=pytest.mark.variant(
+        "Approval follows the named frozen version when its own sync advances the local revision")),
+    pytest.param("own_sign_off", marks=pytest.mark.variant(
+        "The author's sign-off syncs the named frozen version and readies it for approval")),
     "no_version",       # an app naming only the older revision is told to read the new one
 ])
 def test_a_frozen_version_read_before_it_came_in_here_is_signed_and_approved_as_the_app_names_it(
@@ -882,7 +884,8 @@ def test_a_frozen_version_read_before_it_came_in_here_is_signed_and_approved_as_
 
 
 @pytest.mark.parametrize("then", [
-    "came_in",      # the version approved comes in here as a new revision once the Library answers: applied
+    pytest.param("came_in", marks=pytest.mark.variant(
+        "An approval held during an outage applies when its named version first syncs as a new local revision")),
     "refrozen",     # a later version with the same text as the one here takes its place: not applied
 ])
 def test_an_approval_held_through_an_outage_applies_only_to_the_version_it_was_given_on(
@@ -967,9 +970,11 @@ def test_what_lands_while_a_frozen_version_is_checked_never_takes_its_sign_off_o
 
 
 @pytest.mark.parametrize(("action", "frozen"), [
-    ("approve", "filled"),      # the cached draft's Summary is empty, the frozen version's is not: approved
+    pytest.param("approve", "filled", marks=pytest.mark.variant(
+        "Approval accepts the frozen version's completed Summary when the cached draft's Summary is empty")),
     ("approve", "emptied"),     # the cached draft's Summary is filled, the frozen version's is empty: refused
-    ("sign_off", "filled"),     # the author's own sign-off on that version goes too
+    pytest.param("sign_off", "filled", marks=pytest.mark.variant(
+        "The author's sign-off accepts a completed frozen Summary when the cached draft's Summary is empty")),
 ])
 def test_a_frozen_version_meets_its_template_by_its_own_text_not_the_cached_draft(
         db, parts, backend, monkeypatch, action, frozen):

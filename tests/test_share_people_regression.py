@@ -60,6 +60,7 @@ def found(app, pid):
     return [p["id"] for p in got.json()["people"]]
 
 
+@pytest.mark.variant("A member denied unshared Library people can still find the owner through the org directory")
 def test_a_member_without_the_members_permission_can_still_find_the_owner(panel, backend):
     pid, _, app = panel
     SlowLibrary(backend)
@@ -67,6 +68,7 @@ def test_a_member_without_the_members_permission_can_still_find_the_owner(panel,
     assert found(app, pid) == ["owner_1"]                 # the org's own list, never the person searching
 
 
+@pytest.mark.variant("A first add that commits before timing out leaves search usable and the next add reuses its doc")
 def test_a_timed_out_first_add_still_searches_and_try_again_lands_on_the_one_doc(panel, backend):
     pid, library, app = panel
     library = SlowLibrary(backend)
@@ -167,6 +169,7 @@ def test_a_late_create_answer_grants_nothing_once_its_claim_is_gone(db, parts, b
     assert [f["scope"]["id"] for f in sent(backend, f"POST {BASE}/share")] == ["bo"]     # never ann
 
 
+@pytest.mark.variant("Repo-level airgap blocks unlinked plan search before it reads credentials")
 def test_an_air_gapped_search_reads_no_credential(parts, tmp_path, monkeypatch):
     """An unlinked plan's search in an air-gapped repo: refused before the sign-in is read."""
     def opened(*a):
