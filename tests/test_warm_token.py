@@ -229,6 +229,7 @@ def test_a_request_never_sends_for_a_sign_in_replaced_under_it(parts, backend, m
     assert moved.value.code == "record_changed" and len(backend.calls) == sent
 
 
+@pytest.mark.variant("race: a renewal publishes another account's record while the old bearer is unexpired")
 def test_a_replacement_found_by_a_renewal_never_goes_out_with_the_old_bearer(parts, backend, monkeypatch):
     keychain = Keychain(monkeypatch)
     store, client = credentials.KeychainStore(), parts[2]["client"]
@@ -289,6 +290,7 @@ def test_a_missing_entitlement_is_reloaded_and_recovers_after_a_failed_reload(pa
     assert backend.paths().count("GET /entitlement") == 2
 
 
+@pytest.mark.variant("race: a login lands between a refused refresh releasing the lock and its sign-out")
 def test_a_login_right_after_a_refused_refresh_is_the_sign_in_then(parts, backend, monkeypatch):
     client, store, _ = expired(parts, backend, monkeypatch)
     backend.revoked = True
@@ -423,6 +425,7 @@ def test_a_refused_refresh_signs_out_once(parts, backend, monkeypatch):
     assert (keychain.reads, keychain.writes) == io       # ... or read
 
 
+@pytest.mark.variant("the feature's main path: rotation at two thirds of the token's life, saved for other processes")
 def test_the_background_renewal_rotates_before_expiry_for_every_brindle(parts, backend, monkeypatch):
     client, store = parts[2]["client"], parts[2]["store"]
     clock = Clock()
