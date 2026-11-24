@@ -5,18 +5,18 @@
    Every write changes one person or scope (brindle/pro/share_access.py), never the whole list. */
 
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
-import { DaemonError, type DocScope, type LibraryPerson, type PeopleQuery, type Plan, type PolicyPreviewRow, type ShareAccess, type ShareAccessLevel, type SharePerson, type ShareQueued } from "../../../api/client";
+import { DaemonError, type DocScope, type LibraryPerson, type Plan, type PolicyPreviewRow, type ShareAccess, type ShareAccessLevel, type ShareQueued } from "../../../api/client";
 import type { PlanGateRowDTO } from "../../../api/schema";
 import type { Writes } from "./PlanReader";
-import { initials } from "./PlanCards";
+import { displayName, initials } from "./PlanCards";
 import { PolicyPreview } from "./DocPolicies";
 import "./SharePanel.css";
 
 type Scope = { kind: string; id: string };
 
 export interface SharePeopleTarget {
-  /* People in the org, by the Library's search: only once the plan is shared. */
-  search(query: PeopleQuery): Promise<{ people: SharePerson[] }>;
+  /* The org directory, loaded on open and filtered here. */
+  members(): Promise<{ people: LibraryPerson[] }>;
   access(): Promise<ShareAccess>;
   /* Give one person the plan; for a plan nobody has yet, this is its first share. The author's plan
      answers at once with `invite`, the change the daemon now sends in the background (as may change,
@@ -53,10 +53,9 @@ export function ShareChevron() {
 function ShareCheck() {
   return <svg className="ic sm" viewBox="0 0 16 16" aria-hidden><path d="M3.5 8.5l3 3 6-7" /></svg>;
 }
-const personLabel = (p: SharePerson) => p.display_name.trim() || p.email;
+const personLabel = (p: LibraryPerson) => displayName(p) || p.sub;
 const firstWord = (name: string) => name.split("@")[0].split(/[\s._-]+/)[0] || name;
 const scopeKey = (s: Scope) => `${s.kind}:${s.id}`;
-const fromDirectory = (p: LibraryPerson): SharePerson => ({ id: p.sub, display_name: p.display_name || p.name || "", email: p.email, teams: [], role: "", on_plan: false });
 const list = (names: string[]) => names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 
 /* `sent`: a change (`op`: an invite, or Stop sharing) the daemon is still sending, one the Library
@@ -67,14 +66,12 @@ type Work = { key: string; label: string; run(): Promise<Plan> };
 /* A write out now, or one the Library refused, kept so Try again sends the same one. */
 type Busy = Record<string, { state: "saving" | "failed"; refused?: Work; why?: string }>;
 
-export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onClose, children, signOff, teams = [], directory = [], owned = false, previewRules, onStopAll }: {
+export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onClose, children, signOff, teams = [], owned = false, previewRules, onStopAll }: {
   plan: Plan; target?: SharePeopleTarget; nameOf(sub: string): string; writes: Writes;
   onBusy(busy: boolean): void; visible: boolean; onClose(): void; children?: ReactNode;
   signOff?: { sub: string; disabled: boolean; run(): void };
   /* The teams and org this person may share into, with their names. */
   teams?: DocScope[];
-  /* The org's people, to pick a plan's first person from before the Library can search for it. */
-  directory?: LibraryPerson[];
   /* The author's own plan: an owner row, and Stop sharing for everyone. */
   owned?: boolean;
   /* The org rules a first share will meet, for the revision on screen. */
@@ -87,11 +84,10 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const [accessBusy, setAccessBusy] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   const [typed, setTyped] = useState("");
-  const [team, setTeam] = useState("");
   const [focused, setFocused] = useState(false);
   const [menu, setMenu] = useState<string | null>(null);
   const [highlight, setHighlight] = useState(0);
-  const [found, setFound] = useState<SharePerson[]>([]);
+  const [members, setMembers] = useState<LibraryPerson[]>([]);
   const [searchState, setSearchState] = useState<"loading" | "ready" | "error">("ready");
   /* Why the last search failed, as the daemon said: a sign-in held up on this Mac reads differently from a refusal. */
   const [searchWhy, setSearchWhy] = useState("");
@@ -110,10 +106,9 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const answered = useRef<Plan | null>(null);
   const mounted = useRef(true);
   const accessGeneration = useRef(0);
-  const searchGeneration = useRef(0);
   const latest = useRef({ target, writes, onBusy, onStopAll });
   latest.current = { target, writes, onBusy, onStopAll };
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; accessGeneration.current++; searchGeneration.current++; invitesGeneration.current++; }; }, []);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; accessGeneration.current++; invitesGeneration.current++; }; }, []);
   // The daemon sends a change only once the receipt its answer carried comes back: the panel sends it
   // for each answer it gets, and for an unconfirmed one when the person chooses Send. A receipt that
   // couldn't be sent leaves the change unconfirmed, with Send to try again.
@@ -176,29 +171,30 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     previewRules().then((rows) => { if (live) setRules({ plan: id, rev, rows }); }, () => {});
     return () => { live = false; };
   }, [visible, shared, previewRules, plan.id, plan.rev]);
-  const searching = !!target && (focused || !!typed || !!team);
-  // Once shared, the Library searches the org; before, the people this Mac knows are filtered here.
+  const searching = !!target && (focused || !!typed);
   useEffect(() => {
-    const generation = ++searchGeneration.current;
-    if (!searching || !shared) return;
+    if (!visible || !target) return;
+    let live = true;
+    setMembers([]);
+    setHighlight(0);
     setSearchState("loading");
-    latest.current.target!.search({ q: typed, team, include_unshared: "true" }).then((r) => {
-      if (searchGeneration.current !== generation) return;
-      setFound(r.people);
-      setHighlight(0);
+    target.members().then((r) => {
+      if (!live) return;
+      setMembers([...r.people].sort((a, b) => personLabel(a).localeCompare(personLabel(b))));
       setSearchState("ready");
     }, (e: unknown) => {
-      if (searchGeneration.current !== generation) return;
+      if (!live) return;
       setSearchWhy(e instanceof Error ? e.message : "");
       setSearchState("error");
     });
-  }, [searching, shared, typed, team, again]);
-  const local = directory.map(fromDirectory).filter((p) => !typed.trim() || `${p.display_name} ${p.email}`.toLowerCase().includes(typed.trim().toLowerCase()));
-  const results = shared ? found : local;
+    return () => { live = false; };
+  }, [visible, target, again]);
+  const query = typed.trim().toLowerCase();
+  const results = members.filter((p) => `${personLabel(p)} ${p.email}`.toLowerCase().includes(query));
 
   const gateRows = (plan.gate?.reviewers ?? []).filter((r): r is PlanGateRowDTO & { sub: string } => !!r.sub);
   const reviewerOf = (sub: string) => gateRows.find((r) => r.sub === sub);
-  const names = new Map([...directory.map(fromDirectory), ...found].map((p) => [p.id, personLabel(p)]));
+  const names = new Map(members.map((p) => [p.sub, displayName({ ...p, email: null })]));
   const nameFor = (sub: string, given?: string | null) => names.get(sub) || given || nameOf(sub);
   // The Library's list, with anyone the gate names it hasn't been read for yet.
   let people: Person[] = [
@@ -220,8 +216,8 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const scopes = access?.scopes ?? [];
   const scopeName = (s: Scope) => teams.find((t) => t.kind === s.kind && t.id === s.id)?.name ?? (s.kind === "org" ? "Your organization" : "A team");
   const offered = teams.filter((t) => (t.kind === "group" || t.kind === "org") && t.can_share !== false && !scopes.some((s) => scopeKey(s) === scopeKey(t)));
-  const teamHits = offered.filter((t) => typed.trim() && (t.name ?? "").toLowerCase().includes(typed.trim().toLowerCase()));
-  const onPlan = (p: SharePerson) => people.some((r) => r.sub === p.id);
+  const teamHits = offered.filter((t) => query && (t.name ?? "").toLowerCase().includes(query));
+  const onPlan = new Set(people.map((p) => p.sub));
   const org = teams.find((t) => t.kind === "org")?.name ?? "Your organization";
 
   // One write at a time to the doc: the first opens the reader's write, the last closes it with
@@ -273,9 +269,9 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const scopeWork = (s: Scope, label: string, call: (t: SharePeopleTarget) => Promise<Plan>): Work =>
     ({ key: `scope:${scopeKey(s)}`, label, run: () => call(latest.current.target!) });
 
-  const open = (p: SharePerson) => {
-    if (onPlan(p)) { setMenu(`person:${p.id}`); return; }
-    setAdding({ sub: p.id, name: personLabel(p), email: p.email, access: "comment", signOff: false });
+  const open = (p: LibraryPerson) => {
+    if (onPlan.has(p.sub)) { setMenu(`person:${p.sub}`); return; }
+    setAdding({ sub: p.sub, name: personLabel(p), email: p.email, access: "comment", signOff: false });
   };
   // The person's row shows at once, saving; it stays (with Try again) if the Library refuses.
   const add = () => {
@@ -401,18 +397,13 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     <div className="sph"><b>Share</b><button className="sp-btn q" aria-label="Close share" onClick={onClose}><svg className="ic" viewBox="0 0 16 16" aria-hidden><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" /></svg></button></div>
     {target && <section className="sec">
       <div className="fld">
-        {team && <button className="tok" onClick={() => setTeam("")}>Team: {teams.find((t) => t.id === team)?.name ?? team}<span>×</span></button>}
-        <input data-testid="share-search" aria-label="Add people or teams" placeholder={team ? "" : "Add people or teams"} value={typed}
-          onFocus={() => setFocused(true)} onChange={(e) => { setTyped(e.target.value); setAdding(null); }}
+        <input data-testid="share-search" aria-label="Add people or teams" placeholder="Add people or teams" value={typed}
+          onFocus={() => setFocused(true)} onChange={(e) => { setTyped(e.target.value); setHighlight(0); setAdding(null); }}
           onKeyDown={(e) => {
             if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); setHighlight((n) => Math.max(0, Math.min(results.length - 1, n + (e.key === "ArrowDown" ? 1 : -1)))); }
             if (e.key === "Enter" && results[highlight]) open(results[highlight]);
           }} />
-        {shared && teams.some((t) => t.kind === "group") && <button className={`sp-btn q end ${menu === "filter" ? "on" : ""}`} aria-expanded={menu === "filter"} onClick={() => setMenu(menu === "filter" ? null : "filter")}>Filter<ShareChevron /></button>}
       </div>
-      {menu === "filter" && <div className="menu" role="menu" data-testid="share-filter">
-        <div className="ml">Team</div>{teams.filter((t) => t.kind === "group").map((t) => <button className="mi" role="menuitemcheckbox" aria-checked={team === t.id} key={t.id} onClick={() => { setTeam(team === t.id ? "" : t.id); setMenu(null); }}>{t.name ?? t.id}{team === t.id && <ShareCheck />}</button>)}
-      </div>}
       {adding ? <div data-testid="share-add">
         <div className="rows"><div className="r act"><i className="av">{initials(adding.name)}</i><span className="nm" title={adding.email}>{adding.name}<em>{adding.email}</em></span></div></div>
         <div className="menu add" role="group" aria-label={`What ${firstWord(adding.name)} can do`}>
@@ -426,16 +417,18 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
         </div>
       </div>
         : !searching ? (!listed && <p className="hint">Only you can open this plan. Add a person or a team to share it.</p>)
-        : searchState === "loading" && shared ? <div data-testid="share-search-loading"><div className="sweep" /><div className="rows">{[96, 132, 78].map((w) => <div className="r" key={w}><i className="av skv" /><i className="sk" style={{ width: w }} /></div>)}</div></div>
-        : searchState === "error" && shared ? <div className="msg bad" role="alert" data-testid="share-search-error"><span className="grid grow">Couldn't search people.{searchWhy && <span className="note">{searchWhy}</span>}</span><button className="sp-btn q end" onClick={() => setAgain((n) => n + 1)}>Try again</button></div>
-        : <div className="rows">
-          {teamHits.map((t) => teamRow(t, true))}
-          {results.map((p, i) => <div key={p.id} className={`r ${onPlan(p) ? "dim" : i === highlight ? "act" : ""}`} onMouseEnter={() => setHighlight(i)} data-testid={`share-result-${p.id}`}>
-            <i className="av">{initials(personLabel(p))}</i><button className="nm truncate text-left" title={`${personLabel(p)} · ${p.email}`} onClick={() => open(p)}>{personLabel(p)}<em>{p.email}</em></button>
-            {onPlan(p) && <span className="st">Has access</span>}
-          </div>)}
-          {!results.length && !teamHits.length && <div className="msg" data-testid="share-search-empty"><span className="grow">{typed.trim() ? "Nobody matches." : "Type a name or an email."}</span></div>}
-        </div>}
+        : <>
+          {searchState === "loading" && <div data-testid="share-search-loading"><div className="sweep" /><div className="rows">{[96, 132, 78].map((w) => <div className="r" key={w}><i className="av skv" /><i className="sk" style={{ width: w }} /></div>)}</div></div>}
+          {searchState === "error" && <div className="msg bad" role="alert" data-testid="share-search-error"><span className="grid grow">Couldn't search people.{searchWhy && <span className="note">{searchWhy}</span>}</span><button className="sp-btn q end" onClick={() => setAgain((n) => n + 1)}>Try again</button></div>}
+          {(teamHits.length > 0 || searchState === "ready") && <div className="rows">
+            {teamHits.map((t) => teamRow(t, true))}
+            {results.map((p, i) => <div key={p.sub} className={`r ${onPlan.has(p.sub) ? "dim" : i === highlight ? "act" : ""}`} onMouseEnter={() => setHighlight(i)} data-testid={`share-result-${p.sub}`}>
+              <i className="av">{initials(personLabel(p))}</i><button className="nm truncate text-left" title={`${personLabel(p)} · ${p.email}`} onClick={() => open(p)}>{personLabel(p)}<em>{p.email}</em></button>
+              {onPlan.has(p.sub) && <span className="st">Has access</span>}
+            </div>)}
+            {searchState === "ready" && !results.length && !teamHits.length && <div className="msg" data-testid="share-search-empty"><span className="grow">{query ? "Nobody matches." : "Type a name or an email."}</span></div>}
+          </div>}
+        </>}
     </section>}
     <section className="sec fill" data-testid="share-access">
       {accessBusy !== null && <div className="msg bad" role="alert"><span className="grow">{accessBusy}</span><button className="sp-btn q end" onClick={() => setReload((n) => n + 1)}>Try again</button></div>}

@@ -195,10 +195,12 @@ def test_a_refusal_closes_a_ready_gate_until_the_library_answers_whole(db, share
 ])
 def test_only_an_org_admin_is_offered_an_override(monkeypatch, role, offered):
     from brindle.daemon import routes_actions as actions
+    from brindle.pro import analysis_docs
 
-    monkeypatch.setattr(actions, "_docs_entitlement", lambda repo: SimpleNamespace(org_id=ORG, sub="u_me", role=role))
+    monkeypatch.setattr(actions, "_docs_entitlement", lambda repo, store=None: SimpleNamespace(org_id=ORG, sub="u_me", role=role))
     person = {"sub": "u_david", "email": "david@example.test", "first_name": "David", "last_name": "Jones", "name": "Dave"}
-    monkeypatch.setattr(actions, "docs_api", lambda method, path: {"members": [person]})
+    monkeypatch.setattr(analysis_docs, "_session", lambda: (SimpleNamespace(base="fake"), None))
+    monkeypatch.setattr(analysis_docs, "api", lambda method, path, **auth: {"members": [person]})
     with TestClient(build_app(TOKEN), headers=AUTH) as app:
         people = app.get("/v1/library/people").json()
     assert (people["admin_org"], people["me"]) == (offered, "u_me")
