@@ -59,6 +59,7 @@ KEYCHAIN_READ_TTL = 30.0  # seconds before another process's changes become visi
 # dialog, and keep failing or recover on their own.
 KEYCHAIN_DIALOG_EXITS = frozenset({51, 128})
 KEYCHAIN_REFUSED_FILE = "keychain-refused"
+_KEYCHAIN_UNBLOCK = "Unlock the keychain, then run `brindle keys unblock` before trying again."
 
 
 def _refused_marker() -> Path:
@@ -208,8 +209,17 @@ def uncached_reading() -> Iterator[None]:
         _uncached_reads.reset(token)
 
 
+def reading_uncached() -> bool:
+    """Whether this caller is inside :func:`uncached_reading` (holding a mutation lock)."""
+    return _uncached_reads.get()
+
+
 class CredentialError(Exception):
     """The store couldn't be used safely. Never contains a secret."""
+
+
+class KeychainReadBlocked(CredentialError):
+    """An unanswered or refused keychain dialog has blocked credential reads."""
 
 
 def _encode(creds: dict) -> str:
@@ -236,7 +246,8 @@ class KeychainStore:
 
     Reads (including missing items) are shared by service and account for
     KEYCHAIN_READ_TTL seconds. Other processes' changes appear after expiry;
-    save/delete in this process invalidate immediately, even on failure.
+    save/delete in this process invalidate immediately, even on failure, and
+    a successful save is then kept as the next read's answer.
     Cached records are decoded afresh so callers can safely modify them.
     A read refused at a dialog, or never answered, stops later reads until the
     person acts (KEYCHAIN_DIALOG_EXITS): polling never repeats a dialog.
@@ -275,9 +286,7 @@ class KeychainStore:
                 return _decode(self._read.blob) if self._read.blob is not None else None
             self._read.invalidate()
             if _refused_marker().exists():
-                raise CredentialError("the keychain refused an earlier read (locked, or its dialog cancelled), and "
-                                      "brindle won't raise that dialog again by itself: once it's unlocked, "
-                                      "`brindle keys unblock` lets brindle read it")
+                raise KeychainReadBlocked(f"An earlier keychain dialog blocked credential reads. {_KEYCHAIN_UNBLOCK}")
             if _listed_reads.get() and not _uncached_reads.get():
                 items, until = self._listed()
                 if items is not None and (self.service, self.account) not in items:
@@ -291,7 +300,7 @@ class KeychainStore:
                 r = self._run(["find-generic-password", "-a", self.account, "-s", self.service, "-w"])
             except subprocess.TimeoutExpired:    # a dialog nobody answered
                 _note_refused()
-                raise CredentialError("keychain read timed out") from None
+                raise KeychainReadBlocked(f"The keychain read timed out. {_KEYCHAIN_UNBLOCK}") from None
             if r.returncode == 44:   # errSecItemNotFound
                 blob, value = None, None
             elif r.returncode != 0:
@@ -346,6 +355,10 @@ class KeychainStore:
             if r.returncode != 0 or "error" in (r.stderr or "").lower():
                 raise CredentialError(f"keychain write failed (security exit {r.returncode})")
             forget_refused()
+            # What was just written is what a read would find: keep it, so a refresh
+            # (one read under its lock, one write) needs no further read here.
+            self._read.blob = _encode(creds)
+            self._read.expires = time.monotonic() + KEYCHAIN_READ_TTL
 
     def delete(self) -> None:
         listing = _listing()

@@ -108,6 +108,18 @@ it("reads a spine plan as the planning doc: the outline marks open decisions, ea
   expect(screen.queryByTestId("task-outbox")).toBeNull();
 });
 
+it("an Approve the engine refuses for a reason other than a newer revision shows that reason", async () => {
+  const plan = spine({ decisions: [], threads: [] });
+  const why = "Risks and what's hard to undo is required by the Design review template: fill it in before this is signed off";
+  const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...writes(plan), plan: async () => plan,
+    decidePlan: async () => { throw new DaemonError("required_sections_missing", why, 409); } };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const approve = (await screen.findByTestId("plan-build")) as HTMLButtonElement;
+  expect(approve.disabled).toBe(false);
+  await act(async () => fireEvent.click(approve));
+  expect(within(screen.getByTestId("plan-verdict")).getByRole("alert").textContent).toContain(why);
+});
+
 /* The engine as it keeps picks: each voter's one pick per decision, in `library` by account as a
    shared plan's reach the Library (the author is u_author). `hold` keeps the next confirm's
    answer back until `release`. */

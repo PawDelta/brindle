@@ -320,23 +320,42 @@ def _session(client=None, store=None):
     from brindle.pro import auth, credentials
 
     store = store or credentials.default_store()
+    # The daemon's warm sign-in holds it in memory: its requests read no keychain, and the
+    # client, entitlement and token all come from the one sign-in pinned here.
+    pinned = auth.warm_pin(store)
+    if pinned is not None:
+        store, creds = pinned
+        if client is None:
+            client = auth.Client(creds.get("base_url"), auth.UrllibTransport(timeout=SEND_WAIT))
+        return client, store
     if client is None:
         creds = store.load() or {}
         client = auth.Client(creds.get("base_url"), auth.UrllibTransport(timeout=SEND_WAIT))
     return client, store
 
 
+class SignInBusy(RuntimeError):
+    """The Library could not read the sign-in to check its entitlement."""
+
+
 def require_entitlement(store=None):
     """The verified entitlement, or ``RuntimeError`` (before anything is sent)
     in air-gap mode or without the ``analysis_docs`` feature."""
-    from brindle import airgap
-    from brindle.pro import license
+    from brindle import airgap, keystore
+    from brindle.pro import auth, credentials, license
 
     if airgap.enabled():
         raise RuntimeError("air-gap mode is on: nothing is sent")
     try:
+        if store is None and auth._warm is not None:
+            # The daemon's warm sign-in holds the entitlement in memory: no keychain read.
+            default = credentials.default_store()
+            view = auth.warm_view(default)
+            store = None if view is default else view
         ent = license.current(refresh=False, store=store)
     except Exception as e:  # noqa: BLE001
+        if isinstance(e, license.LicenseError) and isinstance(e.__cause__, keystore.KeychainReadBlocked):
+            raise SignInBusy(str(e.__cause__)) from e
         raise RuntimeError("not logged in to brindle Pro (`brindle account login`)") from e
     if FEATURE not in ent.features or ent.in_grace:
         raise RuntimeError("your subscription has no plan library (the `analysis_docs` entitlement)")

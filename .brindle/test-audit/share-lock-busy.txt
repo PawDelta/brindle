@@ -1,0 +1,67 @@
+Plan sharing regression evidence
+Base source: 851fb558 (starting commit for fix/share-lock-busy).
+With the fix: 3e623da21.
+
+Air-gap mutation
+
+Removed just the early `config.load_repo_config(repo)` call in `_shared_design`.
+Command: .venv/bin/python -m pytest tests/test_share_people_regression.py::test_an_air_gapped_search_reads_no_credential -q
+Exit 1. The request reached `analysis_docs._session()` and hit the credential tripwire:
+E       assert 500 == 402
+AssertionError: the credential store was opened
+FAILED tests/test_share_people_regression.py::test_an_air_gapped_search_reads_no_credential
+1 failed in 0.99s
+
+Restored the call and reran the same command (exit 0):
+.                                                                        [100%]
+1 passed in 0.95s
+
+Regression tests against base source
+
+Temporarily restored every changed production file from 851fb558 in this
+worktree and kept the branch test cases. For the link UI test, the harness
+used the base rendering in place of the new ShareLinkSection export so the
+test could reach its alert assertion. Production source and the harness
+were restored afterward.
+
+Command: .venv/bin/python -m pytest tests/test_share_people_regression.py -q -k 'blocked_refresh or blocked_keychain or request_deadline'
+Exit 1. Assertion failures and pytest summary:
+E       AssertionError: assert (401, 'signed_out') == (503, 'busy')
+E       AssertionError: assert (401, 'signed_out') == (503, 'busy')
+E       AssertionError: assert (401, 'signed_out') == (503, 'busy')
+E       AssertionError: ({'error': {'code': 'not_entitled', 'message': 'not logged in to brindle Pro (`brindle account login`)'}}, {'error': {'code': 'not_entitled', 'message': 'not logged in to brindle Pro (`brindle account login`)'}})
+E       assert 402 == 503
+E       AssertionError: ({'available': False, 'link': None}, {'available': False, 'link': None})
+E       assert 200 == 503
+E       AssertionError: ({'available': False, 'link': None}, {'available': False, 'link': None})
+E       assert 200 == 503
+E       AssertionError: attempted to take the refresh lock after exhausting the budget
+E       assert 2 == 1
+FAILED tests/test_share_people_regression.py::test_a_blocked_refresh_is_busy_in_the_share_routes[search]
+FAILED tests/test_share_people_regression.py::test_a_blocked_refresh_is_busy_in_the_share_routes[invite]
+FAILED tests/test_share_people_regression.py::test_a_blocked_refresh_is_busy_in_the_share_routes[link]
+FAILED tests/test_share_people_regression.py::test_share_routes_keep_a_blocked_keychain_actionable[search]
+FAILED tests/test_share_people_regression.py::test_share_routes_keep_a_blocked_keychain_actionable[plan-link]
+FAILED tests/test_share_people_regression.py::test_share_routes_keep_a_blocked_keychain_actionable[design-link]
+FAILED tests/test_share_people_regression.py::test_refresh_lock_stops_at_the_request_deadline
+7 failed, 6 deselected in 1.51s
+
+From app: npx vitest run src/screens/Session/Visuals/SharePanel.test.tsx src/screens/Session/Visuals/ShareLink.test.tsx -t 'can reload the access list|can read the plan link'
+Exit 1:
+ FAIL  src/screens/Session/Visuals/ShareLink.test.tsx > can read the plan link again after a busy sign-in
+TestingLibraryElementError: Unable to find an accessible element with the role "alert"
+ FAIL  src/screens/Session/Visuals/SharePanel.test.tsx > can reload the access list when the sign-in refresh is busy
+TestingLibraryElementError: Unable to find an accessible element with the role "alert"
+      Tests  2 failed | 13 skipped (15)
+
+Restored branch source
+
+Command: .venv/bin/python -m pytest tests/test_share_people_regression.py tests/test_share_panel_access.py tests/test_plan_share_link.py tests/test_keystore.py -q
+Exit 0:
+..................................                                       [100%]
+34 passed in 3.13s
+
+From app: npx vitest run src/screens/Session/Visuals/SharePanel.test.tsx src/screens/Session/Visuals/ShareLink.test.tsx src/screens/Session/Visuals/PlanReader.test.tsx
+Exit 0:
+ Test Files  3 passed (3)
+      Tests  43 passed (43)

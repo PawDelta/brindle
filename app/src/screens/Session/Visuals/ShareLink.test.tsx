@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
-import type { DesignShareLink } from "../../../api/client";
-import { planLinkTarget, ShareLinkPanel, useShareLink, type ShareLinkTarget } from "./ShareLink";
+import { DaemonError, type DesignShareLink } from "../../../api/client";
+import { planLinkTarget, ShareLinkPanel, ShareLinkSection, useShareLink, type ShareLinkTarget } from "./ShareLink";
 
 afterEach(cleanup);
 
@@ -51,8 +51,27 @@ it("hides copying when the org disables links, including an existing link", asyn
 
 function Menu({ target, fresh }: { target: ShareLinkTarget; fresh: number }) {
   const link = useShareLink(target, fresh);
-  return link.state?.available ? <ShareLinkPanel target={target} state={link.state} onState={link.setState} /> : null;
+  return <ShareLinkSection target={target} link={link} />;
 }
+
+it("can read the plan link again after a busy sign-in", async () => {
+  let blocked = true;
+  const target: ShareLinkTarget = {
+    key: "plan:p1",
+    read: async () => {
+      if (blocked) throw new DaemonError("busy", "Sign-in refresh in progress", 503);
+      return { available: true, link: null };
+    },
+    copy: async () => ({ available: true, link: null }),
+    revoke: async () => ({ available: true, link: null }),
+  };
+  await act(async () => render(<Menu target={target} fresh={0} />));
+  expect(screen.getByRole("alert")).toBeTruthy();
+  blocked = false;
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Try again" })));
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.getByTestId("share-link")).toBeTruthy();
+});
 
 it("adopts a delayed audience refresh while retaining choices across unchanged audiences", async () => {
   const reads: ((got: DesignShareLink) => void)[] = [];

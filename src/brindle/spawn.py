@@ -156,6 +156,10 @@ class Deadline:
     def stopped(self) -> bool:
         return self._stopped.is_set()
 
+    def wait(self, seconds: float) -> None:
+        """Wait at most the given interval, waking immediately if stopped."""
+        self._stopped.wait(seconds)
+
     def stop(self, reason: str = "the request was abandoned") -> None:
         """Stop this request's reads now, and fail any still waiting for room."""
         if not self._stopped.is_set():
@@ -215,6 +219,19 @@ def waits_for_room() -> Iterator[None]:
     """Processes started inside (and in threads that copy this context) wait
     for room before they start; everything else starts at once."""
     token = _waits.set(True)
+    try:
+        yield
+    finally:
+        _waits.reset(token)
+
+
+@contextlib.contextmanager
+def starts_at_once() -> Iterator[None]:
+    """Processes started inside start at once at normal priority, even within
+    :func:`waits_for_room`: for work that holds something every other brindle
+    waits on (the sign-in's refresh lock), where waiting for room would hold
+    them all up with it."""
+    token = _waits.set(False)
     try:
         yield
     finally:

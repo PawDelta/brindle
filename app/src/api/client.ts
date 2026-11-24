@@ -902,12 +902,31 @@ export type PeopleQuery = { q?: string; team?: string; role?: string; on_plan?: 
 export type ShareAccessLevel = "view" | "comment" | "edit";
 /* Who has a plan (brindle/pro/share_access.py): the teams and org it is shared into, each person
    given it or asked to sign off (never its owner), and, before its first share, whether that share
-   uploads a plan kept on this Mac (null: can't be said). */
+   uploads a plan kept on this Mac (null: can't be said). A person whose change the daemon is still
+   sending carries it (ShareQueued's op, state and error); once it lands the Library's own row, with
+   no state, is listed. */
 export interface ShareAccess {
   shared: boolean;
   kept_here: boolean | null;
   scopes: { kind: string; id: string }[];
-  people: { sub: string; name: string | null; access: ShareAccessLevel; sign_off: "required" | "optional" | null }[];
+  people: ({ sub: string; name: string | null; access: ShareAccessLevel; sign_off: "required" | "optional" | null }
+    & Partial<Pick<ShareQueued, "op" | "state" | "error">>)[];
+}
+/* A change to one person the daemon sends in the background (brindle/pro/share_invites.py), kept on
+   this Mac: an invite (op invite) or Stop sharing (op remove), still being sent (state sharing or
+   removing; `error`: why it hasn't landed yet) or refused (state failed; `error`: the reason).
+   `receipt`: until the app sends it back (ackPlanInvites), the daemon doesn't send the change. */
+export interface ShareQueued {
+  sub: string;
+  name: null;
+  access: ShareAccessLevel;
+  sign_off: "required" | null;
+  op: "invite" | "remove";
+  state: "sharing" | "removing" | "failed";
+  error: string | null;
+  receipt: string | null;
+  /* This change, as Dismiss / Discard name it: refused when the person was changed again since. */
+  rev: number;
 }
 
 export interface DesignWorkItems {
@@ -2452,8 +2471,26 @@ export class DaemonClient {
     return this.get<ShareAccess>(`/plans/${encodeURIComponent(id)}/access`);
   }
 
+  /* Answered at once (202) with the plan as it is and the person's queued row; the daemon sends the
+     invite once that answer arrives. */
   invitePlanPerson(id: string, sub: string, access: ShareAccessLevel, signOff: boolean) {
-    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/people`, { sub, access, sign_off: signOff });
+    return this.post<Plan & { invite?: ShareQueued }>(`/plans/${encodeURIComponent(id)}/people`, { sub, access, sign_off: signOff });
+  }
+
+  /* The changes to people still on their way to the Library, read from this Mac alone. */
+  planInvites(id: string) {
+    return this.get<{ people: ShareQueued[] }>(`/plans/${encodeURIComponent(id)}/invites`);
+  }
+
+  /* The app has the answers that named these receipts: the daemon may send those changes now. */
+  ackPlanInvites(id: string, receipts: string[]) {
+    return this.post<{ acknowledged: number }>(`/plans/${encodeURIComponent(id)}/invites/receipts`, { receipts });
+  }
+
+  /* Let the refused or unconfirmed change shown (`rev`) to one person go (the Library keeps what it
+     has): refused (409) when they were changed again since. */
+  dismissPlanInvite(id: string, sub: string, rev: number) {
+    return this.delete<Plan>(`/plans/${encodeURIComponent(id)}/invites/${encodeURIComponent(sub)}?rev=${rev}`, {});
   }
 
   /* One person's access; the Library keeps their sign-off as it is, in the same write. */
@@ -2673,8 +2710,8 @@ export class DaemonClient {
   }
 
   /* The people of the person's org, to pick reviewers from, without the person (me); admin_org, the org whose rules they can override. */
-  libraryPeople() {
-    return this.get<{ people: LibraryPerson[]; me?: string; admin_org?: string | null }>("/library/people");
+  libraryPeople(repo?: string) {
+    return this.get<{ people: LibraryPerson[]; me?: string; admin_org?: string | null }>("/library/people", repo ? { repo } : {});
   }
 
   async keptVisuals(): Promise<KeptVisualDTO[]> {

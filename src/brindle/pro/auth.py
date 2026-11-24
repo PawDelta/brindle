@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
-from brindle import airgap, keystore
+from brindle import airgap, keystore, spawn
 from brindle.pro import license, loopback
 
 log = logging.getLogger(__name__)
@@ -544,6 +544,7 @@ def login(client: Client, store, *, show: Callable[[str], None] = print,
             raise
         creds["entitlement"] = got[0]
         store.save(creds)
+        _note_signin()
     license.clear_cache()
     return got[1]
 
@@ -580,7 +581,12 @@ def lock_path() -> Path:
 def refresh_lock(timeout: float = LOCK_TIMEOUT):
     """An exclusive, cross-process lock (``flock``) around every read-rotate-
     save of the refresh token.
-    Credential reads bypass caches after acquisition to observe token rotation."""
+    Credential reads bypass caches after acquisition to observe token rotation.
+    Every brindle of the OS user waits on this lock, so its holder's keychain
+    reads start at once at normal priority, even from background work: queued
+    behind a busy machine they held it past LOCK_TIMEOUT, and every request
+    that needed a fresh token failed with lock_timeout before it was sent.
+    A daemon request waiting to acquire the lock also stops at its deadline."""
     path = lock_path()
     old = os.umask(0o077)
     try:
@@ -590,17 +596,24 @@ def refresh_lock(timeout: float = LOCK_TIMEOUT):
         os.umask(old)
     try:
         deadline = time.monotonic() + timeout
+        request = spawn.current()
         while True:
+            if request is not None and (request.stopped or request.left() <= 0):
+                raise AuthError("the request ended while waiting for the sign-in refresh", code="lock_timeout")
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
-                if time.monotonic() > deadline:
+                left = deadline - time.monotonic()
+                if left <= 0:
                     raise AuthError("timed out waiting for another brindle process to refresh",
                                     code="lock_timeout") from None
+                if request is not None:
+                    request.wait(min(0.02, left, request.left()))
+                    continue
                 time.sleep(0.02)
         try:
-            with keystore.uncached_reading():
+            with keystore.uncached_reading(), spawn.starts_at_once():
                 yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -768,14 +781,114 @@ def switch_org(client: Client, store, org_id: str | None, *,
         else:
             cur["org_id"] = org_id
         store.save(cur)
+        _note_signin()
     license.clear_cache()
     return got[1]
+
+
+class WarmSignIn(Protocol):
+    """The process's warm sign-in (:mod:`brindle.pro.warm_token`, the daemon's)."""
+
+    def serves(self, store) -> bool:
+        """Whether this holder keeps ``store``'s sign-in."""
+
+    @property
+    def view(self):
+        """The store as this process's requests read it (from memory)."""
+
+    def pin(self, store=None) -> tuple:
+        """(a view bound to the sign-in held now, that sign-in's record); a ``store``
+        already pinned stays pinned, or fails closed if its sign-in was replaced."""
+
+    def recover(self) -> BaseException | None:
+        """Start a background reload of the entitlement; what the last refresh ran into."""
+
+    def grant(self, client: Client, generation: int | None = None) -> tuple[str, int]:
+        """(an unexpired access token for ``client``'s backend, its sign-in's generation);
+        raises ``record_changed`` for another sign-in (``generation``) or backend."""
+
+    def refused(self, client: Client, stale: str, generation: int) -> str | None:
+        """After a 401 for ``stale``: a newer token of the same sign-in if one is ready, without waiting."""
+
+
+# The daemon's warm sign-in, when one is installed: its requests use the access token
+# it holds in memory and never wait on the refresh lock while that token is unexpired.
+_warm: WarmSignIn | None = None
+
+
+def warm_for(store) -> WarmSignIn | None:
+    """The warm sign-in that keeps ``store``'s sign-in in this process, if any."""
+    warm = _warm
+    return warm if warm is not None and warm.serves(store) else None
+
+
+_warm_for = warm_for
+
+
+def warm_view(store):
+    """``store`` as the warm sign-in that keeps it holds it in memory (its reads need
+    no keychain), or ``store`` itself when none does."""
+    warm = _warm_for(store)
+    return store if warm is None else warm.view
+
+
+def warm_pin(store) -> tuple | None:
+    """(a view of ``store`` bound to the sign-in the warm sign-in holds now, that
+    sign-in's record): a request builds its client from the record, checks the
+    entitlement through the view and gets a token for that same sign-in, or fails
+    closed. None when no warm sign-in keeps ``store``."""
+    warm = _warm_for(store)
+    return None if warm is None else warm.pin(store)
+
+
+def warm_access(client: Client, store) -> str | None:
+    """The warm sign-in's access token for ``store`` (for the sign-in a pinned view is
+    bound to) at ``client``'s backend, or None when no warm sign-in keeps that store
+    (the caller reads the store itself). Raises ``record_changed`` on a mismatch."""
+    warm = _warm_for(store)
+    return None if warm is None else warm.grant(client, getattr(store, "generation", None))[0]
+
+
+def signin_marker() -> Path:
+    """Changed by every login, logout and org switch of this OS user's sign-in
+    (beside its refresh lock), never by a token rotation: a process holding the
+    sign-in in memory reads it to notice that what it holds was replaced."""
+    return lock_path().with_name("signin.changed")
+
+
+def _note_signin() -> None:
+    """Mark the sign-in replaced (login, logout, org switch). Call with the refresh lock held."""
+    import secrets
+
+    path = signin_marker()
+    old = os.umask(0o077)
+    try:
+        path.write_text(secrets.token_hex(8))
+    except OSError:
+        log.debug("couldn't mark the sign-in changed")
+    finally:
+        os.umask(old)
 
 
 def authed(client: Client, store, method: str, path: str, form: dict | None = None,
            *, now: float | None = None, headers: dict | None = None) -> tuple[int, dict]:
     """Call a Bearer endpoint (with extra ``headers``), refreshing the access
-    token first if it is about to expire and once more if the backend answers 401."""
+    token first if it is about to expire and once more if the backend answers 401.
+    With a warm sign-in for ``store`` (the daemon's), its in-memory token is used:
+    no store read and no refresh lock while it is unexpired, and a 401 is sent
+    again only with a newer token of the same sign-in already at hand (else a
+    renewal is started). It fails closed (``record_changed``) rather than send for
+    another sign-in or backend than the one ``store`` (a pinned view) and ``client``
+    were made for."""
+    warm = _warm_for(store) if now is None else None
+    if warm is not None:
+        token, generation = warm.grant(client, getattr(store, "generation", None))
+        status, body = client.call(method, path, form, token=token, headers=headers)
+        if status == 401:
+            newer = warm.refused(client, token, generation)
+            if newer is not None:
+                status, body = client.call(method, path, form, token=newer, headers=headers)
+        return status, body
     t = time.time() if now is None else now
     cur = store.load() or {}
     if not cur.get("refresh_token"):
@@ -815,6 +928,7 @@ def logout(client: Client | None, store) -> None:
             creds = {}
         _revoke_quietly(client, creds.get("refresh_token"))
         store.delete()
+        _note_signin()
     license.clear_cache()
 
 
