@@ -1133,8 +1133,43 @@ def settle_held_approval(db: DB, plan_id: str) -> None:
             _drop_held_approval(db, p, f"Your approval wasn't applied: {e.message}")
 
 
+def _version(version: Any) -> int | None:
+    """The live version on screen (``LiveDocState.version.id``), when the app names one."""
+    if version is None:
+        return None
+    if not isinstance(version, int) or isinstance(version, bool):
+        raise ServiceError("invalid", "version (the frozen version on screen) is a number", 400)
+    return version
+
+
+def caught_up(db: DB, p: dict, rev: int, version: int | None) -> dict:
+    """Plan ``p`` again after a sync with the Library, judged on what the
+    person had on screen: revision ``rev`` or, on a live doc, the frozen
+    ``version``. A version frozen from the live draft can come in as a new
+    revision here only when that sync brings it, after the person read and
+    signed it: the head that version came in as is what they read. Anything
+    else that moved is a newer revision for them to read (``stale``)."""
+    now = get(db, p["id"])
+    share = db.conn.execute("SELECT remote_rev FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
+    if version is not None and share is not None and share["remote_rev"] != version:
+        raise ServiceError("stale", f"version {version} isn't the one out for sign-off now; read the plan again",
+                           409, rev=now["rev"])
+    if now["rev"] == rev or came_in_as(db, now, version):
+        return now
+    raise ServiceError("stale", f"the plan has a newer revision (r{now['rev']}); read that one", 409, rev=now["rev"])
+
+
+def came_in_as(db: DB, p: dict, version: int | None) -> bool:
+    """Whether plan ``p``'s head is the Library's frozen ``version`` as it came in here."""
+    if version is None:
+        return False
+    share = db.conn.execute("SELECT remote_rev, local_rev FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
+    return share is not None and share["remote_rev"] == version and share["local_rev"] == p["rev"]
+
+
 def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, comments: Any = None,
-           note: Any = None, *, person: bool, attachments: Any = None, confirmed: bool = False) -> dict:
+           note: Any = None, *, person: bool, attachments: Any = None, confirmed: bool = False,
+           version: Any = None) -> dict:
     """The person's verdict on the revision on their screen (``rev``):
     approve, or redirect with their picks and per-section comments. Only the
     person (the app, through the daemon's guarded route) decides: anyone
@@ -1159,7 +1194,9 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     (``gate_unverified``, with a typed ``reason``), and held for
     :func:`settle_held_approval`, whose call passes ``confirmed``: it has just
     heard from the Library, and the gate is still read in the verdict's own
-    transaction."""
+    transaction. Once the Library has answered, the verdict is on the plan as
+    that answer left it (:func:`caught_up`): on a live doc, ``version`` (the
+    frozen version on screen) approves the revision it came in as."""
     from brindle import agents, plan_docs, tasks
 
     visuals.require_enabled()
@@ -1169,6 +1206,9 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     visuals._unlocked(p["root_id"])
     if not isinstance(rev, int) or isinstance(rev, bool):
         raise ServiceError("invalid", "rev (the revision on screen) is required", 400)
+    version = _version(version)
+    if came_in_as(db, p, version):
+        rev = p["rev"]          # an earlier sync brought the version on screen in: it is this revision
     if rev != p["rev"]:
         raise ServiceError("stale", f"the plan has a newer revision (r{p['rev']}); read that one", 409, rev=p["rev"])
     if p["state"] == WRITING:
@@ -1182,6 +1222,10 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
         before = gate(db, p)            # what the person pressed Approve on, before asking can change it
         was_ready = before is not None and before["state"] == "ready"
         unconfirmed = _check_with_library(db, p)
+        if unconfirmed is None:
+            # The sync may have brought in the version on screen as a new revision: judge that one.
+            p = caught_up(db, p, rev, version)
+            rev = p["rev"]
     titles = anchors(p)
     from brindle import plan_answers
 

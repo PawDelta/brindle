@@ -835,6 +835,52 @@ def test_two_writers_in_one_shared_section_both_land_in_the_live_draft_and_only_
     assert (got["rev"], got["sections"][0]["markdown"], got["gate"]["state"]) == (2, agreed, "waiting")
 
 
+@pytest.mark.parametrize("first", [
+    "approve",          # the approval's own sync brings the version in
+    "own_sign_off",     # the author is a reviewer too: their sign-off's sync brings it in, the approval follows
+    "no_version",       # an app naming only the older revision is told to read the new one
+])
+def test_a_frozen_version_read_before_it_came_in_here_is_signed_and_approved_as_the_app_names_it(
+        db, parts, backend, monkeypatch, first):
+    """The app shows a frozen live version (its own text) while its read of the plan is
+    still the revision before the freeze; each sign-off and the approval name that version.
+    The sync each makes brings the version in as a new revision here: that one is judged."""
+    pid, lib, net = parts
+    monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
+    signer = ["u_a"]
+
+    def sign(form, headers):            # as the server: only the head, by whoever is signed in
+        if form["rev"] != lib.rev:
+            return 409, {"error": "stale", "rev": lib.rev}
+        lib.sign_offs.append({"rev": form["rev"], "sub": signer[0], "at": 9.0})
+        return 200, lib.view()
+
+    backend.routes[f"POST {DESIGN}/sign-offs"] = sign
+    sd.share(db, pid, TEAM, reviewers=[{"sub": "u_a"}, *([{"sub": "user_1"}] if first == "own_sign_off" else [])],
+             **net)
+    lib.open_draft()
+    sd.sync(db, pid, **net)
+    lib.draft.insert("summary", 0, "Agreed: ")      # typed live, then frozen as version 2
+    lib.freeze()
+    screen = {"rev": 1, "version": 2}
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        post = lambda tail, **body: app.post(f"/v1/plans/{pid}/{tail}", json=body)  # noqa: E731
+        theirs = app.post(f"/v1/shared-designs/{DOC}/sign-offs", json=screen)       # the teammate, from their reader
+        assert theirs.status_code == 200, theirs.json()
+        if first == "no_version":
+            refused = post("decide", rev=1, approved=True).json()["error"]
+            assert (refused["code"], refused["rev"]) == ("stale", 2)        # never a closed gate
+            return
+        if first == "own_sign_off":
+            signer[0] = "user_1"
+            mine = post("sign-off", **screen)
+            assert mine.status_code == 200, mine.json()
+            assert (mine.json()["rev"], mine.json()["gate"]["state"]) == (2, "ready")
+        approved = post("decide", approved=True, **screen)
+        assert approved.status_code == 200, approved.json()
+        assert (approved.json()["state"], approved.json()["rev"]) == ("approved", 2)
+
+
 def test_a_comment_follows_its_words_through_edits_and_detaches_only_when_they_are_deleted(
         db, parts, backend, monkeypatch):
     pid, lib, net = parts

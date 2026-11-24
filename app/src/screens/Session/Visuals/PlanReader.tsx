@@ -72,6 +72,19 @@ const SuggestEditor = lazy(() => import("./DocEditor").then((m) => ({ default: m
 const progress = (p: Plan) => p.rev * 2 + (p.state === "open" ? 0 : 1);
 const noSubscribe = () => () => {};
 
+/* The refusals that only mean the plan moved on under the screen (a newer revision or version, or
+   a verdict given elsewhere): the doc is read again. Any other refusal (a template's empty required
+   section, a closed gate, a lock) says why in the engine's or the Library's own words. */
+const MOVED = new Set(["stale", "decided", "conflict", "withdrawn"]);
+function refusal(e: unknown): string {
+  if (!(e instanceof DaemonError)) return `Couldn't send: ${message(e)}`;
+  if (e.code === "gate_unverified") return message(e);
+  if (e.status === 409 && MOVED.has(e.code)) return "This plan changed since you opened it (a new revision, or it was already decided). It is being read again.";
+  // The daemon's own 403s (a session locked to another identity) aren't the Library's.
+  if (e.status === 403 && e.code !== "locked") return `The Library refused this for your account: ${message(e)}`;
+  return `Couldn't send: ${message(e)}`;
+}
+
 /* The doc's writes, kept in order by the reader: `begin` is refused while another is out, and
    `end` hands back the engine's reply (the plan as it is now), or null when the write failed. */
 export interface Writes {
@@ -617,8 +630,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     } catch (e) {
       writes.end(null);
       refused?.(e);
-      if (alive.current) setError(e instanceof DaemonError && e.code === "gate_unverified" ? message(e) : e instanceof DaemonError && e.status === 409 && e.code !== "gate_closed" && e.code !== "review_closed" ? "This plan changed since you opened it (a new revision, or it was already decided). It is being read again."
-        : e instanceof DaemonError && e.status === 403 ? `The Library refused this for your account: ${message(e)}` : `Couldn't send: ${message(e)}`);
+      if (alive.current) setError(refusal(e));
       return null;
     } finally {
       if (alive.current) setBusy(false);
