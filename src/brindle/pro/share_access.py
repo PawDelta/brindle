@@ -173,17 +173,30 @@ def plan_access(db: DB, plan_id: str, *, client=None, store=None) -> dict:
     client, store = ad._session(client, store)
     share_ = sd._shared(db, p["id"], store)
     meta, view, names = plan_reads(db, p, share_["doc_id"], client, store)
+    assert meta is not None
     return {"shared": True, **summary(meta, view, names)}
 
 
-def plan_reads(db: DB, p: dict, doc_id: str, client, store) -> tuple[dict, dict, dict[str, str]]:
+def plan_reads(db: DB, p: dict, doc_id: str, client, store, *, metadata_optional: bool = False
+               ) -> tuple[dict | None, dict, dict[str, str] | None]:
     """Read the panel's three inputs together, then record review state on the DB's thread."""
+    from brindle.pro import auth, credentials
+
     with ThreadPoolExecutor(max_workers=3) as pool:
         meta = pool.submit(copy_context().run, ad._call, "GET", ad._doc_path(doc_id),
                            client=client, store=store)
         design = pool.submit(copy_context().run, ad._call, "GET", sd._path(doc_id),
                              client=client, store=store)
         directory = pool.submit(copy_context().run, sd.member_names, doc_id, client=client, store=store)
+        if metadata_optional:
+            # Sync depends on the design. Metadata is only needed for the access summary.
+            view = review_policies.checked(db, p, design.result())
+            try:
+                result = meta.result()
+            except (RuntimeError, auth.AuthError, credentials.CredentialError):
+                result = None
+            checked = review_policies.checked(db, p, result) if result is not None and result[0] == 200 else None
+            return checked, view, directory.result()
         result = review_policies.checked(db, p, meta.result())
         view = review_policies.checked(db, p, design.result())
         return result, view, directory.result()

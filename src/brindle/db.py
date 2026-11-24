@@ -1370,7 +1370,8 @@ CREATE TABLE IF NOT EXISTS plan_shares (
     approve_wanted TEXT,           -- JSON: the person's Approve, held until the Library answers (plans.settle_held_approval)
     approve_refused TEXT,          -- why a held Approve wasn't applied, for the person
     access_refused TEXT,           -- the Library refused this account access; NULL once it next gives a whole answer
-    review_asked INTEGER NOT NULL DEFAULT 0   -- 1 once any review state seen here had required reviewers or org rules
+    review_asked INTEGER NOT NULL DEFAULT 0,  -- 1 once any review state seen here had required reviewers or org rules
+    names_pending TEXT              -- set when an unavailable directory left names to resolve
 );
 -- A change to one person's share still on its way to the Library
 -- (brindle.pro.share_invites): written before the Library hears of it, so
@@ -2076,7 +2077,8 @@ class DB:
             self.conn.execute("ALTER TABLE plans ADD COLUMN ask TEXT")
         share_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_shares)")}
         for col, kind in (("org_id", "TEXT"), ("lapsed_at", "REAL"), ("unconfirmed", "TEXT"),
-                          ("approve_wanted", "TEXT"), ("approve_refused", "TEXT"), ("access_refused", "TEXT")):
+                          ("approve_wanted", "TEXT"), ("approve_refused", "TEXT"), ("access_refused", "TEXT"),
+                          ("names_pending", "TEXT")):
             if col not in share_cols:
                 self.conn.execute(f"ALTER TABLE plan_shares ADD COLUMN {col} {kind}")
         if "review_asked" not in share_cols:

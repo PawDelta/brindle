@@ -72,6 +72,7 @@ import threading
 import time
 from typing import Any, Protocol
 from urllib.parse import urlencode
+from uuid import uuid4
 
 from brindle import doc_templates, plan_docs, plans, visuals
 from brindle.crdt import CrdtError
@@ -629,20 +630,25 @@ def _author(sub: Any) -> str | None:
     return plan_docs.TEAMMATE + sub if isinstance(sub, str) and sub else None
 
 
-def member_names(doc_id: str, *, client=None, store=None) -> dict[str, str]:
-    """Use the share panel's directory; an unavailable directory must not block sync."""
-    from brindle.pro import auth, shared_reader
+def member_names(doc_id: str, *, client=None, store=None) -> dict[str, str] | None:
+    """Use the share panel's directory, or return None when it is unavailable."""
+    from brindle.pro import auth, credentials, shared_reader
 
     try:
         directory = shared_reader.people(doc_id, {}, client=client, store=store)
-    except (RuntimeError, ValueError, auth.AuthError, auth.TransportError):
-        return {}
+    except (RuntimeError, ValueError, auth.AuthError, credentials.CredentialError):
+        return None
     return {p["id"]: p["display_name"].strip() or p["email"].strip() or "A teammate"
             for p in directory["people"]}
 
 
-def _remember_names(db: DB, plan_id: str, names: dict[str, str]) -> bool:
+def _remember_names(db: DB, share_: dict, names: dict[str, str]) -> bool:
+    plan_id, doc_id = share_["plan_id"], share_["doc_id"]
     with db.tx() as c:
+        # A late directory response cannot clear work left by a newer sync.
+        if not c.execute("SELECT 1 FROM plan_shares WHERE plan_id=? AND doc_id=? AND names_pending IS ?",
+                         (plan_id, doc_id, share_["names_pending"])).fetchone():
+            return False
         before = c.total_changes
         c.executemany("INSERT INTO plan_teammate_names (plan_id, sub, name) VALUES (?,?,?)"
                       " ON CONFLICT(plan_id, sub) DO UPDATE SET name=excluded.name WHERE name<>excluded.name",
@@ -654,7 +660,10 @@ def _remember_names(db: DB, plan_id: str, names: dict[str, str]) -> bool:
             label = name["name"] if name else row["author_name"] or "A teammate"
             if row["author_name"] != label:
                 c.execute("UPDATE plan_threads SET author_name=? WHERE id=?", (label, row["id"]))
-        return c.total_changes != before
+        changed = c.total_changes != before
+        if share_["names_pending"] is not None:
+            c.execute("UPDATE plan_shares SET names_pending=NULL WHERE plan_id=?", (plan_id,))
+        return changed
 
 
 def _when(at: Any, now: float) -> float:
@@ -1383,11 +1392,13 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
     try:
         share_ = _shared(db, p["id"], store)
         doc_id = share_["doc_id"]
+        names_share = share_
         if include_access:
             from brindle.pro import share_access
 
-            meta, view, names = share_access.plan_reads(db, p, doc_id, client, store)
-            access = {"shared": True, **share_access.summary(meta, view, names)}
+            meta, view, names = share_access.plan_reads(db, p, doc_id, client, store, metadata_optional=True)
+            if meta is not None:
+                access = {"shared": True, **share_access.summary(meta, view, names)}
         else:
             view = review_policies.ask(db, p, "GET", _path(doc_id), client=client, store=store)
     except RuntimeError as e:
@@ -1410,10 +1421,14 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
     if imported:
         p, share_ = plan_docs._plan(db, p["id"]), link(db, p["id"])
     changes = _pull(db, p, share_, view)
-    if names is None and (changes or imported):
+    if not include_access and share_["doc_id"] == doc_id and (changes or imported or share_["names_pending"]):
+        names_share = share_
         names = member_names(doc_id, client=client, store=store)
     if names is not None:
-        changes += _remember_names(db, p["id"], names)
+        changes += _remember_names(db, names_share, names)
+    elif changes or imported:
+        db.conn.execute("UPDATE plan_shares SET names_pending=? WHERE plan_id=? AND doc_id=?",
+                        (uuid4().hex, p["id"], doc_id))
     if changes:
         plan_docs._changed(db, p, p["rev"])
     pushed = _send(db, p, view, client, store, time.time() if now is None else now, acked)

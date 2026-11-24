@@ -82,18 +82,43 @@ def test_access_overlaps_all_three_library_reads(shared, backend):
     assert deadlines[0] is not None and all(deadline is deadlines[0] for deadline in deadlines)
 
 
-def test_idle_sync_skips_the_directory(shared, backend, db):
-    pid, library, net = shared
+def _add_teammate_comment(library):
     library.threads.append({"id": 1, "kind": "comment", "rev": 1, "author": "u_e",
                             "text": "Which VM?", "at": 5.0, "status": "open", "replies": [],
                             "anchor": {"kind": "section", "section": "summary"}})
+
+
+def _show_teammate_name(backend):
     backend.routes[f"GET {DESIGN}/people"] = lambda f, h: (
         200, {"people": [{"id": "u_e", "display_name": "Dana"}]})
+
+
+def test_idle_sync_skips_the_directory(shared, backend, db):
+    pid, library, net = shared
+    _add_teammate_comment(library)
+    _show_teammate_name(backend)
     assert shared_docs.sync(db, pid, **net)["pulled"]
     assert f"GET {DESIGN}/people" in backend.paths()
     assert plan_docs.fields(db, plans.get(db, pid))["threads"][0]["author_name"] == "Dana"
     backend.calls.clear()
     assert shared_docs.sync(db, pid, **net)["pulled"] == 0
+    assert backend.paths() == [f"GET {DESIGN}"]
+
+
+def test_idle_sync_recovers_names_after_a_directory_outage(shared, backend, db):
+    pid, library, net = shared
+    _add_teammate_comment(library)
+    backend.routes[f"GET {DESIGN}/people"] = lambda f, h: (503, {"error": "unavailable"})
+    assert shared_docs.sync(db, pid, **net)["pulled"]
+    assert len(plan_docs.fields(db, plans.get(db, pid))["threads"]) == 1
+
+    _show_teammate_name(backend)
+    backend.calls.clear()
+    assert shared_docs.sync(db, pid, **net)["pulled"]
+    assert backend.paths() == [f"GET {DESIGN}", f"GET {DESIGN}/people"]
+    assert plan_docs.fields(db, plans.get(db, pid))["threads"][0]["author_name"] == "Dana"
+    backend.calls.clear()
+    shared_docs.sync(db, pid, **net)
     assert backend.paths() == [f"GET {DESIGN}"]
 
 
@@ -104,6 +129,24 @@ def test_first_share_sync_can_return_access_with_one_set_of_reads(shared, backen
     assert response.status_code == 200, response.text
     assert response.json()["access"]["shared"]
     assert sorted(backend.paths()) == sorted([f"GET {BASE}", f"GET {DESIGN}", f"GET {DESIGN}/people"])
+
+
+def test_first_share_sync_applies_design_when_metadata_is_unavailable(shared, backend, db):
+    pid, library, _ = shared
+    _add_teammate_comment(library)
+    plan_docs.comment(db, pid, 1, {"kind": "section", "section": "summary"}, "Use a dedicated host.")
+    backend.routes[f"GET {BASE}"] = lambda f, h: (503, {"error": "unavailable"})
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        response = app.post(f"/v1/plans/{pid}/sync", json={"include_access": True})
+        assert response.status_code == 200, response.text
+        assert "access" not in response.json()
+        assert len(response.json()["threads"]) == 2
+        assert f"POST {DESIGN}/comments" in backend.paths()
+
+        backend.routes[f"GET {DESIGN}"] = lambda f, h: (403, {"error": "forbidden"})
+        refused = app.post(f"/v1/plans/{pid}/sync", json={"include_access": True})
+    assert refused.status_code == 403
+    assert shared_docs.link(db, pid)["access_refused"] == "forbidden"
 
 
 def test_commenter_open_overlaps_title_and_design_without_asking_for_names(shared, backend):
