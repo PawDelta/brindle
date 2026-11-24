@@ -2526,20 +2526,20 @@ def docs_api(method: str, path: str, body: dict | None = None, *, repo: str | No
         query.update(zip(("scope_kind", "scope_id"), doc_scope(scope, ent.sub)))
     try:
         return analysis_docs.api(method, path + (f"?{urlencode(query)}" if query else ""), body)
-    except (RuntimeError, auth.AuthError, keystore.KeychainReadTimeout) as e:
+    except (RuntimeError, auth.AuthError, keystore.KeychainReadBlocked) as e:
         raise upstream_error(e) from e
 
 
 def _library_busy(e: BaseException | None) -> ServiceError | None:
     """A local sign-in delay can surface through entitlement or Library errors."""
-    from brindle.keystore import KeychainReadTimeout
+    from brindle.keystore import KeychainReadBlocked
     from brindle.pro.auth import AuthError
 
     while e is not None:
         if isinstance(e, AuthError) and e.code == "lock_timeout":
             return ServiceError("busy", "Another brindle process is refreshing your sign-in.", 503)
-        if isinstance(e, KeychainReadTimeout):
-            return ServiceError("busy", "brindle couldn't read your sign-in from the keychain in time.", 503)
+        if isinstance(e, KeychainReadBlocked):
+            return ServiceError("busy", str(e), 503)
         e = e.__cause__
     return None
 

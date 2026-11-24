@@ -182,9 +182,9 @@ def test_an_air_gapped_search_reads_no_credential(parts, tmp_path, monkeypatch):
     assert got.status_code == 402, got.json()
 
 
-@pytest.mark.parametrize("method", ["GET", "POST"])
-@pytest.mark.variant("The people search and invite have separate daemon error handlers")
-def test_a_blocked_refresh_is_busy_in_the_share_routes(panel, parts, monkeypatch, method):
+@pytest.mark.parametrize("operation", ["search", "invite", "link"])
+@pytest.mark.variant("Search, invite and link reads have separate daemon error handlers")
+def test_a_blocked_refresh_is_busy_in_the_share_routes(panel, parts, monkeypatch, operation):
     pid, _, app = panel
     path = f"/v1/plans/{pid}/people"
     invite = {"sub": "ann", "access": "comment"}
@@ -196,38 +196,74 @@ def test_a_blocked_refresh_is_busy_in_the_share_routes(panel, parts, monkeypatch
         raise auth.AuthError("refresh lock held", code="lock_timeout")
 
     monkeypatch.setattr(auth, "refresh_lock", blocked)
-    got = app.get(f"{path}?{SEARCH}") if method == "GET" else app.post(path, json=invite)
+    if operation == "search":
+        got = app.get(f"{path}?{SEARCH}")
+    elif operation == "invite":
+        got = app.post(path, json=invite)
+    else:
+        got = app.get(f"/v1/plans/{pid}/share-link")
     assert (got.status_code, got.json()["error"]["code"]) == (503, "busy")
 
 
-def test_an_unlinked_search_reports_busy_when_the_keychain_read_times_out(parts, monkeypatch):
+@pytest.mark.parametrize("operation", ["search", "plan-link", "design-link"])
+@pytest.mark.variant("Unlinked search, plan link resolution and design link availability each read the entitlement")
+def test_share_routes_keep_a_blocked_keychain_actionable(parts, db, monkeypatch, operation):
     pid, _, net = parts
     store = keystore.KeychainStore("test-share-people")
+    attempted = []
 
     def unanswered(*args):
+        attempted.append(True)
         raise TimeoutExpired("security", keystore.STORE_LIMIT)
 
     monkeypatch.setattr(store, "_run", unanswered)
-    monkeypatch.setattr(ad, "_session", lambda *a: (net["client"], net["store"]))
-    monkeypatch.setattr(credentials, "default_store", lambda: store)
-    license.clear_cache()
+    if operation == "search":
+        path = f"/v1/plans/{pid}/people?{SEARCH}"
+        monkeypatch.setattr(ad, "_session", lambda *a: (net["client"], net["store"]))
+        monkeypatch.setattr(credentials, "default_store", lambda: store)
+        license.clear_cache()
+    else:
+        monkeypatch.setattr(ad, "_session", lambda *a: (net["client"], store))
+        if operation == "plan-link":
+            db.conn.execute("INSERT INTO plan_shares (plan_id, doc_id, owner) VALUES (?, ?, 'user_1')", (pid, DOC))
+            path = f"/v1/plans/{pid}/share-link"
+        else:
+            path = f"/v1/library/designs/{DOC}/share-link"
     with TestClient(build_app(TOKEN), headers=AUTH) as app:
-        got = app.get(f"/v1/plans/{pid}/people?{SEARCH}")
-    assert (got.status_code, got.json()["error"]["code"]) == (503, "busy")
+        first, again = app.get(path), app.get(path)
+    assert first.status_code == again.status_code == 503, (first.json(), again.json())
+    for got in (first, again):
+        error = got.json()["error"]
+        assert error["code"] == "busy"
+        assert "brindle keys unblock" in error["message"]
+    assert len(attempted) == 1
 
 
 def test_refresh_lock_stops_at_the_request_deadline(tmp_path, monkeypatch):
-    monkeypatch.setattr(auth, "lock_path", lambda: tmp_path / "refresh.lock")
-    with spawn.deadline(auth.LOCK_TIMEOUT / 2) as request:
-        def held(*args):
-            assert request.left() > 0, "attempted to take the refresh lock past the request deadline"
-            request.at = spawn.time.monotonic()
-            raise BlockingIOError
+    now = 10.0
+    budget = 0.005
+    attempts = 0
 
-        monkeypatch.setattr(auth.fcntl, "flock", held)
+    def advance(seconds):
+        nonlocal now
+        now += seconds
+
+    def held(*args):
+        nonlocal attempts
+        attempts += 1
+        assert attempts == 1, "attempted to take the refresh lock after exhausting the budget"
+        raise BlockingIOError
+
+    monkeypatch.setattr(auth, "lock_path", lambda: tmp_path / "refresh.lock")
+    monkeypatch.setattr(auth.time, "monotonic", lambda: now)
+    monkeypatch.setattr(auth.fcntl, "flock", held)
+    with spawn.deadline(budget) as request:
+        monkeypatch.setattr(request._stopped, "wait", advance)
+        started = now
         with pytest.raises(auth.AuthError) as error, auth.refresh_lock():
             pytest.fail("acquired the held refresh lock")
     assert error.value.code == "lock_timeout"
+    assert now - started == pytest.approx(budget)
 
 
 def test_the_refresh_lock_holder_never_waits_for_room(tmp_path, monkeypatch):

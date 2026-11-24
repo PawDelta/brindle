@@ -560,7 +560,7 @@ def _library_call(work: Callable[[Any], Any]) -> Any:
 
     try:
         return work(shared_docs)
-    except (RuntimeError, auth.AuthError, keystore.KeychainReadTimeout) as e:
+    except (RuntimeError, auth.AuthError, keystore.KeychainReadBlocked) as e:
         err = actions.upstream_error(e)
         raise ServiceError(err.code, redact.mask(err.message), err.http_status) from e
 
@@ -803,7 +803,7 @@ def _shared_design(repo: str | None, work: Callable[[Any], Any]) -> Any:
     try:
         actions._docs_entitlement(repo, None if airgap.enabled() else analysis_docs._session()[1])
         return work(shared_reader)
-    except (RuntimeError, auth.AuthError, keystore.KeychainReadTimeout) as e:
+    except (RuntimeError, auth.AuthError, keystore.KeychainReadBlocked) as e:
         if isinstance(e, analysis_docs.Refused) and e.status == 401:      # still refused after a token refresh; a 401 would read as the daemon's
             raise ServiceError("signed_out", "sign in to brindle again to read this plan", 402) from e
         if isinstance(e, analysis_docs.Refused) and e.code == "key_unavailable":
@@ -1002,16 +1002,17 @@ def _share_link(repo: str | None, work: Callable[[Any], Any]) -> Any:
     """A design's share link (brindle.pro.share_links), by its Library doc id.
     Below Pro a read answers ``available: false`` and nothing is sent; the
     Library's refusal (an org's link policy, not an editor) keeps its reason."""
-    from brindle import config, redact
+    from brindle import config, keystore, redact
     from brindle.daemon import routes_actions as actions
-    from brindle.pro import auth, share_links
+    from brindle.pro import analysis_docs, auth, share_links
 
     if repo:
         config.load_repo_config(repo)        # its air-gap setting applies first
     try:
         return work(share_links)
-    except auth.TransportError as e:         # unreachable
-        raise ServiceError("upstream", redact.mask(str(e)), actions.upstream_error(e).http_status) from e
+    except (analysis_docs.SignInBusy, auth.AuthError, keystore.KeychainReadBlocked) as e:
+        err = actions.upstream_error(e)
+        raise ServiceError(err.code, redact.mask(err.message), err.http_status) from e
 
 
 @_json

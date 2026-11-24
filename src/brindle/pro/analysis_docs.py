@@ -326,10 +326,14 @@ def _session(client=None, store=None):
     return client, store
 
 
+class SignInBusy(RuntimeError):
+    """The Library could not read the sign-in to check its entitlement."""
+
+
 def require_entitlement(store=None):
     """The verified entitlement, or ``RuntimeError`` (before anything is sent)
     in air-gap mode or without the ``analysis_docs`` feature."""
-    from brindle import airgap
+    from brindle import airgap, keystore
     from brindle.pro import license
 
     if airgap.enabled():
@@ -337,6 +341,8 @@ def require_entitlement(store=None):
     try:
         ent = license.current(refresh=False, store=store)
     except Exception as e:  # noqa: BLE001
+        if isinstance(e, license.LicenseError) and isinstance(e.__cause__, keystore.KeychainReadBlocked):
+            raise SignInBusy(str(e.__cause__)) from e
         raise RuntimeError("not logged in to brindle Pro (`brindle account login`)") from e
     if FEATURE not in ent.features or ent.in_grace:
         raise RuntimeError("your subscription has no plan library (the `analysis_docs` entitlement)")
