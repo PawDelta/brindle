@@ -31,18 +31,23 @@ from dataclasses import replace
 import pytest
 from starlette.testclient import TestClient
 
-from brindle import inbox_team
+from brindle import inbox_team, plan_docs
 from brindle.daemon.app import build_app
 from brindle.pro import analysis_docs as ad
-from brindle.pro import auth, credentials
+from brindle.pro import auth, credentials, shared_docs as sd
 from pro_fixtures import backend, claims, pro_env, sign, signing_key  # noqa: F401
 from test_plans import AUTH, TOKEN, session  # noqa: F401
 from test_share_panel_access import PeopleLibrary, add_person, as_, person
-from test_shared_plan_docs import DESIGN, DOC, TEAM_LOGIN, parts, sent  # noqa: F401
+from test_shared_plan_docs import BASE, DESIGN, DOC, TEAM_LOGIN, parts, sent  # noqa: F401
 
 ANN = {"kind": "user", "id": "ann"}
+OWNER = {"kind": "user", "id": "user_1"}
 ANN_SIGNS = {"sub": "ann", "access": "comment", "sign_off": True}
 OLD_BODY, NEW_BODY = {"role", "required"}, {"access", "sign_off"}
+# pawdelta-web 85bd1cb9, analysis_designs._set_person_grant and set_reviewer.
+EDITOR_GRANT = {"can_edit": True, "can_comment": True, "can_suggest": True}
+REVIEWER_GRANT = {"can_edit": False, "can_comment": True, "can_suggest": True}
+REQUIRED_ANN = [{"sub": "ann", "required": True}]
 
 
 class CompatLibrary(PeopleLibrary):
@@ -65,6 +70,8 @@ class CompatLibrary(PeopleLibrary):
         return {s["id"] for s in self.scopes if s["kind"] == "user"}
 
     def share(self, form, headers):
+        if self.older and NEW_BODY & form.keys():
+            return 422, {"error": "invalid_request", "fields": ["<unknown>"]}
         if self.cut == "before":
             raise auth.TransportError("cannot reach brindle Pro backend: network is unreachable")
         before = self.people_with_it()
@@ -237,41 +244,88 @@ def test_an_unshare_answered_without_the_design_view(compat, who):
     assert library.scopes == [{"kind": "user", "id": library.author}] and library.reviewers == []
 
 
-@pytest.mark.parametrize(("target", "older", "access"), [
+@pytest.mark.parametrize(("target", "older", "initial_access"), [
     pytest.param("plan", False, "edit", marks=pytest.mark.variant("the plan's route sent the legacy body: demoted")),
     pytest.param("library", False, "edit", marks=pytest.mark.variant("the Library reader's route did too")),
     pytest.param("plan", True, "edit", marks=pytest.mark.variant("an older Library refuses {sign_off}: plan route")),
     pytest.param("library", True, "edit", marks=pytest.mark.variant("an older Library refuses it: reader route")),
-    pytest.param("plan", True, "comment", marks=pytest.mark.variant("an older Library's signer still gets comment")),
+    pytest.param("plan", True, "view", marks=pytest.mark.variant("the legacy reviewer grant adds comment and suggest")),
 ])
-def test_asking_someone_to_sign_off_keeps_their_access_on_either_library(compat, target, older, access):
+def test_asking_someone_to_sign_off_keeps_their_access_on_either_library(db, compat, target, older, initial_access):
     """The legacy ``{role: "reviewer"}`` body makes the person a commenter, on
     the current Library and on one before #328, which also refuses the new
     ``{sign_off}`` (422): neither may cost an editor their edit."""
-    pid, library, app, _ = compat
-    assert add_person(app, pid,{"sub": "ann", "access": access}).status_code == 202
+    pid, library, app, net = compat
     library.older = older
+    if older:
+        sd.ensure_doc(db, plan_docs._plan(db, pid), None, None, **net)
+        # The older ShareRequest accepts scope and role. The role is applied on POST.
+        ad.api("POST", f"{BASE}/share", {"scope": ANN, "role": initial_access}, **net)
+        before = ad.api("GET", DESIGN, **net)
+        assert before["permissions"] == ({"ann": EDITOR_GRANT} if initial_access == "edit" else {})
+        assert before["reviewers"] == []
+    else:
+        assert add_person(app, pid, {"sub": "ann", "access": initial_access}).status_code == 202
+
     base = f"/v1/plans/{pid}" if target == "plan" else f"/v1/library/designs/{DOC}"
     asked = app.put(f"{base}/reviewers/ann", json={"required": True})
     assert asked.status_code == 200, asked.json()
+    wire = ad.api("GET", DESIGN, **net)
+    assert wire["reviewers"] == REQUIRED_ANN
+    assert wire["permissions"].get("ann") == (EDITOR_GRANT if initial_access == "edit" else REVIEWER_GRANT)
+    access = "edit" if initial_access == "edit" else "comment"
     assert person(app, pid, "ann") == {"sub": "ann", "name": None, "access": access, "sign_off": "required"}
     seen = as_(library, app, "ann")
-    assert seen["can_edit"] is (access == "edit") and seen["can_comment"] and seen["can_sign_off"]
+    assert seen["can_edit"] is (access == "edit")
+    assert seen["can_comment"] and seen["can_suggest"] and seen["can_sign_off"]
 
+
+def _older_share_summary(meta, view):
+    """The people projection of share_access.summary at brindle 0552f92a."""
+    owner = meta.get("scope") if isinstance(meta.get("scope"), dict) else {}
+    left_out = {owner.get("id") if owner.get("kind") == "user" else None, view.get("author")}
+    scopes = [s for s in meta.get("scopes") or [] if isinstance(s, dict) and isinstance(s.get("id"), str)]
+    grants = view.get("permissions") if isinstance(view.get("permissions"), dict) else {}
+    reviewers = {r["sub"]: r for r in view.get("reviewers") or []
+                 if isinstance(r, dict) and isinstance(r.get("sub"), str)}
+    subs = [s["id"] for s in scopes if s.get("kind") == "user"] + list(grants) + list(reviewers)
+    people = []
+    for sub in dict.fromkeys(subs):
+        if sub in left_out:
+            continue
+        grant = grants.get(sub)
+        grant = grant if isinstance(grant, dict) else {}
+        access = "edit" if grant.get("can_edit") else "comment" if grant.get("can_comment") else "view"
+        signer = reviewers.get(sub)
+        people.append({"sub": sub, "name": None, "access": access,
+                       "sign_off": None if signer is None else "required" if signer.get("required", True) else "optional"})
+    return people
 
 @pytest.mark.variant("a pinned older client's request and reader against the current Library's wire shapes")
-def test_an_older_client_still_gets_access_and_sign_off_from_the_current_library(compat):
-    """brindle before this branch (shared_docs.set_reviewer at 851fb558): its
-    request, pinned here, against the current Library's per-person route, and
-    its reader (share_access.summary) of the answer."""
-    from brindle.pro import share_access
+def test_an_older_client_still_gets_access_and_sign_off_from_the_current_library(parts, backend):
+    _, _, net = parts
+    # pawdelta-web a8100d61: ShareRequest/PersonGrant, analysis_designs.share_to,
+    # _set_person_grant, set_reviewer and view, and analysis_docs._view. Keep the
+    # fields read by the old client. set_reviewer changes the reviewer list alone.
+    after_share = {"permissions": {"ann": {"can_edit": False, "can_comment": True, "can_suggest": False}},
+                   "reviewers": [], "pending_reviewers": [], "ready": True, "access_request": None}
+    after_sign = {**after_share, "reviewers": REQUIRED_ANN, "pending_reviewers": ["ann"], "ready": False}
+    scopes = [OWNER, ANN]
+    backend.routes.update({
+        f"POST {BASE}/share": [(200, {"id": DOC, "scopes": scopes, "design": after_share})],
+        f"PUT {DESIGN}/reviewers/ann": [(200, after_sign)],
+        f"GET {BASE}": [(200, {"id": DOC, "scope": OWNER, "scopes": scopes})],
+        f"GET {DESIGN}": [(200, after_sign)],
+    })
 
-    pid, library, app, net = compat
-    assert add_person(app, pid,{"sub": "ann", "access": "view"}).status_code == 202
-    status, view = net["client"].call("PUT", f"{DESIGN}/permissions/ann", {"role": "reviewer", "required": True},
-                                      token=net["store"].load()["access_token"])
-    assert status == 200, view
-    ann, = share_access.summary({"scope": library.scopes[0], "scopes": library.scopes}, view)["people"]
+    # brindle 0552f92a share_access.invite followed by share_access.read.
+    shared = ad.api("POST", f"{BASE}/share", {"scope": ANN, "role": "comment"}, **net)
+    assert sent(backend, f"POST {BASE}/share") == [{"scope": ANN, "role": "comment"}]
+    assert _older_share_summary({"scope": OWNER, "scopes": shared["scopes"]}, shared["design"]) == [
+        {"sub": "ann", "name": None, "access": "comment", "sign_off": None}]
+    ad.api("PUT", f"{DESIGN}/reviewers/ann", {"required": True}, **net)
+    assert sent(backend, f"PUT {DESIGN}/reviewers/ann") == [{"required": True}]
+    ann, = _older_share_summary(ad.api("GET", BASE, **net), ad.api("GET", DESIGN, **net))
     assert ann == {"sub": "ann", "name": None, "access": "comment", "sign_off": "required"}
 
 
