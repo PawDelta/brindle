@@ -61,11 +61,11 @@ def test_keychain_read_cached(monkeypatch, record, external):
     assert stored[0] == external
     store.save({"value": "replacement"})
     assert keystore.KeychainStore(service, account).load() == {"value": "replacement"}
-    assert calls.count("find-generic-password") == 6
+    assert calls.count("find-generic-password") == 5      # what was saved is read without `security`
     store.delete()
     assert keystore.KeychainStore(service, account).load() is None
     assert store.load() is None
-    assert calls.count("find-generic-password") == 7
+    assert calls.count("find-generic-password") == 6
 
     def fails_twice(fake_run, reads: int) -> None:
         now[0] += keystore.KEYCHAIN_READ_TTL

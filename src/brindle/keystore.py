@@ -209,6 +209,11 @@ def uncached_reading() -> Iterator[None]:
         _uncached_reads.reset(token)
 
 
+def reading_uncached() -> bool:
+    """Whether this caller is inside :func:`uncached_reading` (holding a mutation lock)."""
+    return _uncached_reads.get()
+
+
 class CredentialError(Exception):
     """The store couldn't be used safely. Never contains a secret."""
 
@@ -241,7 +246,8 @@ class KeychainStore:
 
     Reads (including missing items) are shared by service and account for
     KEYCHAIN_READ_TTL seconds. Other processes' changes appear after expiry;
-    save/delete in this process invalidate immediately, even on failure.
+    save/delete in this process invalidate immediately, even on failure, and
+    a successful save is then kept as the next read's answer.
     Cached records are decoded afresh so callers can safely modify them.
     A read refused at a dialog, or never answered, stops later reads until the
     person acts (KEYCHAIN_DIALOG_EXITS): polling never repeats a dialog.
@@ -349,6 +355,10 @@ class KeychainStore:
             if r.returncode != 0 or "error" in (r.stderr or "").lower():
                 raise CredentialError(f"keychain write failed (security exit {r.returncode})")
             forget_refused()
+            # What was just written is what a read would find: keep it, so a refresh
+            # (one read under its lock, one write) needs no further read here.
+            self._read.blob = _encode(creds)
+            self._read.expires = time.monotonic() + KEYCHAIN_READ_TTL
 
     def delete(self) -> None:
         listing = _listing()
