@@ -186,6 +186,8 @@ def test_changes_while_an_invite_is_out_land_after_it_in_order(panel, backend, d
     assert person(app, pid, "bo") is None and share_invites.pending(db, pid) == []
 
 
+@pytest.mark.variant("the race the seq guard exists for: a newer change committed while the older send is out; "
+                     "deleting the row on that answer by sub alone would drop the change unsent")
 def test_a_change_made_while_the_invite_is_being_sent_goes_out_after_it(panel, backend, db, clock):
     pid, library, app = panel
     assert app.post(f"/v1/plans/{pid}/people", json={"sub": "bo", "access": "view"}).status_code == 202
