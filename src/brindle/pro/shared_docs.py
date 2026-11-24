@@ -565,21 +565,42 @@ def set_reviewer(db: DB, plan_id: str, sub: str, required: bool | None, *, clien
     p = plan_docs._plan(db, plan_id)
     _review_open(p)
     client, store = ad._session(client, store)
-    share_ = _shared(db, p["id"], store)
-    resource = "reviewers" if required is None else "permissions"
-    view = review_policies.ask(db, p, "DELETE" if required is None else "PUT",
-                               _path(share_["doc_id"], f"/{resource}/{quote(sub, safe='')}"),
-                               None if required is None else signer(required), client=client, store=store)
+    doc_id = _shared(db, p["id"], store)["doc_id"]
+
+    def call(method: str, tail: str, body: dict | None = None) -> dict:
+        return review_policies.ask(db, p, method, _path(doc_id, tail), body, client=client, store=store)
+
+    view = (call("DELETE", f"/reviewers/{quote(sub, safe='')}") if required is None
+            else ask_to_sign(call, sub, required))
     if _remember(db, p["id"], view):
         plan_docs._changed(db, p, p["rev"])
     return link(db, p["id"])
 
 
-def signer(required: bool) -> dict:
-    """``PUT /design/permissions/{sub}``'s body making someone a signer, leaving
-    their access as it is. The legacy ``{role: "reviewer", required}`` also
-    sets access, to comment: an editor asked to sign off would lose edit."""
-    return {"sign_off": "required" if required else "optional"}
+def ask_to_sign(call, sub: str, required: bool) -> dict:
+    """Make ``sub`` a signer of the design, leaving their access as it is; the
+    design view after. ``call(method, tail, body)`` asks under ``/design``.
+
+    ``PUT /permissions/{sub}`` with ``{sign_off}`` keeps the access and gives
+    a signer comment and suggest. A Library older than per-person access and
+    sign-off (pawdelta-web #328) refuses that field (422 invalid_request), and
+    its only way to give a signer comment is the legacy ``{role: "reviewer"}``,
+    which also takes edit away. There an editor, who can already comment, is
+    only added to the reviewer list, and anyone else gets the legacy grant,
+    which raises them to comment. Their grant is read just before: on such a
+    Library, edit given in between is lost, as with any client of its time."""
+    from urllib.parse import quote
+
+    person = quote(sub, safe="")
+    try:
+        return call("PUT", f"/permissions/{person}", {"sign_off": "required" if required else "optional"})
+    except ad.Refused as e:
+        if (e.status, e.code) != (422, "invalid_request"):
+            raise
+    grant = (call("GET", "").get("permissions") or {}).get(sub)
+    if isinstance(grant, dict) and grant.get("can_edit"):
+        return call("PUT", f"/reviewers/{person}", {"required": required})
+    return call("PUT", f"/permissions/{person}", {"role": "reviewer", "required": required})
 
 
 def set_reviewers(db: DB, plan_id: str, reviewers: Any, *, client=None, store=None) -> dict:

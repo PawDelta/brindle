@@ -49,14 +49,15 @@ class CompatLibrary(PeopleLibrary):
     """The per-person Library, which can drop off the network around a share
     (``cut``: before it commits, or after, losing only the answer), answer a
     share or unshare as another version does (``answers``), and fail a read of
-    the design once unsharing has begun while people still have it (``reads_fail``)."""
+    the design once unsharing has begun while people still have it (``reads_fail``).
+    ``older``: ``PUT /permissions/{sub}`` as a Library before #328 takes it."""
 
     def __init__(self, remote):
         super().__init__(remote)
         self.inbox: dict[str, list[dict]] = {}
         self.accounts: dict[str, str] = {}          # access token -> the account it signs in
         self.cut = self.answers = None
-        self.reads_fail = self.unsharing = False
+        self.reads_fail = self.unsharing = self.older = False
         remote.routes["GET /me/inbox"] = lambda f, h: (200, {"items": list(self.inbox.get(
             self.accounts.get(h.get("Authorization", "").removeprefix("Bearer ")), []))})
 
@@ -99,6 +100,17 @@ class CompatLibrary(PeopleLibrary):
 
     def role(self, sub, form):
         new, old = NEW_BODY & form.keys(), OLD_BODY & form.keys()
+        if self.older:        # pawdelta-web 85bd1cb9: PersonGrant is {role, required}, extra fields refused
+            if new:
+                return 422, {"error": "invalid_request", "fields": ["<unknown>"]}
+            role = form.get("role", "view")
+            self.permissions.pop(sub, None)
+            if role != "view":
+                self.permissions[sub] = {"can_edit": role == "edit", "can_suggest": role in ("edit", "reviewer"),
+                                         "can_comment": True}
+            self.reviewers = [r for r in self.reviewers if r["sub"] != sub] + (
+                [{"sub": sub, "required": form.get("required", True)}] if role == "reviewer" else [])
+            return 200, self.view()
         if (new and old) or any(form[k] is None for k in new):
             return 422, {"error": "invalid_request"}
         if not new:
@@ -223,20 +235,41 @@ def test_an_unshare_answered_without_the_design_view(compat, who):
     assert library.scopes == [{"kind": "user", "id": library.author}] and library.reviewers == []
 
 
-@pytest.mark.parametrize("target", [
-    pytest.param("plan", marks=pytest.mark.variant("the plan's reviewer route sent the legacy body")),
-    pytest.param("library", marks=pytest.mark.variant("the Library reader's reviewer route sent it too")),
+@pytest.mark.parametrize(("target", "older", "access"), [
+    pytest.param("plan", False, "edit", marks=pytest.mark.variant("the plan's route sent the legacy body: demoted")),
+    pytest.param("library", False, "edit", marks=pytest.mark.variant("the Library reader's route did too")),
+    pytest.param("plan", True, "edit", marks=pytest.mark.variant("an older Library refuses {sign_off}: plan route")),
+    pytest.param("library", True, "edit", marks=pytest.mark.variant("an older Library refuses it: reader route")),
+    pytest.param("plan", True, "comment", marks=pytest.mark.variant("an older Library's signer still gets comment")),
 ])
-def test_asking_an_editor_to_sign_off_keeps_them_an_editor(compat, target):
-    """The legacy ``{role: "reviewer"}`` body an older client sends makes the
-    person a commenter in the current Library: brindle must not send it."""
+def test_asking_someone_to_sign_off_keeps_their_access_on_either_library(compat, target, older, access):
+    """The legacy ``{role: "reviewer"}`` body makes the person a commenter, on
+    the current Library and on one before #328, which also refuses the new
+    ``{sign_off}`` (422): neither may cost an editor their edit."""
     pid, library, app, _ = compat
-    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": "edit"}).status_code == 200
+    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": access}).status_code == 200
+    library.older = older
     base = f"/v1/plans/{pid}" if target == "plan" else f"/v1/library/designs/{DOC}"
     asked = app.put(f"{base}/reviewers/ann", json={"required": True})
     assert asked.status_code == 200, asked.json()
-    assert person(app, pid, "ann") == {"sub": "ann", "name": None, "access": "edit", "sign_off": "required"}
-    assert as_(library, app, "ann")["can_edit"]
+    assert person(app, pid, "ann") == {"sub": "ann", "name": None, "access": access, "sign_off": "required"}
+    seen = as_(library, app, "ann")
+    assert seen["can_edit"] is (access == "edit") and seen["can_comment"] and seen["can_sign_off"]
+
+
+def test_an_older_client_still_gets_access_and_sign_off_from_the_current_library(compat, backend):
+    """brindle before this branch (shared_docs.set_reviewer at 851fb558): its
+    request, pinned here, against the current Library's per-person route, and
+    its reader (share_access.summary) of the answer."""
+    from brindle.pro import share_access
+
+    pid, library, app, net = compat
+    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": "view"}).status_code == 200
+    status, view = net["client"].call("PUT", f"{DESIGN}/permissions/ann", {"role": "reviewer", "required": True},
+                                      token=net["store"].load()["access_token"])
+    assert status == 200, view
+    ann, = share_access.summary({"scope": library.scopes[0], "scopes": library.scopes}, view)["people"]
+    assert ann == {"sub": "ann", "name": None, "access": "comment", "sign_off": "required"}
 
 
 ROW = {"id": "ann", "display_name": "Ann Lee", "email": "ann@example.test", "role": "member",

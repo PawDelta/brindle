@@ -177,9 +177,16 @@ def _titled(doc_id: str, view: dict, client, store) -> dict:
 
 
 def _ask(doc_id: str, method: str, tail: str, body: dict | None, client, store) -> dict:
+    return _asked(doc_id, lambda call: call(method, tail, body), client, store)
+
+
+def _asked(doc_id: str, work, client, store) -> dict:
+    """The design as ``work`` leaves it: ``work(call)`` makes its Library calls
+    with ``call(method, tail, body)``, under the design, and returns the view."""
     client, store = ad._session(client, store)
     me = ad.require_entitlement(store).sub
-    view = ad.api(method, sd._path(doc_id, tail), body, client=client, store=store)
+    view = work(lambda method, tail, body=None: ad.api(method, sd._path(doc_id, tail), body,
+                                                       client=client, store=store))
     return _dto(doc_id, _titled(doc_id, view, client, store), me,
                 names=sd.member_names(doc_id, client=client, store=store))
 
@@ -246,10 +253,9 @@ def people(doc_id: str, filters: dict, *, client=None, store=None) -> dict:
 
 def reviewer(doc_id: str, sub: str, required: bool | None, *, client=None, store=None) -> dict:
     """Change one person without replacing anyone else's invitation."""
-    resource = "reviewers" if required is None else "permissions"
-    return _ask(doc_id, "DELETE" if required is None else "PUT",
-                f"/{resource}/{quote(sub, safe='')}",
-                None if required is None else sd.signer(required), client, store)
+    if required is None:
+        return _ask(doc_id, "DELETE", f"/reviewers/{quote(sub, safe='')}", None, client, store)
+    return _asked(doc_id, lambda call: sd.ask_to_sign(call, sub, required), client, store)
 
 
 def timeline(doc_id: str, *, client=None, store=None) -> dict:
