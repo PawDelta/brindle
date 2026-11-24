@@ -1816,11 +1816,11 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
             raise ServiceError("invalid", f"kind must be one of {', '.join(config.ROUTING_KINDS)}, not {kind!r}")
         model, fallbacks, locked = spec.get("model"), spec.get("fallbacks"), spec.get("locked")
         if "keep_order" in spec:
-            if (spec["keep_order"] is not True or kind not in config.WEIGHTS
+            if (spec["keep_order"] is not True or scope != "user" or kind not in config.WEIGHTS
                     or any(value is not None for value in (model, fallbacks, locked))):
-                raise ServiceError("invalid", f"{kind}: keep_order requires a job size and no model, fallbacks or lock changes")
+                raise ServiceError("invalid", f"{kind}: keep_order requires a job size in user scope and no model, fallbacks or lock changes")
             lock_changes[kind] = True
-            if scope != "user" or not saved_picker_order(config.user_settings().get(f"routing_{kind}")):
+            if not saved_picker_order(config.user_settings().get(f"routing_{kind}")):
                 keep_orders[kind] = cfg.routing[kind]
         for key in config.KIND_OVERRIDE_FIELDS:
             if key not in spec:

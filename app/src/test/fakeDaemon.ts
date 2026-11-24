@@ -2401,9 +2401,9 @@ export class FakeDaemon {
       if (!ROUTING_KINDS.includes(k) || typeof spec !== "object" || spec === null) return error("invalid", `kind must be one of ${ROUTING_KINDS.join(", ")}, not '${k}'`, 400);
       const { model, fallbacks, locked, effort, instructions, keep_order } = spec as Record<string, unknown>;
       if (keep_order !== undefined) {
-        if (keep_order !== true || !(WEIGHTS as readonly string[]).includes(k) ||
+        if (keep_order !== true || scope !== "user" || !(WEIGHTS as readonly string[]).includes(k) ||
             model != null || fallbacks != null || locked != null) {
-          return error("invalid", `${k}: keep_order requires a job size and no model, fallbacks or lock changes`, 400);
+          return error("invalid", `${k}: keep_order requires a job size in user scope and no model, fallbacks or lock changes`, 400);
         }
         lockChanges.set(k, true);
         keepOrders[k] = current.tiers[k].values;

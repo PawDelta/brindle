@@ -984,12 +984,17 @@ def test_routing_reads_and_clears_saved_orders_by_scope(repo, db, monkeypatch):
     config.set_user("routing", {"medium": medium_order, "heavy": ["dev.gpt"]})
     config.set_user("routing_heavy", "claude-opus")
     config.set_repo(str(repo), "routing", {"medium": ["dev.gpt"]})
+    config.set_local(str(repo), "routing", {"light": ["private-profile"]})
     config.set_local(str(repo), "agent_models", {"qa": {
         "heavy": ["dev.gpt"], "light": config.DEFAULT_ROUTING["light"]}})
     monkeypatch.setattr(autopilot, "_route_by_weight", lambda db, cfg, repo, size, *_: (
         ("dev.gpt", True, "") if size == "advanced" else (None, False, "")))
 
     app = build_app(TOKEN)
+    code, reply = asyncio.run(_read_request(app, "/v1/routing", AUTH, method="PUT", payload={
+        "repo": str(repo), "scope": "repo", "kinds": {"light": {"keep_order": True}},
+    }))
+    assert code == 400, reply
     code, reply = asyncio.run(_read_request(app, "/v1/routing", AUTH, method="PUT", payload={
         "repo": str(repo), "scope": "user", "kinds": {
             "medium": {"keep_order": True}, "light": {"keep_order": True},
@@ -1010,6 +1015,7 @@ def test_routing_reads_and_clears_saved_orders_by_scope(repo, db, monkeypatch):
     assert light_order["scope"] == "user"
     assert light_order["locked"]
     assert light_order["order"] == orders["light"]["recommended"]
+    assert all(entry["scope"] != "repo" for entry in orders["light"]["saved"])
     assert orders["advanced"]["saved"] == []
     assert routing["kinds"]["advanced"]["learned"] == "dev.gpt"
 
