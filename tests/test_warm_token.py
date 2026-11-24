@@ -51,6 +51,7 @@ def refreshes(backend):
     return backend.paths().count("POST /token/refresh")
 
 
+@pytest.mark.variant("the 2026-11-24 incident end to end: a share route behind another brindle's held refresh lock")
 def test_a_people_search_near_expiry_never_waits_for_another_brindles_refresh(
         quick_requests, panel, parts, backend, monkeypatch):
     pid, _, app = panel
