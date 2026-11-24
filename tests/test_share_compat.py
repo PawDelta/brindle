@@ -84,7 +84,7 @@ def signers(plan):
 
 
 @pytest.mark.parametrize("invitee", [
-    "never_opened",
+    pytest.param("never_opened", marks=pytest.mark.variant("an invitee with no brindle run yet: the Library holds it")),
     pytest.param("online", marks=pytest.mark.variant("an Inbox already read must still take the new share")),
 ])
 def test_the_share_reaches_the_invitee_online_or_the_first_time_they_open_brindle(db, compat, monkeypatch, invitee):
@@ -107,7 +107,7 @@ def test_the_share_reaches_the_invitee_online_or_the_first_time_they_open_brindl
 
 
 @pytest.mark.parametrize("cut", [
-    "before",
+    pytest.param("before", marks=pytest.mark.variant("the sharer went offline after the upload, before the share")),
     pytest.param("after", marks=pytest.mark.variant("the share committed and only its answer was lost")),
 ])
 def test_a_share_cut_off_midway_is_never_half_done_and_try_again_lands_once(compat, backend, cut):
@@ -128,7 +128,7 @@ def test_a_share_cut_off_midway_is_never_half_done_and_try_again_lands_once(comp
 
 
 @pytest.mark.parametrize("answer", [
-    "older",
+    pytest.param("older", marks=pytest.mark.variant("a share answer without its design view: fails on base")),
     pytest.param("newer", marks=pytest.mark.variant("fields a newer Library adds to the share answer are ignored")),
 ])
 def test_a_share_answer_from_another_library_version_still_shows_the_sign_off(compat, answer):
@@ -146,13 +146,15 @@ ROW = {"id": "ann", "display_name": "Ann Lee", "email": "ann@example.test", "rol
 
 @pytest.mark.parametrize(("library_rows", "panel_rows"), [
     # An older Library: no role, teams or plan role; no display name.
-    ({"people": [{"id": "bo", "email": "bo@example.test"}]},
-     [{"id": "bo", "display_name": "bo@example.test", "email": "bo@example.test", "teams": [], "role": "",
-       "on_plan": False, "on_plan_role": None}]),
+    pytest.param({"people": [{"id": "bo", "email": "bo@example.test"}]},
+                 [{"id": "bo", "display_name": "bo@example.test", "email": "bo@example.test", "teams": [], "role": "",
+                   "on_plan": False, "on_plan_role": None}],
+                 marks=pytest.mark.variant("missing fields: a 400 on base, apart from the other rows' causes")),
     # A newer one: fields this brindle doesn't know, and a plan role it can't name.
-    ({"people": [{**ROW, "on_plan_role": "approver", "avatar": "a.png",
-                  "teams": [{"id": "t_1", "name": "Core", "color": "teal"}]}], "next_cursor": "c_2"},
-     [{**ROW, "on_plan_role": None}]),
+    pytest.param({"people": [{**ROW, "on_plan_role": "approver", "avatar": "a.png",
+                              "teams": [{"id": "t_1", "name": "Core", "color": "teal"}]}], "next_cursor": "c_2"},
+                 [{**ROW, "on_plan_role": None}],
+                 marks=pytest.mark.variant("an unknown plan role: a 400 on base, apart from the other rows' causes")),
     # A row nobody can be added by (no account id) beside one that can.
     ({"people": [{"display_name": "Invited by email", "email": "new@example.test"}, ROW]}, [ROW]),
 ])
