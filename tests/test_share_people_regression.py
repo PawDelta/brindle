@@ -9,12 +9,20 @@ people", and adding the owner failed with a timeout.
   (409 not_in_library), and Try again was refused while the claim stood.
 """
 
+import threading
+from types import SimpleNamespace
+
+import pytest
+
+from brindle import db as db_mod
 from brindle import spawn
 from brindle.pro import auth
+from brindle.pro import share_access as sa
+from brindle.pro import shared_docs as sd
 from pro_fixtures import backend, pro_env, signing_key  # noqa: F401
 from test_plans import session  # noqa: F401
 from test_share_panel_access import PeopleLibrary, panel  # noqa: F401
-from test_shared_plan_docs import BASE, DESIGN, parts, sent  # noqa: F401
+from test_shared_plan_docs import BASE, DESIGN, DOC, parts, sent  # noqa: F401
 
 OWNER = {"sub": "owner_1", "email": "owner@example.test", "role": "owner"}
 MEMBERS = [{"sub": "user_1", "email": "me@example.test", "role": "member"}, OWNER,
@@ -70,14 +78,67 @@ def test_a_timed_out_first_add_still_searches_and_try_again_lands_on_the_one_doc
                                                     "sign_off": "none"}]
 
 
+def test_a_second_invite_never_overlaps_a_create_still_out(db, parts, backend):
+    """The first invite's create has committed in the Library, its answer not back yet."""
+    pid, lib, net = parts
+    created, release, failed = threading.Event(), threading.Event(), []
+    commit = lib.create
+
+    def held(form, headers):
+        answer = commit(form, headers)
+        created.set()
+        release.wait()
+        return answer
+
+    backend.routes["POST /analysis-docs"] = held
+
+    def invite(who, on):
+        return sa.plan_write(on, pid, lambda call: sa.invite(call, who, "comment", False), first=True, **net)
+
+    def first():
+        own = db_mod.DB()
+        try:
+            invite("ann", own)
+        except Exception as e:  # noqa: BLE001 - checked below
+            failed.append(e)
+        finally:
+            own.conn.close()
+            created.set()
+
+    out = threading.Thread(target=first)
+    out.start()
+    try:
+        created.wait()
+        # In this process the create is still out: the second invite waits for its answer.
+        with pytest.raises(RuntimeError, match="already being shared"):
+            invite("bo", db)
+        # Another brindle, with no create of its own, finds the committed doc and links it; a sync moves it on.
+        getattr(sd, "_creating", set()).discard(pid)     # the first create is parked in release.wait()
+        invite("bo", db)
+        db.conn.execute("UPDATE plan_shares SET remote_rev=2 WHERE plan_id=?", (pid,))
+    finally:
+        release.set()
+        out.join()
+    assert not failed
+    share = sd.link(db, pid)
+    assert (share["doc_id"], share["remote_rev"]) == (DOC, 2)       # the late answer kept the link and the sync
+    assert len(sent(backend, "POST /analysis-docs")) == 1
+
+
 def test_the_refresh_lock_holder_never_waits_for_room(tmp_path, monkeypatch):
     """Background work on a busy machine holds the sign-in's refresh lock while its keychain read
     queues for room: every other brindle's request then waits on the lock until lock_timeout."""
+    class NoRoom(threading.Condition):
+        def wait(self, *a):
+            raise AssertionError("a read waited for room while holding the refresh lock")
+
+    started = []
     monkeypatch.setattr(auth, "lock_path", lambda: tmp_path / "refresh.lock")
     monkeypatch.setattr(spawn, "_gated", True)
     monkeypatch.setattr(spawn, "_running", 1)
     monkeypatch.setattr(spawn, "room", lambda: 0.0)          # the machine is busy: nothing that waits may start
-    limit = 0.2                                               # the read's own budget, waiting for room included
+    monkeypatch.setattr(spawn, "_cond", NoRoom())
+    monkeypatch.setattr(spawn, "_run_read", lambda argv, *a: started.append(spawn._background(argv)) or SimpleNamespace(returncode=0))
     with spawn.waits_for_room(), auth.refresh_lock():
-        done = spawn.read(["true"], timeout=limit)
-    assert not done.returncode
+        spawn.read(["security", "find-generic-password"])
+    assert started == [["security", "find-generic-password"]]   # at once, and at normal priority

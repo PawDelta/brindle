@@ -68,6 +68,7 @@ import difflib
 import json
 import logging
 import re
+import threading
 import time
 from typing import Any, Protocol
 from urllib.parse import urlencode
@@ -91,6 +92,10 @@ LAPSE_CHECK_AFTER = 120.0    # the background pass asks again once that word is 
 SCOPE_KINDS = ("group", "org")
 NOT_FOUND = "not_found"      # the Library's answer when the share's document is gone (plan_shares.access_refused)
 CLAIM_FOR = 60.0             # seconds a create or push in flight holds the plan; then it is presumed dead
+# The plans whose create is running in this process now: a share of one of them
+# waits for its answer, and never looks for the doc it is still making.
+_creating: set[str] = set()
+_creating_lock = threading.Lock()
 FIRST_REVISION = 1           # what the Library numbers a new document's head
 REVIEW = ("rev", "reviewers", "sign_offs", "pending_reviewers", "ready", "policy_reviewers", "pending_policies")
 STATUSES = ("open", "resolved", "accepted", "rejected")
@@ -443,9 +448,12 @@ def _find(owner: str, p: dict, client, store) -> str | None:
 
 
 def _linked(db: DB, plan_id: str, doc_id: str, remote_rev: int, local_rev: int) -> str:
+    """Link the plan to ``doc_id``, unless a share elsewhere already linked
+    it: a late answer then keeps the link, and the revisions synced since."""
     with db.tx() as c:
-        c.execute("UPDATE plan_shares SET doc_id=?, remote_rev=?, local_rev=?, claimed_at=NULL WHERE plan_id=?",
-                  (doc_id, remote_rev, local_rev, plan_id))
+        if not c.execute("UPDATE plan_shares SET doc_id=?, remote_rev=?, local_rev=?, claimed_at=NULL"
+                         " WHERE plan_id=? AND doc_id IS NULL", (doc_id, remote_rev, local_rev, plan_id)).rowcount:
+            return link(db, plan_id)["doc_id"]
         # Written before there was anyone to read it: linked to no Library thread, so it is never sent.
         c.execute("INSERT OR IGNORE INTO plan_share_threads (plan_id, remote_id, local_id, status)"
                   " SELECT plan_id, -id, id, status FROM plan_threads WHERE plan_id=?", (plan_id,))
@@ -495,9 +503,19 @@ def ensure_doc(db: DB, p: dict, team: str | None, folder: Any, *, client, store,
     ent = _require_team(store)
     cur = plan_docs.revision(db, p["id"])
     content = _content(cur)          # a plan the API would refuse takes no claim
-    row, resumed = _claim_new(db, p["id"], ent.sub, ent.org_id, time.time() if now is None else now)
-    _own(row, ent)
-    return row["doc_id"] or _create(db, p, ent.sub, cur, content, resumed, client, store)
+    with _creating_lock:
+        row, resumed = _claim_new(db, p["id"], ent.sub, ent.org_id, time.time() if now is None else now)
+        _own(row, ent)
+        if row["doc_id"]:
+            return row["doc_id"]
+        if p["id"] in _creating:
+            raise RuntimeError("this plan is already being shared")
+        _creating.add(p["id"])
+    try:
+        return _create(db, p, ent.sub, cur, content, resumed, client, store)
+    finally:
+        with _creating_lock:
+            _creating.discard(p["id"])
 
 
 def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permissions: dict | None = None,

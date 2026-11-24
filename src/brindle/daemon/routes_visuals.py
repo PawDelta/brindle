@@ -667,20 +667,24 @@ def plan_people(db: DB, request: Request) -> Any:
     from brindle import plan_docs
     from brindle.pro import share_links
 
-    repo, query = request.query_params.get("repo") or None, dict(request.query_params)
-    plan_docs._plan(db, request.path_params["id"])
+    plan_id, repo, query = request.path_params["id"], request.query_params.get("repo") or None, dict(request.query_params)
+    plan_docs._plan(db, plan_id)
     anyone = query.get("include_unshared") == "true" and not any(query.get(k) for k in ("team", "role", "on_plan"))
-    doc = share_links.plan_doc(db, request.path_params["id"])
-    if doc is None:
-        if anyone:
-            return _org_people(repo, query.get("q") or "")
-        _plan_doc(db, request.path_params["id"])        # raises: not in this account's Library
+
+    def search(reader) -> dict | None:
+        # Resolved once, after the repo's configuration and the entitlement are checked.
+        doc = share_links.plan_doc(db, plan_id)
+        if doc is None and not anyone:
+            raise ServiceError("not_in_library", "this plan isn't in your Library, so it has no link", 409)
+        return None if doc is None else reader.people(doc, query)
+
     try:
-        return _shared_design(repo, lambda r: r.people(doc, query))
+        got = _shared_design(repo, search)
     except ServiceError as e:
         if not (anyone and e.http_status == 403 and e.code == "forbidden"):
             raise
-        return _org_people(repo, query.get("q") or "")
+        got = None
+    return _org_people(repo, query.get("q") or "") if got is None else got
 
 
 def _org_people(repo: str | None, q: str) -> dict:
