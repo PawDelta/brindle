@@ -133,6 +133,8 @@ def test_overlapping_answers_send_each_acknowledged_change_once(panel, backend, 
     assert person(app, pid, "ann")["access"] == "view"
 
 
+@pytest.mark.variant("an earlier change landed and its row is gone: without carrying the grant to the newer "
+                     "change, Stop sharing drops that change and leaves the person's access in the Library")
 def test_stop_sharing_after_an_earlier_change_landed_is_sent_not_dropped(panel, backend, db):
     """A lands while B (newer, unconfirmed) is still out; Stop sharing then
     must revoke the grant A made, not just drop B."""
@@ -198,6 +200,7 @@ def test_an_invite_is_never_sent_as_another_account(panel, parts, backend, db, m
     assert queued(app, pid)["ann"]["state"] == "failed"
 
 
+@pytest.mark.variant("a stable mismatch: already signed in as someone else when the edit or Stop sharing is asked")
 def test_a_change_to_a_pending_person_is_only_the_asking_accounts(panel, db):
     pid, library, app = panel
     assert app.post(f"/v1/plans/{pid}/people", json=ANN).status_code == 202
