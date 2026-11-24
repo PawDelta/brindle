@@ -191,7 +191,8 @@ def rev(got):
 
 
 @pytest.mark.parametrize("newer_is", [
-    "unconfirmed",
+    pytest.param("unconfirmed", marks=pytest.mark.variant("the other panel's newer change is still unconfirmed: "
+                                                          "a stale Discard must leave it to be sent")),
     pytest.param("refused", marks=pytest.mark.variant("the other panel's newer change was sent and refused before "
                                                      "the stale Discard: its Try again must survive")),
 ])
