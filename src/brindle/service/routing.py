@@ -13,12 +13,51 @@ from dataclasses import dataclass, field
 from brindle import config, profiles
 from brindle.db import Workspace
 from brindle.pro import managed_models, team_policy
-from brindle.service.dto import RoutingLockDTO, RoutingModelOrderDTO, RoutingPolicyDTO
+from brindle.service.dto import (
+    RoutingLockDTO, RoutingModelOrderDTO, RoutingPolicyDTO, RoutingSavedOrderDTO, RoutingSizeOrdersDTO,
+)
 from brindle.service.errors import ServiceError
 
 
 def provider_name(provider: str | None) -> str | None:
     return team_policy.CLI_NAMES.get(provider, provider) if provider else None
+
+
+def saved_routing_orders(repo: str, *, user_only: bool) -> dict[str, RoutingSizeOrdersDTO]:
+    """Read each scope's saved orders, even when shadowed or temporarily unavailable."""
+    from brindle import worker_models
+
+    orders = {size: RoutingSizeOrdersDTO(recommended=names, saved=[])
+              for size, names in config.DEFAULT_ROUTING.items()}
+    for scope, path in config.scope_paths(repo).items():
+        if user_only and scope != "user":
+            continue
+        settings = config._read_json(path)
+        library = None if scope == "user" else repo
+
+        def add(pools, setting, agent=None):
+            if not isinstance(pools, dict):
+                return
+            normalized = {config.normalize_weight(size): names for size, names in pools.items()
+                          if isinstance(names, list)}
+            for size, names in normalized.items():
+                if size in orders:
+                    orders[size].saved.append(RoutingSavedOrderDTO(
+                        scope=scope, setting=setting, agent=agent,
+                        order=[profiles.current_name(n, library) for n in names if isinstance(n, str)]))
+
+        add(settings.get("routing"), "routing")
+        agents = settings.get("agent_models")
+        if isinstance(agents, dict):
+            for agent, pools in agents.items():
+                add(pools, "agent_models", agent)
+        if scope == "user":
+            for size in orders:
+                value = settings.get(f"routing_{size}")
+                if isinstance(value, str) and value:
+                    model = worker_models.find(value)
+                    add({size: [model.profile if model else value]}, "picker")
+    return orders
 
 
 def legacy_medium_override(cfg: config.RepoConfig, name: str, *, pinned: bool) -> list[str] | None:

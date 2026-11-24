@@ -27,7 +27,7 @@
    reads GET /v1/routing again: the rows at once, what learning runs after. */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { DaemonClient, KindPut, RulePackInfo, RoutingPut, WorksLike } from "../../api/client";
+import type { DaemonClient, KindPut, RulePackInfo, RoutingPut, RoutingScope, WorksLike } from "../../api/client";
 import type { RoutingDTO } from "../../api/schema";
 import { openExternal } from "../../api/open";
 import { plain } from "../../api/wording";
@@ -907,14 +907,14 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
     const mine = ++seq.current;
     // The rows first: what learning runs instead resolves the dispatch for
     // every candidate (seconds), so it fills in after, and only the newest load's.
-    return Promise.all([client.routing(repo, { scope: "user", learned: false }), client.profiles().catch(() => []), client.rulePacks(repo).catch(() => [])]).then(
+    return Promise.all([client.routing(repo, { scope: "user", learned: false, includeRepoOrders: true }), client.profiles().catch(() => []), client.rulePacks(repo).catch(() => [])]).then(
       ([r, ps, rs]) => {
         if (mine !== seq.current) return;
         setRouting((prev) => keepLearned(r, prev));
         setDescribe(Object.fromEntries(ps.map((p) => [p.name, p.description])));
         setRules(rs);
         setLoadError(null);
-        client.routing(repo, { scope: "user" }).then(
+        client.routing(repo, { scope: "user", includeRepoOrders: true }).then(
           (full) => mine === seq.current && setRouting(full),
           () => {}, // the rows stand without what learning runs instead
         );
@@ -948,6 +948,14 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   );
   const policy = routing?.policy;
   const frozen = !!policy?.applies && policy.editable === false;
+  const differences = [...SIZES].reverse().flatMap((size) => {
+    const orders = routing?.orders?.[size];
+    if (!orders) return [];
+    const { recommended, saved } = orders;
+    return saved
+      .filter(({ order }) => order.length !== recommended.length || order.some((name, i) => name !== recommended[i]))
+      .map((entry) => ({ size, ...entry }));
+  });
   const missing = providersOf(profiles).filter((p) => !connected.has(p) && p !== "native");
   const offered = (k: Kind) => offeredFor(k, profiles).map((p) => choiceOf(p, connected, describe));
   const pinnedOf = (a: AgentRow) => (a.pinned ? info(a.name) : null);
@@ -963,6 +971,29 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
       .finally(() => setBusy(false));
   };
   const put = (size: Size, change: KindPut) => save({ kinds: { [size]: change } });
+
+  const resetOrders = async () => {
+    if (!repo || frozen || busy) return;
+    const byScope = new Map<RoutingScope, NonNullable<RoutingPut["clear_orders"]>>();
+    for (const { scope, size, setting, agent } of differences) {
+      const orders = byScope.get(scope) ?? {};
+      (orders[size] ??= []).push({ setting, agent });
+      byScope.set(scope, orders);
+    }
+    const started = seq.current;
+    setBusy(true);
+    setSaveError(null);
+    const results = await Promise.allSettled(
+      Array.from(byScope, ([scope, clear_orders]) => client.putRouting({ repo, scope, clear_orders })),
+    );
+    if (started !== seq.current) return;
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed) setSaveError(message(failed.reason));
+    const reload = load();
+    const reloading = seq.current;
+    await reload;
+    if (reloading === seq.current) setBusy(false);
+  };
 
   /* An agent's own order for a size: the model picked, then the shared
      table's order behind it, less what the org refuses or no longer exists
@@ -1259,6 +1290,14 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
             </h2>
             <span className="text-sm text-ink-2">By job size, for every agent that follows it. When the first is at its limit, the next takes over.</span>
           </div>
+          {differences.length > 0 && (
+            <p className="pb-3 text-xs text-ink-3" data-testid="routing-differs">
+              Your routing differs from brindle's recommended order ({[...new Set(differences.map(({ size }) => KIND_INFO[size].name))].join(", ")}).{" "}
+              <button type="button" className={link} disabled={busy || frozen} onClick={() => void resetOrders()}>
+                Reset to recommended
+              </button>
+            </p>
+          )}
           <div className="grid grid-cols-[9.75rem_minmax(0,18.75rem)_minmax(0,1fr)_auto] gap-x-s3 pb-2" aria-hidden>
             <span className={label}>Job size</span>
             <span className={label}>Runs it</span>

@@ -6,7 +6,7 @@ import { openExternal } from "../../api/open";
 import { ONBOARDED_KEY } from "../../api/providers";
 import { DaemonClient } from "../../api/client";
 import { createAppStore } from "../../store/store";
-import { BASE_URL, FakeDaemon, TOKEN, flush, type DaemonData, type RoutingProfile } from "../../test/fakeDaemon";
+import { BASE_URL, DEFAULT_ROUTING, FakeDaemon, TOKEN, flush, type DaemonData, type RoutingProfile } from "../../test/fakeDaemon";
 import { REPO, root, worker } from "../../test/fixtures";
 import { AgentsScreen } from ".";
 
@@ -136,6 +136,26 @@ const option = (list: HTMLElement, id: string) => list.querySelector<HTMLButtonE
 const noPopups = () => expect(document.querySelector("select, dialog, [role=dialog], [role=menu], [role=listbox], [popover]")).toBeNull();
 
 describe("agents tab", () => {
+  it("resets only saved differences in their original scopes and keeps learned picks", async () => {
+    const { daemon } = setup({
+      routingConfig: {
+        user: { routing: { light: DEFAULT_ROUTING.light, heavy: ["developer-codex"] }, routing_locked: ["heavy"] },
+        repo: { agent_models: { qa: { heavy: ["developer-codex"] } } },
+        local: {},
+      },
+      learned: { advanced: "developer-codex" },
+    });
+    const notice = await screen.findByTestId("routing-differs");
+    expect(notice.textContent).toMatch(/\(Heavy\)/);
+    await within(row("advanced")).findByTestId("learned");
+    fireEvent.click(within(notice).getByRole("button", { name: "Reset to recommended" }));
+    await waitFor(() => expect(screen.queryByTestId("routing-differs")).toBeNull());
+    expect(daemon.data.routingConfig.user.routing).toEqual({ light: DEFAULT_ROUTING.light });
+    expect(daemon.data.routingConfig.user.routing_locked).toEqual(["heavy"]);
+    expect(daemon.data.routingConfig.repo.agent_models).toEqual({});
+    expect(within(row("advanced")).getByTestId("learned")).toBeTruthy();
+  });
+
   it("agents: lists the agents apart from the job sizes, then picks a size's model from the connected providers only, with cost and speed", async () => {
     const { daemon } = setup();
     await screen.findByTestId("kind-medium");

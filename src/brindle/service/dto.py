@@ -998,6 +998,18 @@ class RoutingPolicyDTO(_DTO):
     locked: list[RoutingLockDTO] = []
 
 
+class RoutingSavedOrderDTO(_DTO):
+    scope: Literal["user", "repo", "local"]
+    setting: Literal["routing", "picker", "agent_models"]
+    agent: str | None = None
+    order: list[str]
+
+
+class RoutingSizeOrdersDTO(_DTO):
+    recommended: list[str]
+    saved: list[RoutingSavedOrderDTO]
+
+
 class RoutingDTO(_DTO):
     tiers: dict[str, RoutingTierDTO]
     reviewer: RoutingSettingDTO
@@ -1006,6 +1018,7 @@ class RoutingDTO(_DTO):
     policy: RoutingPolicyDTO = RoutingPolicyDTO()
     kinds: dict[str, RoutingKindDTO] = {}
     agents: dict[str, RoutingAgentDTO] = {}
+    orders: dict[str, RoutingSizeOrdersDTO] = {}
 
 
 class AccountOrgDTO(_DTO):
