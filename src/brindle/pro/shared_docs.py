@@ -569,11 +569,17 @@ def set_reviewer(db: DB, plan_id: str, sub: str, required: bool | None, *, clien
     resource = "reviewers" if required is None else "permissions"
     view = review_policies.ask(db, p, "DELETE" if required is None else "PUT",
                                _path(share_["doc_id"], f"/{resource}/{quote(sub, safe='')}"),
-                               None if required is None else {"role": "reviewer", "required": required},
-                               client=client, store=store)
+                               None if required is None else signer(required), client=client, store=store)
     if _remember(db, p["id"], view):
         plan_docs._changed(db, p, p["rev"])
     return link(db, p["id"])
+
+
+def signer(required: bool) -> dict:
+    """``PUT /design/permissions/{sub}``'s body making someone a signer, leaving
+    their access as it is. The legacy ``{role: "reviewer", required}`` also
+    sets access, to comment: an editor asked to sign off would lose edit."""
+    return {"sign_off": "required" if required else "optional"}
 
 
 def set_reviewers(db: DB, plan_id: str, reviewers: Any, *, client=None, store=None) -> dict:

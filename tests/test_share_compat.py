@@ -3,15 +3,27 @@ Library can be in (after the plan-sharing fix of 2026-11-24):
 
 1. both people online;
 2. the person invited has never opened brindle: the share lands in the
-   Library and reaches them, through their Inbox, when they first do;
+   Library and reaches them, through their Inbox, when they first sign in;
 3. the sharer drops offline partway: nothing half-shared reads as reviewed,
    and Try again neither shares twice nor loses the sign-off;
-4. a Library of another version: rows and answers with fields this brindle
-   doesn't know, or without ones it expects.
+4. another version on the other side: a request body an older client sent,
+   and Library answers with fields this brindle doesn't know or without ones
+   it expects.
 
-The Library is a fake on the transport (no network): the per-person routes of
-test_share_panel_access, plus the per-person Inbox feed the real server fills
-when a share reaches someone (``notify_shared``).
+The Library is a fake on the transport (no network), modelled on the current
+server (pawdelta-web backend/pro_api/analysis_designs.py, docs/shared-designs-api.md):
+
+- ``share_to``: a person's share adds their user scope once; sharing again with
+  someone who has it changes only their grant, in the same transaction;
+- ``notify_shared``: everyone a share newly lets read the design gets a
+  ``shared_with_you`` row in their account's Inbox feed (``GET /me/inbox``),
+  written on the server whether or not any brindle of theirs is running. brindle
+  registers no device: the feed is the account's, read by whichever signed-in
+  brindle asks;
+- ``_set_person_grant``: ``PUT /design/permissions/{sub}`` takes ``{access?,
+  sign_off?}``, keeping what isn't sent, or a legacy ``{role, required}``, which
+  replaces both (a ``reviewer`` at comment); mixing the two shapes, or sending
+  either new field as null, is refused.
 """
 
 from dataclasses import replace
@@ -22,55 +34,86 @@ from starlette.testclient import TestClient
 from brindle import inbox_team
 from brindle.daemon.app import build_app
 from brindle.pro import analysis_docs as ad
-from brindle.pro import auth, review_queue
-from pro_fixtures import backend, pro_env, signing_key  # noqa: F401
+from brindle.pro import auth, credentials
+from pro_fixtures import backend, claims, pro_env, sign, signing_key  # noqa: F401
 from test_plans import AUTH, TOKEN, session  # noqa: F401
 from test_share_panel_access import PeopleLibrary, as_, person
-from test_shared_plan_docs import DESIGN, DOC, parts, sent  # noqa: F401
+from test_shared_plan_docs import DESIGN, DOC, TEAM_LOGIN, parts, sent  # noqa: F401
 
 ANN = {"kind": "user", "id": "ann"}
 ANN_SIGNS = {"sub": "ann", "access": "comment", "sign_off": True}
+OLD_BODY, NEW_BODY = {"role", "required"}, {"access", "sign_off"}
 
 
 class CompatLibrary(PeopleLibrary):
     """The per-person Library, which can drop off the network around a share
-    (``cut``: before it commits, or after, losing only the answer) and answer
-    a share the way another version does (``share_answer``)."""
+    (``cut``: before it commits, or after, losing only the answer), answer a
+    share or unshare as another version does (``answers``), and fail a read of
+    the design once unsharing has begun while people still have it (``reads_fail``)."""
 
     def __init__(self, remote):
         super().__init__(remote)
         self.inbox: dict[str, list[dict]] = {}
-        self.cut = self.share_answer = None
+        self.accounts: dict[str, str] = {}          # access token -> the account it signs in
+        self.cut = self.answers = None
+        self.reads_fail = self.unsharing = False
         remote.routes["GET /me/inbox"] = lambda f, h: (200, {"items": list(self.inbox.get(
-            h.get("Authorization", "").removeprefix("Bearer "), []))})
+            self.accounts.get(h.get("Authorization", "").removeprefix("Bearer ")), []))})
+
+    def people_with_it(self):
+        return {s["id"] for s in self.scopes if s["kind"] == "user"}
 
     def share(self, form, headers):
         if self.cut == "before":
             raise auth.TransportError("cannot reach brindle Pro backend: network is unreachable")
-        scope = form["scope"]
-        new = scope["kind"] == "user" and scope not in self.scopes
+        before = self.people_with_it()
         status, answer = super().share(form, headers)
-        if new and status == 200:          # as the server: the person's Inbox hears once, whether or not they're online
-            self.inbox.setdefault(scope["id"], []).append({
-                "kind": "shared_with_you", "item_key": f"shared:{DOC}:{scope['id']}", "doc_id": DOC,
-                "title": self.title, "sender": {"sub": self.author}})
+        if status == 200:
+            for sub in sorted(self.people_with_it() - before - {self.author}):
+                self.inbox.setdefault(sub, []).append({
+                    "kind": "shared_with_you", "item_key": f"shared:{DOC}:{sub}", "doc_id": DOC,
+                    "title": self.title, "sender": {"sub": self.author}})
         if self.cut == "after":
             raise auth.TransportError("cannot reach brindle Pro backend: timed out")
-        if self.share_answer == "older":
-            answer = {k: v for k, v in answer.items() if k != "design"}
-        elif self.share_answer == "newer":
-            answer = {**answer, "notified": [scope["id"]],
-                      "design": {**answer["design"], "access_levels": {"ann": "comment"}, "can_edit": True,
-                                 "access_request": None, "reviewers": [{**r, "added_by": self.author}
-                                                                       for r in answer["design"]["reviewers"]]}}
-        return status, answer
+        return status, self.version(answer)
+
+    def revoke(self, sub):
+        status, answer = super().revoke(sub)
+        self.unsharing = True
+        return status, self.version(answer)
+
+    def version(self, answer):
+        if self.answers == "older":
+            return {k: v for k, v in answer.items() if k != "design"}
+        if self.answers == "newer":
+            design = answer["design"]
+            return {**answer, "notified": [], "design": {
+                **design, "access_levels": {}, "can_edit": True, "access_request": None,
+                "reviewers": [{**r, "added_by": self.author} for r in design["reviewers"]]}}
+        return answer
+
+    def read(self):
+        if self.reads_fail and self.unsharing and self.people_with_it() - {self.author}:
+            return 503, {"error": "unavailable"}
+        return super().read()
+
+    def role(self, sub, form):
+        new, old = NEW_BODY & form.keys(), OLD_BODY & form.keys()
+        if (new and old) or any(form[k] is None for k in new):
+            return 422, {"error": "invalid_request"}
+        if not new:
+            role = form.get("role", "view")
+            form = {"access": "comment" if role == "reviewer" else role,
+                    "sign_off": ("required" if form.get("required", True) else "optional") if role == "reviewer"
+                    else "none"}
+        return super().role(sub, form)
 
 
 @pytest.fixture
 def compat(parts, backend, monkeypatch):
     pid, _, net = parts
     library = CompatLibrary(backend)
-    monkeypatch.setattr(ad, "_session", lambda *a: (net["client"], net["store"]))
+    monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (client or net["client"], store or net["store"]))
     entitlement = ad.require_entitlement(net["store"])
     monkeypatch.setattr(ad, "require_entitlement", lambda store: replace(entitlement, sub=library.actor))
     inbox_team.clear()
@@ -83,23 +126,37 @@ def signers(plan):
     return [r["sub"] for r in plan["gate"]["reviewers"] if r.get("sub")]
 
 
+def signs_in(tmp_path, backend, library, net, sub):
+    """``sub`` signs in to brindle on their own machine: their own credential store."""
+    store = credentials.FileStore(tmp_path / sub)
+    store.save({**net["store"].load(), "access_token": f"{sub}_access", "refresh_token": f"{sub}_refresh",
+                "entitlement": sign(backend.key, claims(sub=sub, features=list(TEAM_LOGIN)))})
+    library.accounts[f"{sub}_access"] = sub
+    return store
+
+
 @pytest.mark.parametrize("invitee", [
-    pytest.param("never_opened", marks=pytest.mark.variant("an invitee with no brindle run yet: the Library holds it")),
+    pytest.param("never_opened", marks=pytest.mark.variant("no brindle of ann's at share time: her first sign-in finds it")),
     pytest.param("online", marks=pytest.mark.variant("an Inbox already read must still take the new share")),
 ])
-def test_the_share_reaches_the_invitee_online_or_the_first_time_they_open_brindle(db, compat, monkeypatch, invitee):
+def test_the_share_reaches_the_invitee_online_or_the_first_time_they_sign_in(db, compat, backend, tmp_path, invitee):
     pid, library, app, net = compat
-    # Ann's brindle, signed in as ann: no device of hers is ever told; it asks the Library when it runs.
-    monkeypatch.setattr(review_queue, "account", lambda *a: (net["client"], "ann", "ann"))
+    ann = None
     if invitee == "online":
-        inbox_team.poll(db)
+        ann = signs_in(tmp_path, backend, library, net, "ann")
+        inbox_team.poll(db, client=net["client"], store=ann)
         assert inbox_team.items("ann") == [] and as_(library, app, "ann") is None
+    else:
+        assert not (tmp_path / "ann").exists()          # ann has never signed in to brindle anywhere
+
     added = app.post(f"/v1/plans/{pid}/people", json=ANN_SIGNS)
     assert added.status_code == 200, added.json()
     assert ANN in library.scopes and library.reviewers == [{"sub": "ann", "required": True}]   # it is in the Library
+    assert [i["doc_id"] for i in library.inbox["ann"]] == [DOC]                                # waiting on her account
     assert signers(added.json()) == ["ann"]
 
-    inbox_team.poll(db)                     # ann's brindle runs: now, or for the first time
+    ann = ann or signs_in(tmp_path, backend, library, net, "ann")
+    inbox_team.poll(db, client=net["client"], store=ann)          # her brindle's sync, signed in as her
     shared, = inbox_team.items("ann")
     assert (shared.kind, shared.doc, shared.from_person.sub) == ("shared_with_you", DOC, library.author)
     opened = as_(library, app, "ann")
@@ -117,6 +174,12 @@ def test_a_share_cut_off_midway_is_never_half_done_and_try_again_lands_once(comp
     assert first.status_code == 502, first.json()
     gate = app.get(f"/v1/plans/{pid}").json()["gate"]
     assert gate is not None and gate["state"] == "waiting"      # never reads as reviewed without the Library's word
+    seen = as_(library, app, "ann")
+    if cut == "before":           # nothing of it landed: no access, no sign-off
+        assert seen is None and library.reviewers == [] and "ann" not in library.permissions
+    else:                         # all of it landed, in one transaction
+        assert seen is not None and seen["can_comment"] and seen["can_sign_off"]
+        assert library.reviewers == [{"sub": "ann", "required": True}]
 
     library.cut = None
     again = app.post(f"/v1/plans/{pid}/people", json=ANN_SIGNS)
@@ -127,17 +190,53 @@ def test_a_share_cut_off_midway_is_never_half_done_and_try_again_lands_once(comp
     assert signers(again.json()) == ["ann"] and again.json()["gate"]["state"] == "waiting"
 
 
-@pytest.mark.parametrize("answer", [
+@pytest.mark.parametrize("answers", [
     pytest.param("older", marks=pytest.mark.variant("a share answer without its design view: fails on base")),
     pytest.param("newer", marks=pytest.mark.variant("fields a newer Library adds to the share answer are ignored")),
 ])
-def test_a_share_answer_from_another_library_version_still_shows_the_sign_off(compat, answer):
+def test_a_share_answer_from_another_library_version_still_shows_the_sign_off(compat, answers):
     pid, library, app, _ = compat
-    library.share_answer = answer
+    library.answers = answers
     added = app.post(f"/v1/plans/{pid}/people", json=ANN_SIGNS)
     assert added.status_code == 200, added.json()
     assert signers(added.json()) == ["ann"]          # the build waits for ann from the moment she is added
     assert added.json()["gate"]["state"] == "waiting"
+
+
+@pytest.mark.parametrize("who", [
+    pytest.param("one", marks=pytest.mark.variant("an unshare answer without its design view: fails on base")),
+    pytest.param("everyone", marks=pytest.mark.variant("a read failing mid-way must not stop Stop sharing")),
+])
+def test_an_unshare_answered_without_the_design_view(compat, who):
+    pid, library, app, _ = compat
+    for sub in ("ann", "bo"):
+        assert app.post(f"/v1/plans/{pid}/people", json={**ANN_SIGNS, "sub": sub}).status_code == 200
+    library.answers = "older"
+    if who == "one":
+        removed = app.delete(f"/v1/plans/{pid}/people/ann")
+        assert removed.status_code == 200, removed.json()
+        assert signers(removed.json()) == ["bo"]              # ann's sign-off left the gate with her
+        return
+    library.reads_fail = True             # the design can't be read while anyone still has it
+    stopped = app.delete(f"/v1/plans/{pid}/access")
+    assert stopped.status_code == 200, stopped.json()
+    assert library.scopes == [{"kind": "user", "id": library.author}] and library.reviewers == []
+
+
+@pytest.mark.parametrize("target", [
+    pytest.param("plan", marks=pytest.mark.variant("the plan's reviewer route sent the legacy body")),
+    pytest.param("library", marks=pytest.mark.variant("the Library reader's reviewer route sent it too")),
+])
+def test_asking_an_editor_to_sign_off_keeps_them_an_editor(compat, target):
+    """The legacy ``{role: "reviewer"}`` body an older client sends makes the
+    person a commenter in the current Library: brindle must not send it."""
+    pid, library, app, _ = compat
+    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": "edit"}).status_code == 200
+    base = f"/v1/plans/{pid}" if target == "plan" else f"/v1/library/designs/{DOC}"
+    asked = app.put(f"{base}/reviewers/ann", json={"required": True})
+    assert asked.status_code == 200, asked.json()
+    assert person(app, pid, "ann") == {"sub": "ann", "name": None, "access": "edit", "sign_off": "required"}
+    assert as_(library, app, "ann")["can_edit"]
 
 
 ROW = {"id": "ann", "display_name": "Ann Lee", "email": "ann@example.test", "role": "member",

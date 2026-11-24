@@ -249,7 +249,7 @@ def reviewer(doc_id: str, sub: str, required: bool | None, *, client=None, store
     resource = "reviewers" if required is None else "permissions"
     return _ask(doc_id, "DELETE" if required is None else "PUT",
                 f"/{resource}/{quote(sub, safe='')}",
-                None if required is None else {"role": "reviewer", "required": required}, client, store)
+                None if required is None else sd.signer(required), client, store)
 
 
 def timeline(doc_id: str, *, client=None, store=None) -> dict:

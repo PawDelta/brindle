@@ -41,8 +41,8 @@ class Library:
     def put(self, sub, form):
         if self.fail == sub:
             return 409, {"error": "conflict"}
-        self.reviewers[sub] = form["required"]
-        self.permissions[sub] = {"can_edit": False, "can_comment": True, "can_suggest": True}
+        self.reviewers[sub] = form["sign_off"] == "required"
+        self.permissions[sub] = {"can_edit": False, **self.permissions.get(sub, {}), "can_comment": True, "can_suggest": True}
         return 200, self.view()
 
     def remove(self, sub):

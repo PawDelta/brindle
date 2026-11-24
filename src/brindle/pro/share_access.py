@@ -119,9 +119,13 @@ def sign_off(call: Call, sub: Any, must: Any) -> dict:
     return call("PUT", _person(_sub(sub)), {"sign_off": _must(must)})
 
 
+def _unshare(call: Call, sub: Any) -> dict:
+    return call("DELETE", f"/share/user/{quote(_sub(sub), safe='')}")
+
+
 def revoke(call: Call, sub: Any) -> dict:
     """Stop sharing with one person: their share, grants and sign-off go together."""
-    return _design(call, call("DELETE", f"/share/user/{quote(_sub(sub), safe='')}"))
+    return _design(call, _unshare(call, sub))
 
 
 def revoke_scope(call: Call, kind: Any, scope_id: Any) -> dict:
@@ -143,7 +147,7 @@ def stop(call: Call) -> dict:
             raise
     now = read(call)
     for person in now["people"]:
-        revoke(call, person["sub"])
+        _unshare(call, person["sub"])        # no read between: the one at the end says where it all stands
     for scope in now["scopes"]:
         call("DELETE", f"/share/{scope['kind']}/{quote(scope['id'], safe='')}")
     return call("GET", "/design")
