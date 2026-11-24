@@ -273,8 +273,10 @@ class WarmToken:
             self._cond.wait(left)
 
     def _check_signin(self) -> None:
-        """Drop what was held for a sign-in a login, logout or org switch has since replaced."""
-        if (self._record is not None or self._token is not None or self._signed_out) \
+        """Drop what was held, or learned (a failure), for a sign-in a login, logout or
+        org switch has since replaced."""
+        learned = self._last_error is not None or self._reload_failed is not _NONE
+        if (self._record is not None or self._token is not None or self._signed_out or learned) \
                 and self._read_marker() != self._signin:
             self._clear()
 
@@ -318,7 +320,11 @@ class WarmToken:
                     self._clear(signed_out=seen is not None and self._read_marker() == seen)
                     self._signin = seen or ""
                 elif self._read_marker() == getattr(e, "warm_signin", self._signin):
-                    self._last_error = e                    # this sign-in's, never a replacement's
+                    # This sign-in's, never a replacement's: kept with the marker it was found
+                    # under, so a login since drops it even when nothing else is held.
+                    if self._record is None and self._token is None:
+                        self._signin = getattr(e, "warm_signin", self._signin)
+                    self._last_error = e
                     if entitlement:
                         self._reload_failed = (self._record or {}).get("entitlement")
                 self._land(flight)

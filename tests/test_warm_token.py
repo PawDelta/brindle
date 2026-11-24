@@ -325,16 +325,25 @@ def test_an_entitlement_due_with_the_token_gets_its_own_pass(parts, backend, mon
     assert holder._entitled(holder.view.load(), current=True)
 
 
-def test_a_new_sign_in_inherits_no_failed_reload(parts, backend, monkeypatch):
+@pytest.mark.parametrize("failed", [
+    "reload",               # a held sign-in's entitlement reload failed
+    pytest.param("load", marks=pytest.mark.variant("failed before any record was held: nothing else marks it")),
+])
+def test_a_new_sign_in_inherits_no_failed_reload(parts, backend, monkeypatch, failed):
     store = parts[2]["store"]
-    store.save({k: v for k, v in store.load().items() if k != "entitlement"})
-    monkeypatch.setattr(auth, "_signed_in_providers", lambda: [])
-    backend.routes["GET /entitlement"] = lambda f, h: (503, {"error": "unavailable"})
     holder = warm(monkeypatch, store, backend, Clock())
-    holder.renew()
-    holder.view.load()
+    if failed == "reload":
+        store.save({k: v for k, v in store.load().items() if k != "entitlement"})
+        monkeypatch.setattr(auth, "_signed_in_providers", lambda: [])
+        backend.routes["GET /entitlement"] = lambda f, h: (503, {"error": "unavailable"})
+        holder.renew()
+        holder.view.load()
+    else:                   # its stored backend isn't allowed: the first load fails
+        store.save({**store.load(), "base_url": "http://not-allowed.test/api/brindle/v1"})
+        holder.recover()
     settled(holder)
-    assert sd._no_entitlement_why(store) == plans.SIGN_IN      # the failed reload, as this sign-in's
+    assert sd._no_entitlement_why(store) == plans.SIGN_IN      # the failure, as this sign-in's
+    settled(holder)
     login_as(backend, store)                    # someone signs in afresh
     with auth.refresh_lock():
         auth._note_signin()
