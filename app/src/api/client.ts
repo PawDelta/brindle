@@ -902,15 +902,27 @@ export type PeopleQuery = { q?: string; team?: string; role?: string; on_plan?: 
 export type ShareAccessLevel = "view" | "comment" | "edit";
 /* Who has a plan (brindle/pro/share_access.py): the teams and org it is shared into, each person
    given it or asked to sign off (never its owner), and, before its first share, whether that share
-   uploads a plan kept on this Mac (null: can't be said). A person added here whose invite the daemon
-   is still sending has `state` sharing (`error`: why it hasn't landed yet); one the Library refused,
-   failed (`error`: its reason). Once it lands the Library's own row, with no state, is listed. */
+   uploads a plan kept on this Mac (null: can't be said). A person whose change the daemon is still
+   sending carries it (ShareQueued's op, state and error); once it lands the Library's own row, with
+   no state, is listed. */
 export interface ShareAccess {
   shared: boolean;
   kept_here: boolean | null;
   scopes: { kind: string; id: string }[];
-  people: { sub: string; name: string | null; access: ShareAccessLevel; sign_off: "required" | "optional" | null;
-    state?: "sharing" | "failed"; error?: string | null }[];
+  people: ({ sub: string; name: string | null; access: ShareAccessLevel; sign_off: "required" | "optional" | null }
+    & Partial<Pick<ShareQueued, "op" | "state" | "error">>)[];
+}
+/* A change to one person the daemon sends in the background (brindle/pro/share_invites.py), kept on
+   this Mac: an invite (op invite) or Stop sharing (op remove), still being sent (state sharing or
+   removing; `error`: why it hasn't landed yet) or refused (state failed; `error`: the reason). */
+export interface ShareQueued {
+  sub: string;
+  name: null;
+  access: ShareAccessLevel;
+  sign_off: "required" | null;
+  op: "invite" | "remove";
+  state: "sharing" | "removing" | "failed";
+  error: string | null;
 }
 
 export interface DesignWorkItems {
@@ -2455,9 +2467,20 @@ export class DaemonClient {
     return this.get<ShareAccess>(`/plans/${encodeURIComponent(id)}/access`);
   }
 
-  /* Answered at once (202) with the plan as it is; the daemon sends the invite in the background. */
+  /* Answered at once (202) with the plan as it is and the person's queued row; the daemon sends the
+     invite once that answer arrives. */
   invitePlanPerson(id: string, sub: string, access: ShareAccessLevel, signOff: boolean) {
-    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/people`, { sub, access, sign_off: signOff });
+    return this.post<Plan & { invite?: ShareQueued }>(`/plans/${encodeURIComponent(id)}/people`, { sub, access, sign_off: signOff });
+  }
+
+  /* The changes to people still on their way to the Library, read from this Mac alone. */
+  planInvites(id: string) {
+    return this.get<{ people: ShareQueued[] }>(`/plans/${encodeURIComponent(id)}/invites`);
+  }
+
+  /* Let a refused change to one person go: the Library keeps what it has. */
+  dismissPlanInvite(id: string, sub: string) {
+    return this.delete<Plan>(`/plans/${encodeURIComponent(id)}/invites/${encodeURIComponent(sub)}`, {});
   }
 
   /* One person's access; the Library keeps their sign-off as it is, in the same write. */

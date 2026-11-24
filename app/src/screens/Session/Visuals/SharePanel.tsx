@@ -5,7 +5,7 @@
    Every write changes one person or scope (brindle/pro/share_access.py), never the whole list. */
 
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
-import { DaemonError, type DocScope, type LibraryPerson, type PeopleQuery, type Plan, type PolicyPreviewRow, type ShareAccess, type ShareAccessLevel, type SharePerson } from "../../../api/client";
+import { DaemonError, type DocScope, type LibraryPerson, type PeopleQuery, type Plan, type PolicyPreviewRow, type ShareAccess, type ShareAccessLevel, type SharePerson, type ShareQueued } from "../../../api/client";
 import type { PlanGateRowDTO } from "../../../api/schema";
 import type { Writes } from "./PlanReader";
 import { initials } from "./PlanCards";
@@ -18,17 +18,24 @@ export interface SharePeopleTarget {
   /* People in the org, by the Library's search: only once the plan is shared. */
   search(query: PeopleQuery): Promise<{ people: SharePerson[] }>;
   access(): Promise<ShareAccess>;
-  /* Give one person the plan; for a plan nobody has yet, this is its first share. */
-  invite(sub: string, access: ShareAccessLevel, signOff: boolean): Promise<Plan>;
+  /* Give one person the plan; for a plan nobody has yet, this is its first share. The author's plan
+     answers at once with `invite`, the change the daemon now sends in the background (as may change,
+     signOff and revoke for a person whose invite is still out). */
+  invite(sub: string, access: ShareAccessLevel, signOff: boolean): Promise<Answer>;
   /* Their access only: the Library keeps their sign-off as it is, in the same write. */
-  change(sub: string, access: ShareAccessLevel): Promise<Plan>;
-  signOff(sub: string, must: boolean): Promise<Plan>;
-  revoke(sub: string): Promise<Plan>;
+  change(sub: string, access: ShareAccessLevel): Promise<Answer>;
+  signOff(sub: string, must: boolean): Promise<Answer>;
+  revoke(sub: string): Promise<Answer>;
   revokeScope(scope: Scope): Promise<Plan>;
   /* The author's plan only: share with a team or the org, and stop sharing with everyone. */
   shareScope?(scope: Scope): Promise<Plan>;
   stopAll?(): Promise<Plan>;
+  /* The author's plan only: the changes still being sent, from this Mac (shown while the Library
+     can't be reached), and letting a refused one go. */
+  invites?(): Promise<{ people: ShareQueued[] }>;
+  dismiss?(sub: string): Promise<Plan>;
 }
+type Answer = Plan & { invite?: ShareQueued };
 
 const LEVELS: { id: ShareAccessLevel; name: string; hint: string }[] = [
   { id: "view", name: "View", hint: "read it" },
@@ -49,9 +56,9 @@ const scopeKey = (s: Scope) => `${s.kind}:${s.id}`;
 const fromDirectory = (p: LibraryPerson): SharePerson => ({ id: p.sub, display_name: p.display_name || p.name || "", email: p.email, teams: [], role: "", on_plan: false });
 const list = (names: string[]) => names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 
-/* `sent`: an add the daemon is still sending (sharing) or the Library refused (failed), with why. */
+/* `sent`: a change (`op`: an invite, or Stop sharing) the daemon is still sending, or the Library refused (failed), with why. */
 type Person = { sub: string; name: string; access: ShareAccessLevel | null; signOff: "required" | "optional" | null;
-  sent?: "sharing" | "failed"; why?: string | null };
+  sent?: ShareQueued["state"]; op?: ShareQueued["op"]; why?: string | null };
 type Work = { key: string; label: string; run(): Promise<Plan> };
 /* A write out now, or one the Library refused, kept so Try again sends the same one. */
 type Busy = Record<string, { state: "saving" | "failed"; refused?: Work; why?: string }>;
@@ -88,6 +95,9 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const [adding, setAdding] = useState<{ sub: string; name: string; email: string; access: ShareAccessLevel; signOff: boolean } | null>(null);
   const [busy, setBusy] = useState<Busy>({});
   const [added, setAdded] = useState<Record<string, Person>>({});
+  /* The changes the daemon is still sending, by person: from its answer to each write, and read from this Mac. */
+  const [queued, setQueued] = useState<Record<string, ShareQueued>>({});
+  const invitesGeneration = useRef(0);
   const [stopping, setStopping] = useState(false);
   const [rules, setRules] = useState<{ plan: string; rev: number; rows: PolicyPreviewRow[] } | null>(null);
   const queue = useRef(Promise.resolve());
@@ -99,7 +109,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const searchGeneration = useRef(0);
   const latest = useRef({ target, writes, onBusy, onStopAll });
   latest.current = { target, writes, onBusy, onStopAll };
-  useEffect(() => { mounted.current = true; return () => { mounted.current = false; accessGeneration.current++; searchGeneration.current++; }; }, []);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; accessGeneration.current++; searchGeneration.current++; invitesGeneration.current++; }; }, []);
   useEffect(() => {
     if (!visible) return;
     const escape = (e: KeyboardEvent) => {
@@ -112,6 +122,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   // asked for before a later change is dropped, so it never paints over newer rows.
   useEffect(() => {
     const generation = ++accessGeneration.current;
+    const invitesAt = ++invitesGeneration.current;
     if (!visible || !target) return;
     setAccessBusy(null);
     target.access().then((got) => {
@@ -119,11 +130,16 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     }, (e: unknown) => {
       if (accessGeneration.current === generation && e instanceof DaemonError && e.code === "busy") setAccessBusy(e.message);
     });
+    // What is still being sent comes from this Mac: it shows while the Library can't be reached.
+    target.invites?.().then((got) => {
+      if (invitesGeneration.current === invitesAt) setQueued(Object.fromEntries(got.people.map((q) => [q.sub, q])));
+    }, () => {});
   }, [visible, target, reload, shared]);
-  // An add the daemon is still sending lands in the background: the plan changes when it does
+  // A change the daemon is still sending lands in the background: the plan changes when it does
   // (or is refused), so the list is read again then.
   const sending = useRef(false);
-  sending.current = !!access?.people.some((p) => p.state === "sharing");
+  sending.current = Object.values(queued).some((q) => q.state !== "failed")
+    || !!access?.people.some((p) => p.state === "sharing" || p.state === "removing");
   useEffect(() => {
     if (sending.current) setReload((n) => n + 1);
   }, [plan]);
@@ -160,12 +176,21 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const names = new Map([...directory.map(fromDirectory), ...found].map((p) => [p.id, personLabel(p)]));
   const nameFor = (sub: string, given?: string | null) => names.get(sub) || given || nameOf(sub);
   // The Library's list, with anyone the gate names it hasn't been read for yet.
-  const people: Person[] = [
-    ...(access?.people ?? []).map((p) => ({ sub: p.sub, name: nameFor(p.sub, p.name), access: p.access, signOff: p.sign_off, sent: p.state, why: p.error })),
+  let people: Person[] = [
+    ...(access?.people ?? []).map((p) => ({ sub: p.sub, name: nameFor(p.sub, p.name), access: p.access, signOff: p.sign_off, sent: p.state, op: p.op, why: p.error })),
     ...gateRows.filter((r) => !access?.people.some((p) => p.sub === r.sub))
       .map((r) => ({ sub: r.sub, name: nameFor(r.sub), access: null, signOff: r.required ? "required" as const : "optional" as const })),
   ];
   people.push(...Object.values(added).filter((a) => !people.some((p) => p.sub === a.sub)));
+  // Then what is still being sent: an invite at the access asked for; someone being removed leaves the
+  // list, unless the Library refused it (they still have it).
+  for (const q of Object.values(queued)) {
+    const had = people.find((p) => p.sub === q.sub);
+    if (q.op === "remove" && q.state !== "failed") { people = people.filter((p) => p.sub !== q.sub); continue; }
+    const row: Person = q.op === "remove" && had ? { ...had, sent: q.state, op: q.op, why: q.error }
+      : { sub: q.sub, name: had?.name ?? nameFor(q.sub), access: q.access, signOff: q.sign_off, sent: q.state, op: q.op, why: q.error };
+    people = had ? people.map((p) => p.sub === q.sub ? row : p) : [...people, row];
+  }
   const scopes = access?.scopes ?? [];
   const scopeName = (s: Scope) => teams.find((t) => t.kind === s.kind && t.id === s.id)?.name ?? (s.kind === "org" ? "Your organization" : "A team");
   const offered = teams.filter((t) => (t.kind === "group" || t.kind === "org") && t.can_share !== false && !scopes.some((s) => scopeKey(s) === scopeKey(t)));
@@ -207,8 +232,17 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
       }
     });
   };
-  const personWork = (sub: string, label: string, call: (t: SharePeopleTarget) => Promise<Plan>): Work =>
-    ({ key: `person:${sub}`, label, run: () => call(latest.current.target!) });
+  // A person's write answers with the change the daemon now sends for them, or none: shown at once,
+  // whatever a read already out says (it is dropped).
+  const personWork = (sub: string, label: string, call: (t: SharePeopleTarget) => Promise<Answer>): Work =>
+    ({ key: `person:${sub}`, label, run: async () => {
+      const got = await call(latest.current.target!);
+      if (mounted.current) {
+        invitesGeneration.current++;
+        setQueued((old) => { const next = { ...old }; if (got.invite) next[sub] = got.invite; else delete next[sub]; return next; });
+      }
+      return got;
+    } });
   const scopeWork = (s: Scope, label: string, call: (t: SharePeopleTarget) => Promise<Plan>): Work =>
     ({ key: `scope:${scopeKey(s)}`, label, run: () => call(latest.current.target!) });
 
@@ -228,8 +262,8 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   };
   // Once the Library lists them, its row is the one shown.
   useEffect(() => {
-    setAdded((old) => Object.fromEntries(Object.entries(old).filter(([sub]) => !access?.people.some((p) => p.sub === sub))));
-  }, [access]);
+    setAdded((old) => Object.fromEntries(Object.entries(old).filter(([sub]) => !access?.people.some((p) => p.sub === sub) && !queued[sub])));
+  }, [access, queued]);
 
   const signNote = (p: Person): { text: string; tone: "ok" | "wait" | "" } | null => {
     const r = reviewerOf(p.sub);
@@ -269,11 +303,16 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     const pending = (!!added[p.sub] && !access?.people.some((a) => a.sub === p.sub)) || !!p.sent;
     const why = busy[key]?.state === "failed" ? busy[key]?.why : p.sent === "failed" ? p.why ?? undefined : undefined;
     // The daemon's own answer for an add it sends in the background: a refusal keeps Try again and Cancel.
-    const sentStatus = () => p.sent === "sharing" ? <span className="st" title={p.why ?? undefined}><i className="spin" />Sharing…</span>
-      : p.sent === "failed" ? <><span className="st bad">Couldn't add</span>
+    // A refused removal is tried again as a removal, never as an add: they may only lose access here.
+    const sentStatus = () => p.sent === "sharing" || p.sent === "removing"
+      ? <span className="st" title={p.why ?? undefined}><i className="spin" />{p.sent === "sharing" ? "Sharing…" : "Removing…"}</span>
+      : p.sent !== "failed" ? null
+      : p.op === "remove" ? <><span className="st bad">Couldn't stop sharing</span>
+        <button className="sp-btn q" data-testid={`share-try-${key}`} onClick={() => run(personWork(p.sub, "Couldn't stop sharing", (t) => t.revoke(p.sub)))}>Try again</button>
+        {target?.dismiss && <button className="sp-btn q end" onClick={() => run(personWork(p.sub, "Couldn't save", (t) => t.dismiss!(p.sub)))}>Dismiss</button>}</>
+      : <><span className="st bad">Couldn't add</span>
         <button className="sp-btn q" data-testid={`share-try-${key}`} onClick={() => run(personWork(p.sub, "Couldn't add", (t) => t.invite(p.sub, level ?? "comment", p.signOff === "required")))}>Try again</button>
-        <button className="sp-btn q end" onClick={() => run(personWork(p.sub, "Couldn't stop sharing", (t) => t.revoke(p.sub)))}>Cancel</button></>
-      : null;
+        <button className="sp-btn q end" onClick={() => run(personWork(p.sub, "Couldn't stop sharing", (t) => t.revoke(p.sub)))}>Cancel</button></>;
     return <Fragment key={key}>
       <div className={`r who ${menu === key ? "act" : ""}`} data-testid={`share-person-${p.sub}`} data-state={state} data-access={level ?? ""} data-sign-off={p.signOff ?? (r ? (r.required ? "required" : "optional") : "none")}>
         <i className="av">{initials(p.name)}</i>

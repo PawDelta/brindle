@@ -1388,6 +1388,11 @@ CREATE TABLE IF NOT EXISTS plan_invites (
     due_at REAL NOT NULL,
     error TEXT,                          -- why the last attempt didn't land; it is still being tried
     failed TEXT,                         -- the Library refused it: shown with Try again, not sent until then
+    owner TEXT NOT NULL,                 -- the account that asked, checked again before anything is sent
+    org_id TEXT,
+    ready INTEGER NOT NULL DEFAULT 0,    -- 1 once the answer to the request that wrote it was delivered
+    boot TEXT,                           -- the daemon that wrote it, while not ready: an earlier one's is undone
+    undo TEXT,                           -- JSON: the row before that request ("new": none), while not ready
     created_at REAL NOT NULL,
     PRIMARY KEY (plan_id, sub)
 );
