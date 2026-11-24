@@ -6,7 +6,7 @@ from brindle import plans, visual_offers
 from test_plans import session  # noqa: F401 - fixture
 
 
-@pytest.mark.variant("Serializing a plan without a replica does only one draft lookup despite the miss")
+@pytest.mark.variant("call-count budget: the speed audit's one-draft-lookup fix stays fixed")
 def test_plan_dto_looks_up_the_draft_once_when_no_replica_exists(db, session):
     boss, _ = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")

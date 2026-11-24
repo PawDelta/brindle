@@ -12,7 +12,7 @@ from test_share_people_regression import MEMBERS
 from test_shared_plan_docs import parts, sent  # noqa: F401
 
 
-@pytest.mark.variant("A plain member's first share changes the plan access list while reusing the cached org directory")
+@pytest.mark.variant("call-count budget: one directory load across a plain member's first share")
 def test_plain_member_reuses_the_directory_across_the_first_share(panel, backend, monkeypatch):
     pid, _, app = panel
     backend.routes["GET /orgs/org_1/members"] = lambda f, h: (200, {"members": MEMBERS})
@@ -37,7 +37,7 @@ def test_plain_member_reuses_the_directory_across_the_first_share(panel, backend
     assert len(sent(backend, "GET /orgs/org_1/members")) == 1
 
 
-@pytest.mark.variant("A removed member stays in the cached directory only until it expires")
+@pytest.mark.variant("the directory cache must not go stale forever: a load after expiry")
 def test_the_directory_refreshes_after_its_cache_expires(panel, backend, monkeypatch):
     _, _, app = panel
     now = 100.0
