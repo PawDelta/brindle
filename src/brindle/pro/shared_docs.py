@@ -68,6 +68,7 @@ import difflib
 import json
 import logging
 import re
+import threading
 import time
 from typing import Any, Protocol
 from urllib.parse import urlencode
@@ -91,6 +92,10 @@ LAPSE_CHECK_AFTER = 120.0    # the background pass asks again once that word is 
 SCOPE_KINDS = ("group", "org")
 NOT_FOUND = "not_found"      # the Library's answer when the share's document is gone (plan_shares.access_refused)
 CLAIM_FOR = 60.0             # seconds a create or push in flight holds the plan; then it is presumed dead
+# The plans whose create is running in this process now: a share of one of them
+# waits for its answer, and never looks for the doc it is still making.
+_creating: set[str] = set()
+_creating_lock = threading.Lock()
 FIRST_REVISION = 1           # what the Library numbers a new document's head
 REVIEW = ("rev", "reviewers", "sign_offs", "pending_reviewers", "ready", "policy_reviewers", "pending_policies")
 STATUSES = ("open", "resolved", "accepted", "rejected")
@@ -416,20 +421,20 @@ def _grant(db: DB, p: dict, doc_id: str, reviewers: list[dict], permissions: dic
 # -- sharing -----------------------------------------------------------------------------
 
 
-def _claim_new(db: DB, plan_id: str, owner: str, org_id: str, now: float) -> tuple[dict, bool]:
-    """The plan's link, claimed if the Library has no document for it yet: a
-    second share while the first is creating it is refused, so one plan never
-    becomes two documents. A claim older than CLAIM_FOR is taken over, and
-    the second value says so: that create may have reached the Library."""
+def _claim_new(db: DB, plan_id: str, owner: str, org_id: str, now: float) -> tuple[dict, bool | None]:
+    """The plan's link, claimed if the Library has no document for it yet,
+    so one plan never becomes two documents. A claim older than CLAIM_FOR is
+    taken over, and the second value is True: that create may have reached
+    the Library. A newer claim is still someone's create, or one whose answer
+    never came (a timeout), which may yet commit: the second value is None,
+    and a share may only look for the document it made, never make one."""
     with db.tx() as c:
         resumed = c.execute("UPDATE plan_shares SET claimed_at=? WHERE plan_id=? AND doc_id IS NULL AND claimed_at<?",
                             (now, plan_id, now - CLAIM_FOR)).rowcount == 1
         won = c.execute("INSERT OR IGNORE INTO plan_shares (plan_id, owner, org_id, claimed_at) VALUES (?,?,?,?)",
                         (plan_id, owner, org_id, now)).rowcount == 1
     share = link(db, plan_id)
-    if share["doc_id"] is None and not (won or resumed):
-        raise RuntimeError("this plan is already being shared")
-    return share, resumed
+    return share, (resumed if share["doc_id"] is not None or won or resumed else None)
 
 
 def _find(owner: str, p: dict, client, store) -> str | None:
@@ -442,24 +447,40 @@ def _find(owner: str, p: dict, client, store) -> str | None:
     return min(hits, key=lambda d: d["created_at"])["doc_id"] if hits else None
 
 
-def _linked(db: DB, plan_id: str, doc_id: str, remote_rev: int, local_rev: int) -> str:
+def _linked(db: DB, claim: dict, doc_id: str, remote_rev: int, local_rev: int) -> str:
+    """Link the plan to ``doc_id`` under ``claim`` (the row its share claimed).
+    A share elsewhere that already linked this same doc keeps its link and the
+    revisions synced since. A claim that was given up, taken over, or replaced
+    meanwhile (another account's, or a link to another doc) stops the share
+    here, before anything is granted on it."""
+    plan_id = claim["plan_id"]
     with db.tx() as c:
-        c.execute("UPDATE plan_shares SET doc_id=?, remote_rev=?, local_rev=?, claimed_at=NULL WHERE plan_id=?",
-                  (doc_id, remote_rev, local_rev, plan_id))
-        # Written before there was anyone to read it: linked to no Library thread, so it is never sent.
-        c.execute("INSERT OR IGNORE INTO plan_share_threads (plan_id, remote_id, local_id, status)"
-                  " SELECT plan_id, -id, id, status FROM plan_threads WHERE plan_id=?", (plan_id,))
+        mine = c.execute("UPDATE plan_shares SET doc_id=?, remote_rev=?, local_rev=?, claimed_at=NULL"
+                         " WHERE plan_id=? AND doc_id IS NULL AND owner=? AND claimed_at IS ?",
+                         (doc_id, remote_rev, local_rev, plan_id, claim["owner"], claim["claimed_at"])).rowcount
+        if mine:
+            # Written before there was anyone to read it: linked to no Library thread, so it is never sent.
+            c.execute("INSERT OR IGNORE INTO plan_share_threads (plan_id, remote_id, local_id, status)"
+                      " SELECT plan_id, -id, id, status FROM plan_threads WHERE plan_id=?", (plan_id,))
+    if not mine:
+        now = link(db, plan_id)
+        if now is None or now["owner"] != claim["owner"] or now["doc_id"] != doc_id:
+            raise RuntimeError("this plan's share changed while it was being saved: share it again")
     return doc_id
 
 
-def _create(db: DB, p: dict, owner: str, cur: dict, content: dict, resumed: bool, client, store) -> str:
+def _create(db: DB, p: dict, claim: dict, cur: dict, content: dict, resumed: bool | None, client, store) -> str:
     """The plan's document in ``owner``'s Library: the one an interrupted
     create already made (at the revision it sent, the Library's first), else
     a new one. Only a refusal gives the claim up. When the outcome is unknown
-    (no answer, or a server error) the row stays, for a later share to look."""
-    found = _find(owner, p, client, store) if resumed else None
+    (no answer, or a server error) the row stays, for a later share to look.
+    ``resumed`` None: another create holds the claim, so look and never make one."""
+    owner = claim["owner"]
+    found = _find(owner, p, client, store) if resumed is not False else None
     if found is not None:
-        return _linked(db, p["id"], found, FIRST_REVISION, link(db, p["id"])["local_rev"])
+        return _linked(db, claim, found, FIRST_REVISION, claim["local_rev"])
+    if resumed is None:
+        raise RuntimeError("this plan is already being shared: its upload hasn't reached your Library yet")
     sent = _payload(content, client)
     # The plan's own title: without it the Library names the doc by the text's first # heading, which a
     # plan's text (its lede and ## sections) seldom has, else by the plan's id.
@@ -476,7 +497,7 @@ def _create(db: DB, p: dict, owner: str, cur: dict, content: dict, resumed: bool
         if status == 200:
             _no_decision_section.add(_server_key(client))
     if status == 200:
-        return _linked(db, p["id"], made["id"], made["version"], cur["rev"])
+        return _linked(db, claim, made["id"], made["version"], cur["rev"])
     if status < 500:
         with db.tx() as c:
             c.execute("DELETE FROM plan_shares WHERE plan_id=? AND doc_id IS NULL", (p["id"],))
@@ -492,9 +513,20 @@ def ensure_doc(db: DB, p: dict, team: str | None, folder: Any, *, client, store,
     ent = _require_team(store)
     cur = plan_docs.revision(db, p["id"])
     content = _content(cur)          # a plan the API would refuse takes no claim
-    row, resumed = _claim_new(db, p["id"], ent.sub, ent.org_id, time.time() if now is None else now)
-    _own(row, ent)
-    return row["doc_id"] or _create(db, p, ent.sub, cur, content, resumed, client, store)
+    with _creating_lock:
+        # First: a share refused because this process's create is still out must not touch its claim.
+        if p["id"] in _creating:
+            raise RuntimeError("this plan is already being shared")
+        row, resumed = _claim_new(db, p["id"], ent.sub, ent.org_id, time.time() if now is None else now)
+        _own(row, ent)
+        if row["doc_id"]:
+            return row["doc_id"]
+        _creating.add(p["id"])
+    try:
+        return _create(db, p, row, cur, content, resumed, client, store)
+    finally:
+        with _creating_lock:
+            _creating.discard(p["id"])
 
 
 def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permissions: dict | None = None,

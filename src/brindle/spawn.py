@@ -221,6 +221,19 @@ def waits_for_room() -> Iterator[None]:
         _waits.reset(token)
 
 
+@contextlib.contextmanager
+def starts_at_once() -> Iterator[None]:
+    """Processes started inside start at once at normal priority, even within
+    :func:`waits_for_room`: for work that holds something every other brindle
+    waits on (the sign-in's refresh lock), where waiting for room would hold
+    them all up with it."""
+    token = _waits.set(False)
+    try:
+        yield
+    finally:
+        _waits.reset(token)
+
+
 def begin_write() -> None:
     """The request is about to change something itself (a file written from
     Python, say), not through :func:`action`: raise Busy if its deadline has
