@@ -490,7 +490,10 @@ function SizeRow({ size, state, choiceOf: info, choices, missing, panel, adding,
           {learned && (
             <span className="pl-[22px] text-xs text-ink-3" data-testid="learned">
               brindle learned it does better here ·{" "}
-              <button type="button" className={link} disabled={busy} onClick={() => put({ locked: true })}>
+              <button type="button" className={link} disabled={busy} onClick={() => put({
+                locked: true,
+                ...(own.length ? { model: own[0], fallbacks: own.slice(1) } : {}),
+              })}>
                 use mine instead
               </button>
             </span>
@@ -948,14 +951,17 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   );
   const policy = routing?.policy;
   const frozen = !!policy?.applies && policy.editable === false;
-  const differences = SIZES.flatMap((size) => {
+  const savedOrders = SIZES.flatMap((size) => {
     const orders = routing?.orders?.[size];
     if (!orders) return [];
     const { recommended, saved } = orders;
-    return saved
-      .filter(({ order }) => order.length !== recommended.length || order.some((name, i) => name !== recommended[i]))
-      .map((entry) => ({ size, ...entry }));
+    return saved.map((entry) => ({
+      size,
+      ...entry,
+      differs: entry.order.length !== recommended.length || entry.order.some((name, i) => name !== recommended[i]),
+    }));
   });
+  const differences = savedOrders.filter((entry) => entry.differs);
   const missing = providersOf(profiles).filter((p) => !connected.has(p) && p !== "native");
   const offered = (k: Kind) => offeredFor(k, profiles).map((p) => choiceOf(p, connected, describe));
   const pinnedOf = (a: AgentRow) => (a.pinned ? info(a.name) : null);
@@ -1290,11 +1296,11 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
             </h2>
             <span className="text-sm text-ink-2">By job size, for every agent that follows it. When the first is at its limit, the next takes over.</span>
           </div>
-          {differences.length > 0 && (
+          {savedOrders.some((entry) => entry.locked || entry.differs) && (
             <p className="pb-3 text-xs text-ink-3" data-testid="routing-differs">
               {SIZES.map((size) => (
                 <Fragment key={size}>
-                  {differences.some((entry) => entry.size === size && entry.locked) && (
+                  {savedOrders.some((entry) => entry.size === size && entry.locked) && (
                     <span data-size={size} data-routing-notice="own-order">
                       {KIND_INFO[size].name}: your own order (you chose it over the learned pick).{" "}
                     </span>
@@ -1306,9 +1312,11 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
                   )}
                 </Fragment>
               ))}
-              <button type="button" className={link} disabled={busy || frozen} onClick={() => void resetOrders()}>
-                Reset to recommended
-              </button>
+              {differences.length > 0 && (
+                <button type="button" className={link} disabled={busy || frozen} onClick={() => void resetOrders()}>
+                  Reset to recommended
+                </button>
+              )}
             </p>
           )}
           <div className="grid grid-cols-[9.75rem_minmax(0,18.75rem)_minmax(0,1fr)_auto] gap-x-s3 pb-2" aria-hidden>

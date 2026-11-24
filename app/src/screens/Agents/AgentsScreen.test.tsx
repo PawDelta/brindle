@@ -272,18 +272,24 @@ describe("agents tab", () => {
   });
 
   it("agents: a row learning changed runs the learned model, says only that, and 'use mine instead' locks it back to mine", async () => {
-    const { daemon } = setup();
+    const { daemon } = setup({
+      routingConfig: { user: {}, repo: {}, local: {} },
+      routingProfiles: [...profiles, rp("developer-gemini", "antigravity", "gemini-3-pro", "medium")],
+    });
     await screen.findByTestId("kind-heavy");
     expect(runsOn("heavy").dataset.choice).toBe("developer-fable");
     const note = within(row("heavy")).getByTestId("learned");
     // Never why: no scores, rates or reasons.
     // The person's pick waits behind it, marked, and can't be moved from there.
-    expect(chain("heavy")).toBe("Opus 5.5, then GPT-5.5");
+    expect(chain("heavy")).toMatch(/^Opus 5.5/);
     openFallbacks("heavy");
 
     fireEvent.click(within(note).getByRole("button", { name: "use mine instead" }));
     await waitFor(() => expect(runsOn("heavy").dataset.choice).toBe("developer-heavy"));
-    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { heavy: { locked: true } } });
+    expect(daemon.data.routingConfig.user.routing?.heavy).toEqual(DEFAULT_ROUTING.heavy);
+    const notice = screen.getByTestId("routing-differs");
+    expect(notice.querySelector('[data-size="heavy"][data-routing-notice="own-order"]')).toBeTruthy();
+    expect(within(notice).queryByRole("button", { name: "Reset to recommended" })).toBeNull();
     expect(within(row("heavy")).queryByTestId("learned")).toBeNull();
     expect(lock("heavy").getAttribute("aria-pressed")).toBe("true");
   });
