@@ -113,9 +113,12 @@ class _Progress(io.TextIOBase):
 
 
 def _call(fn: Action, params: dict[str, str], body: Body) -> Any:
+    from brindle.pro import credentials
+
     db = DB()
     try:
-        return fn(db, params, body)
+        with credentials.reading():
+            return fn(db, params, body)
     finally:
         db.conn.close()
 

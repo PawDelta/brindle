@@ -10,7 +10,10 @@ Secrets are never logged.
 from __future__ import annotations
 
 import subprocess  # noqa: F401 - tests patch credentials.subprocess.run (the same module keystore uses)
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
+from threading import Lock
 
 from brindle import keystore
 from brindle.keystore import ACCOUNT, MAX_BLOB, CredentialError, _decode, _encode  # noqa: F401
@@ -55,3 +58,53 @@ def default_store(account: str = ACCOUNT):
     if backend == "secret-service":
         return SecretServiceStore(account=account)
     return FileStore(account=account)
+
+
+class _RequestCredentials:
+    def __init__(self):
+        self.lock = Lock()
+        self.default = None
+        self.records = {}
+
+
+_request: ContextVar[_RequestCredentials | None] = ContextVar("request_credentials", default=None)
+
+
+@contextmanager
+def reading():
+    """Share the Library sign-in across layers and worker threads of one request."""
+    token = _request.set(_RequestCredentials())
+    try:
+        yield
+    finally:
+        _request.reset(token)
+
+
+def request_store():
+    request = _request.get()
+    if request is None:
+        return None
+    with request.lock:
+        if request.default is None:
+            request.default = default_store()
+        return request.default
+
+
+def request_load(store):
+    """Read the request's record. Refresh and mutations use the live store directly."""
+    request = _request.get()
+    if request is None or keystore.reading_uncached():
+        return store.load()
+    with request.lock:
+        # Preserve identity even for a store with custom equality or no hash.
+        key = id(store)
+        if key not in request.records:
+            request.records[key] = store, store.load()
+        return request.records[key][1]
+
+
+def forget_request_records() -> None:
+    request = _request.get()
+    if request is not None:
+        with request.lock:
+            request.records.clear()

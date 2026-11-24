@@ -509,10 +509,14 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   }, []);
   const gate = plan.gate ?? null;
   const shared = !!gate;
+  const sharePeople = (!teammate || plan.can_edit) && plan.state !== "approved" ? source.people : undefined;
+  const wasShared = useRef(shared);
   // Opening a doc in review brings back what teammates wrote; what changed arrives as an event.
   // Failing says nothing new: the gate shows what was last heard, and an approval asks again.
   useEffect(() => {
-    if (shared && plan.state !== "approved") sharing?.syncPlan(plan.id).catch(() => {});
+    const syncingInPanel = !wasShared.current && sharingOpen && !historical && sharePeople?.syncAccess;
+    wasShared.current = shared;
+    if (shared && plan.state !== "approved" && !syncingInPanel) sharing?.syncPlan(plan.id).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per doc, when it is known to be shared
   }, [plan.id, shared]);
   const nameOf = (who: string) => {
@@ -1001,7 +1005,6 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     <SignOffSheet version={frozen ? `version ${frozen.id}` : `rev ${plan.rev}`} rows={sheetRows} since={sinceRevs && lastRead !== null ? { from: lastRead, changes: sinceRevs } : null} onShowChanges={() => setTab("history")} />
   ) : undefined;
 
-  const sharePeople = (!teammate || plan.can_edit) && plan.state !== "approved" ? source.people : undefined;
   // The first share happens in the panel too: adding a person or a team shares the plan.
   const canShare = !!gate || (!!sharing && !!sharePeople && plan.state !== "approved" && scopes.some((s) => s.kind !== "user" && s.can_share !== false));
   const previewRules = useMemo(() => sharing?.previewPlanPolicies && (() => sharing.previewPlanPolicies!(plan.id).then((r) => r.policies)),
