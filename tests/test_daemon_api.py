@@ -1038,6 +1038,7 @@ def test_routing_reads_and_clears_saved_orders_by_scope(repo, db, monkeypatch):
 @pytest.mark.parametrize("remove", [
     False, pytest.param(True, marks=pytest.mark.variant("a stale reset must not recreate removed keys or files")),
 ])
+@pytest.mark.variant("each row is a scope where Reset must keep an order changed after the page was read")
 def test_reset_routing_preserves_orders_changed_since_get(repo, db, remove):
     from brindle import config
 
