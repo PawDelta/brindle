@@ -1,9 +1,12 @@
 """Call counts for the plan sharing paths."""
 
+import pytest
+
 from brindle import plans, visual_offers
 from test_plans import session  # noqa: F401 - fixture
 
 
+@pytest.mark.variant("call-count budget: the speed audit's one-draft-lookup fix stays fixed")
 def test_plan_dto_looks_up_the_draft_once_when_no_replica_exists(db, session):
     boss, _ = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
