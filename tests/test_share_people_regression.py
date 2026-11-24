@@ -10,17 +10,23 @@ people", and adding the owner failed with a timeout.
 """
 
 import threading
+from subprocess import TimeoutExpired
 from types import SimpleNamespace
+from urllib.parse import urlencode
 
 import pytest
+from starlette.testclient import TestClient
 
+from brindle import airgap, keystore
 from brindle import db as db_mod
 from brindle import spawn
-from brindle.pro import auth
+from brindle.daemon.app import build_app
+from brindle.pro import analysis_docs as ad
+from brindle.pro import auth, credentials, license
 from brindle.pro import share_access as sa
 from brindle.pro import shared_docs as sd
 from pro_fixtures import backend, pro_env, signing_key  # noqa: F401
-from test_plans import session  # noqa: F401
+from test_plans import AUTH, TOKEN, session  # noqa: F401
 from test_share_panel_access import PeopleLibrary, panel  # noqa: F401
 from test_shared_plan_docs import BASE, DESIGN, DOC, parts, sent  # noqa: F401
 
@@ -158,23 +164,70 @@ def test_a_late_create_answer_grants_nothing_once_its_claim_is_gone(db, parts, b
     assert [f["scope"]["id"] for f in sent(backend, f"POST {BASE}/share")] == ["bo"]     # never ann
 
 
-def test_an_air_gapped_search_reads_no_credential(parts, monkeypatch):
+def test_an_air_gapped_search_reads_no_credential(parts, tmp_path, monkeypatch):
     """An unlinked plan's search in an air-gapped repo: refused before the sign-in is read."""
-    from starlette.testclient import TestClient
-
-    from brindle import airgap
-    from brindle.daemon.app import build_app
-    from brindle.pro import analysis_docs as ad
-    from test_plans import AUTH, TOKEN
-
     def opened(*a):
         raise AssertionError("the credential store was opened")
 
-    monkeypatch.setattr(airgap, "enabled", lambda: True)
+    monkeypatch.delenv(airgap.ENV, raising=False)
+    monkeypatch.setattr(airgap, "_armed", False)
+    monkeypatch.setattr(airgap, "_warned", False)
     monkeypatch.setattr(ad, "_session", opened)
+    config = tmp_path / ".brindle" / "config.json"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text('{"airgap": true}')
     with TestClient(build_app(TOKEN), headers=AUTH) as app:
-        got = app.get(f"/v1/plans/{parts[0]}/people?{SEARCH}")
+        assert not airgap.enabled()
+        got = app.get(f"/v1/plans/{parts[0]}/people?{SEARCH}&{urlencode({'repo': str(tmp_path)})}")
     assert got.status_code == 402, got.json()
+
+
+@pytest.mark.parametrize("method", ["GET", "POST"])
+@pytest.mark.variant("The people search and invite have separate daemon error handlers")
+def test_a_blocked_refresh_is_busy_in_the_share_routes(panel, parts, monkeypatch, method):
+    pid, _, app = panel
+    path = f"/v1/plans/{pid}/people"
+    invite = {"sub": "ann", "access": "comment"}
+    assert app.post(path, json=invite).status_code == 200
+    store = parts[2]["store"]
+    store.save({**store.load(), "access_expires_at": 0})
+
+    def blocked():
+        raise auth.AuthError("refresh lock held", code="lock_timeout")
+
+    monkeypatch.setattr(auth, "refresh_lock", blocked)
+    got = app.get(f"{path}?{SEARCH}") if method == "GET" else app.post(path, json=invite)
+    assert (got.status_code, got.json()["error"]["code"]) == (503, "busy")
+
+
+def test_an_unlinked_search_reports_busy_when_the_keychain_read_times_out(parts, monkeypatch):
+    pid, _, net = parts
+    store = keystore.KeychainStore("test-share-people")
+
+    def unanswered(*args):
+        raise TimeoutExpired("security", keystore.STORE_LIMIT)
+
+    monkeypatch.setattr(store, "_run", unanswered)
+    monkeypatch.setattr(ad, "_session", lambda *a: (net["client"], net["store"]))
+    monkeypatch.setattr(credentials, "default_store", lambda: store)
+    license.clear_cache()
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        got = app.get(f"/v1/plans/{pid}/people?{SEARCH}")
+    assert (got.status_code, got.json()["error"]["code"]) == (503, "busy")
+
+
+def test_refresh_lock_stops_at_the_request_deadline(tmp_path, monkeypatch):
+    monkeypatch.setattr(auth, "lock_path", lambda: tmp_path / "refresh.lock")
+    with spawn.deadline(auth.LOCK_TIMEOUT / 2) as request:
+        def held(*args):
+            assert request.left() > 0, "attempted to take the refresh lock past the request deadline"
+            request.at = spawn.time.monotonic()
+            raise BlockingIOError
+
+        monkeypatch.setattr(auth.fcntl, "flock", held)
+        with pytest.raises(auth.AuthError) as error, auth.refresh_lock():
+            pytest.fail("acquired the held refresh lock")
+    assert error.value.code == "lock_timeout"
 
 
 def test_the_refresh_lock_holder_never_waits_for_room(tmp_path, monkeypatch):

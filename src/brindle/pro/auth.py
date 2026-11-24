@@ -584,7 +584,8 @@ def refresh_lock(timeout: float = LOCK_TIMEOUT):
     Every brindle of the OS user waits on this lock, so its holder's keychain
     reads start at once at normal priority, even from background work: queued
     behind a busy machine they held it past LOCK_TIMEOUT, and every request
-    that needed a fresh token failed with lock_timeout before it was sent."""
+    that needed a fresh token failed with lock_timeout before it was sent.
+    A daemon request waiting to acquire the lock also stops at its deadline."""
     path = lock_path()
     old = os.umask(0o077)
     try:
@@ -594,14 +595,21 @@ def refresh_lock(timeout: float = LOCK_TIMEOUT):
         os.umask(old)
     try:
         deadline = time.monotonic() + timeout
+        request = spawn.current()
         while True:
+            if request is not None and (request.stopped or request.left() <= 0):
+                raise AuthError("the request ended while waiting for the sign-in refresh", code="lock_timeout")
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
-                if time.monotonic() > deadline:
+                left = deadline - time.monotonic()
+                if left <= 0:
                     raise AuthError("timed out waiting for another brindle process to refresh",
                                     code="lock_timeout") from None
+                if request is not None:
+                    request.wait(min(0.02, left, request.left()))
+                    continue
                 time.sleep(0.02)
         try:
             with keystore.uncached_reading(), spawn.starts_at_once():

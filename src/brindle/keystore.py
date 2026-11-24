@@ -212,6 +212,10 @@ class CredentialError(Exception):
     """The store couldn't be used safely. Never contains a secret."""
 
 
+class KeychainReadTimeout(CredentialError):
+    """The keychain did not answer a credential read in time."""
+
+
 def _encode(creds: dict) -> str:
     return base64.b64encode(json.dumps(creds, separators=(",", ":")).encode()).decode("ascii")
 
@@ -291,7 +295,7 @@ class KeychainStore:
                 r = self._run(["find-generic-password", "-a", self.account, "-s", self.service, "-w"])
             except subprocess.TimeoutExpired:    # a dialog nobody answered
                 _note_refused()
-                raise CredentialError("keychain read timed out") from None
+                raise KeychainReadTimeout("keychain read timed out") from None
             if r.returncode == 44:   # errSecItemNotFound
                 blob, value = None, None
             elif r.returncode != 0:

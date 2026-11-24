@@ -2504,6 +2504,8 @@ def _docs_entitlement(repo: str | None, store=None):
     try:
         return analysis_docs.require_entitlement(store)
     except RuntimeError as e:
+        if busy := _library_busy(e):
+            raise busy from e
         raise ServiceError("not_entitled", str(e), 402) from e
 
 
@@ -2515,6 +2517,7 @@ def docs_api(method: str, path: str, body: dict | None = None, *, repo: str | No
     out is 401."""
     from urllib.parse import urlencode
 
+    from brindle import keystore
     from brindle.pro import analysis_docs, auth
 
     ent = _docs_entitlement(repo)
@@ -2523,19 +2526,38 @@ def docs_api(method: str, path: str, body: dict | None = None, *, repo: str | No
         query.update(zip(("scope_kind", "scope_id"), doc_scope(scope, ent.sub)))
     try:
         return analysis_docs.api(method, path + (f"?{urlencode(query)}" if query else ""), body)
-    except (RuntimeError, auth.TransportError) as e:    # unreachable, or an answer it can't read: not signed out
+    except (RuntimeError, auth.AuthError, keystore.KeychainReadTimeout) as e:
         raise upstream_error(e) from e
+
+
+def _library_busy(e: BaseException | None) -> ServiceError | None:
+    """A local sign-in delay can surface through entitlement or Library errors."""
+    from brindle.keystore import KeychainReadTimeout
+    from brindle.pro.auth import AuthError
+
+    while e is not None:
+        if isinstance(e, AuthError) and e.code == "lock_timeout":
+            return ServiceError("busy", "Another brindle process is refreshing your sign-in.", 503)
+        if isinstance(e, KeychainReadTimeout):
+            return ServiceError("busy", "brindle couldn't read your sign-in from the keychain in time.", 503)
+        e = e.__cause__
+    return None
 
 
 def upstream_error(e: Exception) -> ServiceError:
     """The Library's refusal as the daemon's answer: its own 4xx (a stale
     version stays a 409, a missing permission a 403) so the app can act on it;
-    anything else, unreachable or unreadable, is a 502. A 401 is never passed
-    on: it would read as the daemon's own token being refused, nor is a 403
-    without the Library's error code: that is its firewall, not a permission
-    (analysis_docs.why_refused)."""
+    a local sign-in delay is 503, and an unreachable or unreadable response
+    is 502. The Library's 401 would read as the daemon's own token being
+    refused, and a 403 without a Library error code comes from its firewall
+    (analysis_docs.why_refused). Both become 502."""
     from brindle.pro.analysis_docs import Refused
+    from brindle.pro.auth import AuthError, TransportError
 
+    if busy := _library_busy(e):
+        return busy
+    if isinstance(e, AuthError) and not isinstance(e, TransportError):
+        return from_exception(e)
     if isinstance(e, Refused) and 400 <= e.status < 500 and e.status != 401 and (e.status != 403 or e.code):
         return ServiceError(e.code if e.code and e.code.isidentifier() else "upstream", str(e), e.status)
     return ServiceError("upstream", str(e), 502)
