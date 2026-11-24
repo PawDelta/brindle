@@ -59,6 +59,7 @@ KEYCHAIN_READ_TTL = 30.0  # seconds before another process's changes become visi
 # dialog, and keep failing or recover on their own.
 KEYCHAIN_DIALOG_EXITS = frozenset({51, 128})
 KEYCHAIN_REFUSED_FILE = "keychain-refused"
+_KEYCHAIN_UNBLOCK = "Unlock the keychain, then run `brindle keys unblock` before trying again."
 
 
 def _refused_marker() -> Path:
@@ -212,6 +213,10 @@ class CredentialError(Exception):
     """The store couldn't be used safely. Never contains a secret."""
 
 
+class KeychainReadBlocked(CredentialError):
+    """An unanswered or refused keychain dialog has blocked credential reads."""
+
+
 def _encode(creds: dict) -> str:
     return base64.b64encode(json.dumps(creds, separators=(",", ":")).encode()).decode("ascii")
 
@@ -275,9 +280,7 @@ class KeychainStore:
                 return _decode(self._read.blob) if self._read.blob is not None else None
             self._read.invalidate()
             if _refused_marker().exists():
-                raise CredentialError("the keychain refused an earlier read (locked, or its dialog cancelled), and "
-                                      "brindle won't raise that dialog again by itself: once it's unlocked, "
-                                      "`brindle keys unblock` lets brindle read it")
+                raise KeychainReadBlocked(f"An earlier keychain dialog blocked credential reads. {_KEYCHAIN_UNBLOCK}")
             if _listed_reads.get() and not _uncached_reads.get():
                 items, until = self._listed()
                 if items is not None and (self.service, self.account) not in items:
@@ -291,7 +294,7 @@ class KeychainStore:
                 r = self._run(["find-generic-password", "-a", self.account, "-s", self.service, "-w"])
             except subprocess.TimeoutExpired:    # a dialog nobody answered
                 _note_refused()
-                raise CredentialError("keychain read timed out") from None
+                raise KeychainReadBlocked(f"The keychain read timed out. {_KEYCHAIN_UNBLOCK}") from None
             if r.returncode == 44:   # errSecItemNotFound
                 blob, value = None, None
             elif r.returncode != 0:

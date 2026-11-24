@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
-import type { DesignShareLink, DocScope, LibraryPerson, Plan, ShareAccess, SharePerson } from "../../../api/client";
+import { DaemonError, type DesignShareLink, type DocScope, type LibraryPerson, type Plan, type ShareAccess, type SharePerson } from "../../../api/client";
 import { SharePanel, type SharePeopleTarget } from "./SharePanel";
 import { ShareLinkPanel, type ShareLinkTarget } from "./ShareLink";
 
@@ -228,6 +228,23 @@ it("says why a search failed", async () => {
     nameOf={(s) => s} onBusy={() => {}} visible onClose={() => {}} />));
   await act(async () => fireEvent.focus(screen.getByTestId("share-search")));
   expect(screen.getByTestId("share-search-error").textContent).toContain("the daemon's reason");
+});
+
+it("can reload the access list when the sign-in refresh is busy", async () => {
+  const lib = library({ people: [{ sub: "sam", name: "Sam", access: "comment", sign_off: null }] });
+  const read = lib.target.access;
+  let blocked = true;
+  lib.target.access = async () => {
+    if (blocked) throw new DaemonError("busy", "Sign-in refresh in progress", 503);
+    return read();
+  };
+  await act(async () => render(<Reader lib={lib} />));
+  const access = within(screen.getByTestId("share-access"));
+  const alert = access.getByRole("alert");
+  blocked = false;
+  await act(async () => fireEvent.click(within(alert).getByRole("button", { name: "Try again" })));
+  expect(access.queryByRole("alert")).toBeNull();
+  expect(row("sam").getAttribute("data-access")).toBe("comment");
 });
 
 it("updates link view and edit access while retaining the URL, and rolls back a refused change", async () => {

@@ -3,7 +3,7 @@
    `available: false` and the menu shows neither. An org's link policy refusing keeps its own reason. */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { DesignShareLink, DocScope, ShareLinkScope } from "../../../api/client";
+import { DaemonError, type DesignShareLink, type DocScope, type ShareLinkScope } from "../../../api/client";
 import { ShareChevron } from "./SharePanel";
 import { message } from "./chrome";
 import type { PlanShareLinkClient, ShareLinkClient } from "./client";
@@ -36,13 +36,13 @@ export function planLinkTarget(client: Partial<PlanShareLinkClient>, planId: str
     scopes: client.docScopes ? () => client.docScopes!(repo) : undefined };
 }
 
-/* Whether the design offers a link at all: null until the daemon answers, and on any failure to read
-   it (signed out, offline), so a menu never shows actions it can't carry out. Read again whenever
-   `fresh` changes (the Share menu opening, a plan getting shared into the Library): a plan with no
-   link a moment ago may have one now. Only the newest answer counts: a copy or revoke the person
-   made (`setState`) outdates every read still out, which saw the link before it. */
+/* Read the link when the Share menu opens, when the plan is shared, or when the person tries again
+   after a busy sign-in. Only the newest answer counts: a copy or revoke the person made (`setState`)
+   outdates every read still out, which saw the link before it. */
 export function useShareLink(target: ShareLinkTarget | undefined, fresh?: unknown) {
   const [state, setRead] = useState<DesignShareLink | null>(null);
+  const [blocked, setBlocked] = useState<{ reason: string; reading: boolean } | null>(null);
+  const [reads, setReads] = useState(0);
   const latest = useRef(target);
   latest.current = target;
   const generation = useRef(0);
@@ -50,18 +50,41 @@ export function useShareLink(target: ShareLinkTarget | undefined, fresh?: unknow
   useEffect(() => {
     generation.current++;
     setRead(null);
+    setBlocked(null);
   }, [key]);
   useEffect(() => {
     const t = latest.current;
     if (!t) return;
     const asked = ++generation.current;
-    t.read().then((got) => { if (generation.current === asked) setRead(got); }, () => {});
-  }, [key, fresh]);
+    setBlocked((current) => current && { ...current, reading: true });
+    t.read().then((got) => {
+      if (generation.current !== asked) return;
+      setRead(got);
+      setBlocked(null);
+    }, (e: unknown) => {
+      if (generation.current !== asked) return;
+      if (e instanceof DaemonError && e.code === "busy") {
+        setBlocked({ reason: e.message, reading: false });
+      } else setBlocked(null);
+    });
+    return () => { if (generation.current === asked) generation.current++; };
+  }, [key, fresh, reads]);
   const setState = useCallback((next: DesignShareLink) => {
     generation.current++;
     setRead(next);
+    setBlocked(null);
   }, []);
-  return { state, setState };
+  return { state, setState, blocked, readAgain: () => setReads((n) => n + 1) };
+}
+
+export function ShareLinkSection({ target, link }: { target: ShareLinkTarget; link: ReturnType<typeof useShareLink> }) {
+  return <>
+    {link.blocked && <section className="sec" aria-label="Plan link">
+      <div className="msg bad" role="alert"><span className="grow">{link.blocked.reason}</span>
+        <button type="button" className="sp-btn q end" disabled={link.blocked.reading} onClick={link.readAgain}>Try again</button></div>
+    </section>}
+    {link.state?.available && <ShareLinkPanel target={target} state={link.state} onState={link.setState} />}
+  </>;
 }
 
 export function ShareLinkPanel({ target, state, onState }: {

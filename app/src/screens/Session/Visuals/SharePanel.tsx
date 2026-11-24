@@ -5,7 +5,7 @@
    Every write changes one person or scope (brindle/pro/share_access.py), never the whole list. */
 
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
-import type { DocScope, LibraryPerson, PeopleQuery, Plan, PolicyPreviewRow, ShareAccess, ShareAccessLevel, SharePerson } from "../../../api/client";
+import { DaemonError, type DocScope, type LibraryPerson, type PeopleQuery, type Plan, type PolicyPreviewRow, type ShareAccess, type ShareAccessLevel, type SharePerson } from "../../../api/client";
 import type { PlanGateRowDTO } from "../../../api/schema";
 import type { Writes } from "./PlanReader";
 import { initials } from "./PlanCards";
@@ -71,6 +71,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
 }) {
   const shared = !!plan.gate;
   const [access, setAccess] = useState<ShareAccess | null>(null);
+  const [accessBusy, setAccessBusy] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   const [typed, setTyped] = useState("");
   const [team, setTeam] = useState("");
@@ -108,9 +109,14 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   // Who has it, from the Library: when the panel opens and after each change made here. An answer
   // asked for before a later change is dropped, so it never paints over newer rows.
   useEffect(() => {
-    if (!visible || !target) return;
     const generation = ++accessGeneration.current;
-    target.access().then((got) => { if (accessGeneration.current === generation) setAccess(got); }, () => {});
+    if (!visible || !target) return;
+    setAccessBusy(null);
+    target.access().then((got) => {
+      if (accessGeneration.current === generation) setAccess(got);
+    }, (e: unknown) => {
+      if (accessGeneration.current === generation && e instanceof DaemonError && e.code === "busy") setAccessBusy(e.message);
+    });
   }, [visible, target, reload, shared]);
   // The rules a first share would meet, for the plan and revision they were asked for.
   useEffect(() => {
@@ -345,6 +351,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
         </div>}
     </section>}
     <section className="sec fill" data-testid="share-access">
+      {accessBusy !== null && <div className="msg bad" role="alert"><span className="grow">{accessBusy}</span><button className="sp-btn q end" onClick={() => setReload((n) => n + 1)}>Try again</button></div>}
       {/* A first add shows here at once, and stays with its error if the upload is refused. */}
       {(listed || people.length > 0) && <>
         <div className="lab"><b>Who has access</b><span>{[count && `${count} ${count === 1 ? "person" : "people"}`, scopes.length && `${scopes.length} ${scopes.length === 1 ? "team" : "teams"}`].filter(Boolean).join(" · ")}</span></div>

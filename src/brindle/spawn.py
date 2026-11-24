@@ -156,6 +156,10 @@ class Deadline:
     def stopped(self) -> bool:
         return self._stopped.is_set()
 
+    def wait(self, seconds: float) -> None:
+        """Wait at most the given interval, waking immediately if stopped."""
+        self._stopped.wait(seconds)
+
     def stop(self, reason: str = "the request was abandoned") -> None:
         """Stop this request's reads now, and fail any still waiting for room."""
         if not self._stopped.is_set():

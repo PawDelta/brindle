@@ -54,7 +54,7 @@ import { DocPresence, type LiveCapability } from "./DocPresence";
 import { DocStatus } from "./DocStatus";
 import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } from "./DocText";
 import { ExportButton } from "./ExportButton";
-import { ShareLinkPanel, planLinkTarget, useShareLink, type ShareLinkTarget } from "./ShareLink";
+import { ShareLinkSection, planLinkTarget, useShareLink, type ShareLinkTarget } from "./ShareLink";
 import { Alongside, Decision, Tasks, displayName, overlaps, passChip, personName, shortName, useAccount } from "./PlanCards";
 import { Annotated, DecisionCard, type OwnAnswers, MarginNote, Menu, ModeMenu, Outline, Tick, decisionsInOrder, docLayout, menuNote, menuRow, menuTitle, onSpine, placeDecisions, spineParts } from "./PlanDesignDoc";
 import type { Work } from "./WorkPanel";
@@ -983,17 +983,17 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the client is fixed for this doc
     [plan.id]);
   // The link: Pro and up (the daemon says `available`), for whoever may edit the design.
-  const linked = shareLink && link.state?.available ? { target: shareLink, state: link.state } : null;
-  const shareMenu = (canShare || linked) && <button type="button" aria-label="Share" title="Share" className={`${button} size-7 shrink-0 !p-1.5 ${sharingOpen ? "!border-transparent bg-branch-soft text-branch" : ""}`}
+  const canOpenShare = canShare || (!!shareLink && (!!link.state?.available || !!link.blocked));
+  const shareMenu = canOpenShare && <button type="button" aria-label="Share" title="Share" className={`${button} size-7 shrink-0 !p-1.5 ${sharingOpen ? "!border-transparent bg-branch-soft text-branch" : ""}`}
     aria-expanded={sharingOpen} onClick={() => setSharingOpen((o) => !o)}><svg className="size-4" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden><circle cx="6" cy="5" r="2.5" /><path d="M1.5 14v-2a4.5 4.5 0 019 0v2M11 3a2.5 2.5 0 010 5m2 6v-2a4 4 0 00-1-2.5" /></svg></button>;
   const ownReviewer = signers.find((r) => r.you && r.status !== "signed_off");
-  const sharePanel = (canShare || linked) && <SharePanel plan={plan} target={sharePeople}
+  const sharePanel = canOpenShare && <SharePanel plan={plan} target={sharePeople}
     signOff={sharing && ownReviewer && plan.state !== "approved" ? { sub: ownReviewer.sub!, disabled: busy || reviewBlocked,
       run: () => void reviewWrite(() => sharing.signOffPlan(plan.id, plan.rev, reviewVersion)) } : undefined}
     nameOf={nameOf} writes={writes} onBusy={setBusy} visible={sharingOpen && !historical} onClose={() => setSharingOpen(false)}
     teams={scopes} directory={directory} owned={!teammate} previewRules={gate ? undefined : previewRules} onStopAll={() => setUnshared((n) => n + 1)}>
     {!!gate?.policies?.length && <section className="sec"><Policies plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} busy={busy} nameOf={nameOf} write={reviewWrite} /></section>}
-    {linked && <ShareLinkPanel target={linked.target} state={linked.state} onState={link.setState} />}
+    {shareLink && <ShareLinkSection target={shareLink} link={link} />}
   </SharePanel>;
   const presence = docLive && (
     <DocPresence client={docLive} visual={plan.id} isAuthor={!!author} name={myName} onState={setLiveState} onCapability={setLiveCapability} onText={setLiveTexts} refreshes={refreshes}

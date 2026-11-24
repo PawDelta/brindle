@@ -10,17 +10,23 @@ people", and adding the owner failed with a timeout.
 """
 
 import threading
+from subprocess import TimeoutExpired
 from types import SimpleNamespace
+from urllib.parse import urlencode
 
 import pytest
+from starlette.testclient import TestClient
 
+from brindle import airgap, keystore
 from brindle import db as db_mod
 from brindle import spawn
-from brindle.pro import auth
+from brindle.daemon.app import build_app
+from brindle.pro import analysis_docs as ad
+from brindle.pro import auth, credentials, license
 from brindle.pro import share_access as sa
 from brindle.pro import shared_docs as sd
 from pro_fixtures import backend, pro_env, signing_key  # noqa: F401
-from test_plans import session  # noqa: F401
+from test_plans import AUTH, TOKEN, session  # noqa: F401
 from test_share_panel_access import PeopleLibrary, panel  # noqa: F401
 from test_shared_plan_docs import BASE, DESIGN, DOC, parts, sent  # noqa: F401
 
@@ -158,23 +164,106 @@ def test_a_late_create_answer_grants_nothing_once_its_claim_is_gone(db, parts, b
     assert [f["scope"]["id"] for f in sent(backend, f"POST {BASE}/share")] == ["bo"]     # never ann
 
 
-def test_an_air_gapped_search_reads_no_credential(parts, monkeypatch):
+def test_an_air_gapped_search_reads_no_credential(parts, tmp_path, monkeypatch):
     """An unlinked plan's search in an air-gapped repo: refused before the sign-in is read."""
-    from starlette.testclient import TestClient
-
-    from brindle import airgap
-    from brindle.daemon.app import build_app
-    from brindle.pro import analysis_docs as ad
-    from test_plans import AUTH, TOKEN
-
     def opened(*a):
         raise AssertionError("the credential store was opened")
 
-    monkeypatch.setattr(airgap, "enabled", lambda: True)
+    monkeypatch.delenv(airgap.ENV, raising=False)
+    monkeypatch.setattr(airgap, "_armed", False)
+    monkeypatch.setattr(airgap, "_warned", False)
     monkeypatch.setattr(ad, "_session", opened)
+    config = tmp_path / ".brindle" / "config.json"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text('{"airgap": true}')
     with TestClient(build_app(TOKEN), headers=AUTH) as app:
-        got = app.get(f"/v1/plans/{parts[0]}/people?{SEARCH}")
+        assert not airgap.enabled()
+        got = app.get(f"/v1/plans/{parts[0]}/people?{SEARCH}&{urlencode({'repo': str(tmp_path)})}")
     assert got.status_code == 402, got.json()
+
+
+@pytest.mark.parametrize("operation", ["search", "invite", "link"])
+@pytest.mark.variant("Search, invite and link reads have separate daemon error handlers")
+def test_a_blocked_refresh_is_busy_in_the_share_routes(panel, parts, monkeypatch, operation):
+    pid, _, app = panel
+    path = f"/v1/plans/{pid}/people"
+    invite = {"sub": "ann", "access": "comment"}
+    assert app.post(path, json=invite).status_code == 200
+    store = parts[2]["store"]
+    store.save({**store.load(), "access_expires_at": 0})
+
+    def blocked():
+        raise auth.AuthError("refresh lock held", code="lock_timeout")
+
+    monkeypatch.setattr(auth, "refresh_lock", blocked)
+    if operation == "search":
+        got = app.get(f"{path}?{SEARCH}")
+    elif operation == "invite":
+        got = app.post(path, json=invite)
+    else:
+        got = app.get(f"/v1/plans/{pid}/share-link")
+    assert (got.status_code, got.json()["error"]["code"]) == (503, "busy")
+
+
+@pytest.mark.parametrize("operation", ["search", "plan-link", "design-link"])
+@pytest.mark.variant("Unlinked search, plan link resolution and design link availability each read the entitlement")
+def test_share_routes_keep_a_blocked_keychain_actionable(parts, db, monkeypatch, operation):
+    pid, _, net = parts
+    store = keystore.KeychainStore("test-share-people")
+    attempted = []
+
+    def unanswered(*args):
+        attempted.append(True)
+        raise TimeoutExpired("security", keystore.STORE_LIMIT)
+
+    monkeypatch.setattr(store, "_run", unanswered)
+    if operation == "search":
+        path = f"/v1/plans/{pid}/people?{SEARCH}"
+        monkeypatch.setattr(ad, "_session", lambda *a: (net["client"], net["store"]))
+        monkeypatch.setattr(credentials, "default_store", lambda: store)
+        license.clear_cache()
+    else:
+        monkeypatch.setattr(ad, "_session", lambda *a: (net["client"], store))
+        if operation == "plan-link":
+            db.conn.execute("INSERT INTO plan_shares (plan_id, doc_id, owner) VALUES (?, ?, 'user_1')", (pid, DOC))
+            path = f"/v1/plans/{pid}/share-link"
+        else:
+            path = f"/v1/library/designs/{DOC}/share-link"
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        first, again = app.get(path), app.get(path)
+    assert first.status_code == again.status_code == 503, (first.json(), again.json())
+    for got in (first, again):
+        error = got.json()["error"]
+        assert error["code"] == "busy"
+        assert "brindle keys unblock" in error["message"]
+    assert len(attempted) == 1
+
+
+def test_refresh_lock_stops_at_the_request_deadline(tmp_path, monkeypatch):
+    now = 10.0
+    budget = 0.005
+    attempts = 0
+
+    def advance(seconds):
+        nonlocal now
+        now += seconds
+
+    def held(*args):
+        nonlocal attempts
+        attempts += 1
+        assert attempts == 1, "attempted to take the refresh lock after exhausting the budget"
+        raise BlockingIOError
+
+    monkeypatch.setattr(auth, "lock_path", lambda: tmp_path / "refresh.lock")
+    monkeypatch.setattr(auth.time, "monotonic", lambda: now)
+    monkeypatch.setattr(auth.fcntl, "flock", held)
+    with spawn.deadline(budget) as request:
+        monkeypatch.setattr(request._stopped, "wait", advance)
+        started = now
+        with pytest.raises(auth.AuthError) as error, auth.refresh_lock():
+            pytest.fail("acquired the held refresh lock")
+    assert error.value.code == "lock_timeout"
+    assert now - started == pytest.approx(budget)
 
 
 @pytest.mark.variant("the root cause: a refresh-lock holder inside background work must not queue for CPU room")

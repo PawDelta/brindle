@@ -73,6 +73,8 @@ def plan_doc(db, plan_id: str, store=None) -> str | None:
         return None
     try:
         me = ad.require_entitlement(ad._session(None, store)[1]).sub
+    except ad.SignInBusy:
+        raise
     except RuntimeError:
         return None
     return row["doc_id"] if row["owner"] == me else None
@@ -113,6 +115,8 @@ def _ask(method: str, doc_id: str, client, store, body=None) -> dict | None:
     client, store = ad._session(client, store)
     try:
         ad.require_entitlement(store)             # Free, signed out or air-gapped: nothing is sent
+    except ad.SignInBusy:
+        raise
     except RuntimeError as e:
         raise ServiceError("not_entitled", NO_PLAN, 402) from e
     status, resp = ad._call(method, _path(doc_id), body, client=client, store=store)
@@ -125,6 +129,8 @@ def available(store=None) -> bool:
     """Whether this account's plan has share links (Pro and up)."""
     try:
         ad.require_entitlement(store)
+    except ad.SignInBusy:
+        raise
     except RuntimeError:
         return False
     return True

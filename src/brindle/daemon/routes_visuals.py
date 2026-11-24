@@ -554,15 +554,15 @@ def plan_answer_change(db: DB, params: dict, body: dict) -> Any:
 
 
 def _library_call(work: Callable[[Any], Any]) -> Any:
-    from brindle import redact
+    from brindle import keystore, redact
     from brindle.daemon import routes_actions as actions
     from brindle.pro import auth, shared_docs
 
     try:
         return work(shared_docs)
-    except (RuntimeError, auth.TransportError) as e:    # unreachable or refused: not signed out
+    except (RuntimeError, auth.AuthError, keystore.KeychainReadBlocked) as e:
         err = actions.upstream_error(e)
-        raise ServiceError(err.code, redact.mask(str(e)), err.http_status) from e
+        raise ServiceError(err.code, redact.mask(err.message), err.http_status) from e
 
 
 def _library(db: DB, plan_id: str, work: Callable[[Any], Any]) -> Any:
@@ -794,23 +794,22 @@ def review_policies_impact(db: DB, params: dict, body: dict) -> Any:
 
 
 def _shared_design(repo: str | None, work: Callable[[Any], Any]) -> Any:
-    from brindle import airgap, config, redact
+    from brindle import airgap, config, keystore, redact
     from brindle.daemon import routes_actions as actions
     from brindle.pro import analysis_docs, auth, shared_reader
 
     if repo:
         config.load_repo_config(repo)      # its air-gap setting applies before any credential is read
-    # Signed out or not entitled: a 402, and the app drops the doc. Air-gapped: refused before the store is opened.
-    actions._docs_entitlement(repo, None if airgap.enabled() else analysis_docs._session()[1])
     try:
+        actions._docs_entitlement(repo, None if airgap.enabled() else analysis_docs._session()[1])
         return work(shared_reader)
-    except (RuntimeError, auth.TransportError) as e:    # unreachable or refused
+    except (RuntimeError, auth.AuthError, keystore.KeychainReadBlocked) as e:
         if isinstance(e, analysis_docs.Refused) and e.status == 401:      # still refused after a token refresh; a 401 would read as the daemon's
             raise ServiceError("signed_out", "sign in to brindle again to read this plan", 402) from e
         if isinstance(e, analysis_docs.Refused) and e.code == "key_unavailable":
             raise ServiceError(e.code, redact.mask(str(e)), 503) from e   # the org's key is revoked: the doc is gone for now
         err = actions.upstream_error(e)
-        raise ServiceError(err.code, redact.mask(str(e)), err.http_status) from e
+        raise ServiceError(err.code, redact.mask(err.message), err.http_status) from e
 
 
 @_json
@@ -1003,16 +1002,17 @@ def _share_link(repo: str | None, work: Callable[[Any], Any]) -> Any:
     """A design's share link (brindle.pro.share_links), by its Library doc id.
     Below Pro a read answers ``available: false`` and nothing is sent; the
     Library's refusal (an org's link policy, not an editor) keeps its reason."""
-    from brindle import config, redact
+    from brindle import config, keystore, redact
     from brindle.daemon import routes_actions as actions
-    from brindle.pro import auth, share_links
+    from brindle.pro import analysis_docs, auth, share_links
 
     if repo:
         config.load_repo_config(repo)        # its air-gap setting applies first
     try:
         return work(share_links)
-    except auth.TransportError as e:         # unreachable
-        raise ServiceError("upstream", redact.mask(str(e)), actions.upstream_error(e).http_status) from e
+    except (analysis_docs.SignInBusy, auth.AuthError, keystore.KeychainReadBlocked) as e:
+        err = actions.upstream_error(e)
+        raise ServiceError(err.code, redact.mask(err.message), err.http_status) from e
 
 
 @_json
