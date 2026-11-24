@@ -1128,6 +1128,9 @@ def _bearer() -> tuple[str, str]:
 
     client, store = ad._session()
     ad.require_entitlement(store)
+    warm = auth.warm_access(client, store)     # the daemon's, from memory: no keychain, no refresh lock
+    if warm is not None:
+        return client.base, warm
     cur = store.load() or {}
     if not cur.get("refresh_token"):
         raise RelayError("not logged in to brindle Pro", "not_logged_in")

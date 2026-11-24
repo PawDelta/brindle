@@ -1445,6 +1445,10 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     # uvicorn shuts down gracefully on SIGTERM, then raises it again with the
     # handler it found: make that an exit that still runs the cleanup below.
     signal.signal(signal.SIGTERM, _exit)
+    from brindle.pro import warm_token
+
+    # Its requests take the Pro access token from memory: none waits on a sign-in refresh.
+    warm = warm_token.start()
     try:
         _run(run())
     finally:
@@ -1452,6 +1456,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
         # next app, `brindle daemon stop` and a logout may each stop it) would cut the pause
         # and the cleanup short. Whoever stops it kills it if it overstays (stop, daemon.rs).
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        warm_token.stop(warm)
         # The app's daemon, once it served: stopped (a newer app replacing it, `brindle
         # daemon stop`, a logout, or a child losing its app) or exiting by itself
         # (idle, its install changed). What it ran is paused for the next daemon. One that never served
