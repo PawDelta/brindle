@@ -435,6 +435,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // Asked again as the menu opens, once the plan is shared (sharing is what puts it in the Library),
   // and after Stop sharing for everyone, which turns the link off.
   const [unshared, setUnshared] = useState(0);
+  // Stop sharing and build stopped sharing but built nothing: the personal doc reads differently.
+  const [personalDiffers, setPersonalDiffers] = useState(false);
   const link = useShareLink(shareLink, `${sharingOpen}:${!!receivedPlan.gate}:${unshared}`);
   const [briefOpen, setBriefOpen] = useState(false);
   const [stripHost, setStripHost] = useState<HTMLDivElement | null>(null);
@@ -832,10 +834,18 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (now) setNote("");
   };
   /* The plan becomes a personal doc, then the person's sign-off starts the build. */
+  /* Built only when the personal doc it becomes reads as the text on screen (the live draft's, or a
+     frozen version's). If it doesn't, nothing is built: the personal revision is shown, said so, for
+     the person to read and Approve. */
   const stopSharing = async () => {
     if (historical) return;
+    const read = shownTexts;
     setSending("approve");
     const now = await send(() => sharing!.stopSharingPlan!(plan.id, plan.rev));
+    if (now && read && [...read].some(([id, text]) => (id === LEDE ? now.lede : now.sections.find((s) => s.id === id)?.markdown) !== text)) {
+      if (alive.current) { setSending(null); setPersonalDiffers(true); }
+      return;
+    }
     if (now) await decide(true, false);
     else if (alive.current) setSending(null);
   };
@@ -1030,6 +1040,11 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         </div>
       )}
       {open && gate?.approval_refused && <p className="m-0 font-sans text-[12.5px] text-sap" data-testid="plan-approval-refused">{gate.approval_refused}</p>}
+      {open && !gate && personalDiffers && (
+        <p role="status" className="m-0 font-sans text-[12.5px] text-sap" data-testid="plan-personal-differs">
+          Sharing stopped, but nothing was built: the plan kept here reads differently from the shared text you were reading. Read it as it is now, then Approve to build it.
+        </p>
+      )}
     </>
   );
   // What a highlight offers, over the words.

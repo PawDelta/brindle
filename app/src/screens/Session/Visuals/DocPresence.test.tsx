@@ -313,7 +313,10 @@ it("shows the live text, not the revision's, after Done editing, once frozen and
   showsTyped();
 });
 
-it("Stop sharing and build on a live doc approves it as a personal doc: no frozen version to wait for or to name", async () => {
+it.each([
+  ["the same", "Workers run here."],
+  ["other", "Workers run on the customer's machine."],
+])("Stop sharing and build on a live doc reading %s text than the plan kept here: built as a personal doc only when they match", async (_, typed) => {
   const daemon = new FakeDaemon();
   const live = daemon.client();
   const visual: VisualDTO = { id: "doc", session: "boss", title: "Workers", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
@@ -321,22 +324,33 @@ it("Stop sharing and build on a live doc approves it as a personal doc: no froze
     sections: [{ id: "summary", title: "Summary", markdown: "Workers run here." }],
     gate: { state: "ready", required: 0, signed: 0, waiting_on: [], reviewers: [],
       unconfirmed: { reason: "offline", message: "The Library can't be reached.", approval_held: false, can_stop_sharing: true } } };
-  daemon.seedLive("doc", { summary: "Workers run here." }, { plan, me: "Ann", author: "Ann" });
+  daemon.seedLive("doc", { summary: typed }, { plan, me: "Ann", author: "Ann" });
+  let current = plan;                               // once sharing stops: the personal doc kept here
   const verdicts: PlanVerdict[] = [];
   const client = {
-    visualLive: live.visualLive.bind(live), plan: async () => plan,
-    decidePlan: async (_id: string, verdict: PlanVerdict) => { verdicts.push(verdict); return plan; },
+    visualLive: live.visualLive.bind(live), plan: async () => current,
+    decidePlan: async (_id: string, verdict: PlanVerdict) => { verdicts.push(verdict); return current; },
     visuals: async () => [visual], answerVisual: async () => visual, dismissVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => {},
     commentPlan: async () => plan, replyPlan: async () => plan, resolvePlanThread: async () => plan, suggestPlan: async () => plan, acceptPlanSuggestion: async () => plan, rejectPlanSuggestion: async () => plan, editPlan: async () => plan, confirmPlan: async () => plan,
     sharePlan: async () => plan, setPlanReviewers: async () => plan, syncPlan: async () => plan, overridePlanPolicy: async () => plan, signOffPlan: async () => plan,
-    docScopes: async () => ({ scopes: [] }), libraryPeople: async () => ({ people: [], me: "Ann" }), stopSharingPlan: async () => plan,
+    docScopes: async () => ({ scopes: [] }), libraryPeople: async () => ({ people: [], me: "Ann" }),
+    stopSharingPlan: async () => (current = { ...plan, gate: undefined }),
   };
   render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
   await settle();
   await act(async () => fireEvent.click(within(screen.getByTestId("plan-unconfirmed")).getByRole("button", { name: "Stop sharing and build" })));
   await settle();
+  if (typed === plan.sections[0].markdown) {
+    expect(verdicts).toEqual([expect.objectContaining({ approved: true })]);
+    expect(verdicts[0]).not.toHaveProperty("version");
+    return;
+  }
+  // Nothing built: the personal revision is shown, said so, and Approve builds it once it is read.
+  expect(verdicts).toEqual([]);
+  expect(screen.getByTestId("plan-personal-differs")).toBeTruthy();
+  expect(within(screen.getByRole("region", { name: "Summary" })).getByText(plan.sections[0].markdown)).toBeTruthy();
+  await act(async () => fireEvent.click(screen.getByTestId("plan-build")));
   expect(verdicts).toEqual([expect.objectContaining({ approved: true })]);
-  expect(verdicts[0]).not.toHaveProperty("version");
 });
 
 it("types a suggestion only in Suggesting on unlocked text: in Viewing or once frozen it is shown read only", async () => {
