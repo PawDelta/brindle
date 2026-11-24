@@ -2239,9 +2239,9 @@ export class FakeDaemon {
       for (const scope of ROUTING_SCOPES) {
         const file = savedFiles[scope];
         const shared = file.routing?.[size];
-        if (shared) saved.push({ scope, setting: "routing", order: shared });
+        if (shared) saved.push({ scope, setting: "routing", order: shared, locked: file.routing_locked?.includes(size) ?? false });
         for (const [agent, pools] of Object.entries(file.agent_models ?? {})) {
-          if (pools[size]) saved.push({ scope, setting: "agent_models", agent, order: pools[size] });
+          if (pools[size]) saved.push({ scope, setting: "agent_models", agent, order: pools[size], locked: false });
         }
       }
       return [size, { recommended: DEFAULT_ROUTING[size], saved }];

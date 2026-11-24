@@ -139,19 +139,21 @@ describe("agents tab", () => {
   it("resets only saved differences in their original scopes and keeps learned picks", async () => {
     const { daemon } = setup({
       routingConfig: {
-        user: { routing: { light: DEFAULT_ROUTING.light, heavy: ["developer-codex"] }, routing_locked: ["heavy"] },
+        user: { routing: { light: DEFAULT_ROUTING.light, medium: ["developer-codex"], heavy: ["developer-codex"] }, routing_locked: ["medium"] },
         repo: { agent_models: { qa: { heavy: ["developer-codex"] } } },
         local: {},
       },
       learned: { advanced: "developer-codex" },
     });
     const notice = await screen.findByTestId("routing-differs");
-    expect(notice.textContent).toMatch(/\(Heavy\)/);
+    expect(Array.from(notice.querySelectorAll<HTMLElement>("[data-routing-notice]"), (el) => [
+      el.dataset.size, el.dataset.routingNotice,
+    ])).toEqual([["medium", "own-order"], ["heavy", "differs"]]);
     await within(row("advanced")).findByTestId("learned");
     fireEvent.click(within(notice).getByRole("button", { name: "Reset to recommended" }));
     await waitFor(() => expect(screen.queryByTestId("routing-differs")).toBeNull());
     expect(daemon.data.routingConfig.user.routing).toEqual({ light: DEFAULT_ROUTING.light });
-    expect(daemon.data.routingConfig.user.routing_locked).toEqual(["heavy"]);
+    expect(daemon.data.routingConfig.user.routing_locked).toEqual(["medium"]);
     expect(daemon.data.routingConfig.repo.agent_models).toEqual({});
     expect(within(row("advanced")).getByTestId("learned")).toBeTruthy();
   });

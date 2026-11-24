@@ -49,11 +49,13 @@ def saved_routing_orders(repo: str, *, user_only: bool) -> dict[str, RoutingSize
             continue
         settings = config._read_json(path)
         library = None if scope == "user" else repo
+        locked = config.locked_kinds(settings.get("routing_locked"))
 
         def add(pools, setting, agent=None):
             for size, names in saved_profile_orders(pools, library).items():
                 orders[size].saved.append(RoutingSavedOrderDTO(
-                    scope=scope, setting=setting, agent=agent, order=names))
+                    scope=scope, setting=setting, agent=agent, order=names,
+                    locked=setting == "routing" and locked.get(size, False)))
 
         add(settings.get("routing"), "routing")
         agents = settings.get("agent_models")
@@ -63,7 +65,8 @@ def saved_routing_orders(repo: str, *, user_only: bool) -> dict[str, RoutingSize
         if scope == "user":
             for size in orders:
                 if names := saved_picker_order(settings.get(f"routing_{size}")):
-                    orders[size].saved.append(RoutingSavedOrderDTO(scope=scope, setting="picker", order=names))
+                    orders[size].saved.append(RoutingSavedOrderDTO(
+                        scope=scope, setting="picker", order=names, locked=locked.get(size, False)))
     return orders
 
 

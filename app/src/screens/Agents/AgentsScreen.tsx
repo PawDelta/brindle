@@ -26,7 +26,7 @@
    ~/.brindle: agents are theirs, one list whatever the repos) and the page
    reads GET /v1/routing again: the rows at once, what learning runs after. */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { DaemonClient, KindPut, RulePackInfo, RoutingPut, RoutingScope, WorksLike } from "../../api/client";
 import type { RoutingDTO } from "../../api/schema";
 import { openExternal } from "../../api/open";
@@ -948,7 +948,7 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   );
   const policy = routing?.policy;
   const frozen = !!policy?.applies && policy.editable === false;
-  const differences = [...SIZES].reverse().flatMap((size) => {
+  const differences = SIZES.flatMap((size) => {
     const orders = routing?.orders?.[size];
     if (!orders) return [];
     const { recommended, saved } = orders;
@@ -1292,7 +1292,20 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
           </div>
           {differences.length > 0 && (
             <p className="pb-3 text-xs text-ink-3" data-testid="routing-differs">
-              Your routing differs from brindle's recommended order ({[...new Set(differences.map(({ size }) => KIND_INFO[size].name))].join(", ")}).{" "}
+              {SIZES.map((size) => (
+                <Fragment key={size}>
+                  {differences.some((entry) => entry.size === size && entry.locked) && (
+                    <span data-size={size} data-routing-notice="own-order">
+                      {KIND_INFO[size].name}: your own order (you chose it over the learned pick).{" "}
+                    </span>
+                  )}
+                  {differences.some((entry) => entry.size === size && !entry.locked) && (
+                    <span data-size={size} data-routing-notice="differs">
+                      Your routing differs from brindle's recommended order ({KIND_INFO[size].name}).{" "}
+                    </span>
+                  )}
+                </Fragment>
+              ))}
               <button type="button" className={link} disabled={busy || frozen} onClick={() => void resetOrders()}>
                 Reset to recommended
               </button>

@@ -980,9 +980,9 @@ def test_routing_user_view_runs_no_learner_and_no_sign_in_probe(seeded, monkeypa
 def test_routing_reads_and_clears_saved_orders_by_scope(repo, db, monkeypatch):
     from brindle import autopilot, config
 
-    config.set_user("routing", {"heavy": ["dev.gpt"], "light": config.DEFAULT_ROUTING["light"]})
+    config.set_user("routing", {"medium": ["dev.gpt"], "heavy": ["dev.gpt"], "light": config.DEFAULT_ROUTING["light"]})
     config.set_user("routing_heavy", "claude-opus")
-    config.set_user("routing_locked", {"heavy": True})
+    config.set_user("routing_locked", {"medium": True})
     config.set_repo(str(repo), "routing", {"medium": ["dev.gpt"]})
     config.set_local(str(repo), "agent_models", {"qa": {
         "heavy": ["dev.gpt"], "light": config.DEFAULT_ROUTING["light"]}})
@@ -994,10 +994,11 @@ def test_routing_reads_and_clears_saved_orders_by_scope(repo, db, monkeypatch):
     assert code == 200, routing
     orders = routing["orders"]
     assert orders["heavy"]["recommended"] == config.DEFAULT_ROUTING["heavy"]
-    assert {(entry["scope"], entry["setting"], entry["agent"]) for entry in orders["heavy"]["saved"]} == {
-        ("user", "routing", None), ("user", "picker", None), ("local", "agent_models", "qa")}
-    assert [(entry["scope"], entry["order"]) for entry in orders["medium"]["saved"]] == [
-        ("repo", ["dev.gpt"])]
+    assert {(entry["scope"], entry["setting"], entry["agent"], entry["locked"])
+            for entry in orders["heavy"]["saved"]} == {
+        ("user", "routing", None, False), ("user", "picker", None, False), ("local", "agent_models", "qa", False)}
+    assert [(entry["scope"], entry["order"], entry["locked"]) for entry in orders["medium"]["saved"]] == [
+        ("user", ["dev.gpt"], True), ("repo", ["dev.gpt"], False)]
     assert orders["light"]["saved"][0]["order"] == orders["light"]["recommended"]
     assert orders["advanced"]["saved"] == []
     assert routing["kinds"]["advanced"]["learned"] == "dev.gpt"
@@ -1014,7 +1015,7 @@ def test_routing_reads_and_clears_saved_orders_by_scope(repo, db, monkeypatch):
     after = _get("/v1/routing", AUTH, query)[1]
     assert after["orders"]["heavy"]["saved"] == after["orders"]["medium"]["saved"] == []
     assert after["orders"]["light"] == orders["light"]
-    assert after["kinds"]["heavy"]["locked"]
+    assert after["kinds"]["medium"]["locked"]
     assert after["kinds"]["advanced"]["learned"] == "dev.gpt"
     assert "routing_heavy" not in config.user_settings()
 
