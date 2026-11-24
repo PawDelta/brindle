@@ -796,11 +796,15 @@ class WarmSignIn(Protocol):
     def view(self):
         """The store as this process's requests read it (from memory)."""
 
-    def access(self, client: Client) -> str | None:
-        """An unexpired access token for ``client``'s backend, or None."""
+    def pin(self) -> tuple:
+        """(a view bound to the sign-in held now, that sign-in's record)."""
 
-    def refused(self, client: Client, stale: str) -> str | None:
-        """After a 401 for ``stale``: a newer token if one is ready, without waiting."""
+    def grant(self, client: Client, generation: int | None = None) -> tuple[str, int]:
+        """(an unexpired access token for ``client``'s backend, its sign-in's generation);
+        raises ``record_changed`` for another sign-in (``generation``) or backend."""
+
+    def refused(self, client: Client, stale: str, generation: int) -> str | None:
+        """After a 401 for ``stale``: a newer token of the same sign-in if one is ready, without waiting."""
 
 
 # The daemon's warm sign-in, when one is installed: its requests use the access token
@@ -820,11 +824,21 @@ def warm_view(store):
     return store if warm is None else warm.view
 
 
-def warm_access(client: Client, store) -> str | None:
-    """The warm sign-in's access token for ``store`` at ``client``'s backend, or None
-    when no warm sign-in keeps that store (the caller reads the store itself)."""
+def warm_pin(store) -> tuple | None:
+    """(a view of ``store`` bound to the sign-in the warm sign-in holds now, that
+    sign-in's record): a request builds its client from the record, checks the
+    entitlement through the view and gets a token for that same sign-in, or fails
+    closed. None when no warm sign-in keeps ``store``."""
     warm = _warm_for(store)
-    return None if warm is None else warm.access(client)
+    return None if warm is None else warm.pin()
+
+
+def warm_access(client: Client, store) -> str | None:
+    """The warm sign-in's access token for ``store`` (for the sign-in a pinned view is
+    bound to) at ``client``'s backend, or None when no warm sign-in keeps that store
+    (the caller reads the store itself). Raises ``record_changed`` on a mismatch."""
+    warm = _warm_for(store)
+    return None if warm is None else warm.grant(client, getattr(store, "generation", None))[0]
 
 
 def signin_marker() -> Path:
@@ -854,13 +868,16 @@ def authed(client: Client, store, method: str, path: str, form: dict | None = No
     token first if it is about to expire and once more if the backend answers 401.
     With a warm sign-in for ``store`` (the daemon's), its in-memory token is used:
     no store read and no refresh lock while it is unexpired, and a 401 is sent
-    again only with a newer token already at hand (else a renewal is started)."""
+    again only with a newer token of the same sign-in already at hand (else a
+    renewal is started). It fails closed (``record_changed``) rather than send for
+    another sign-in or backend than the one ``store`` (a pinned view) and ``client``
+    were made for."""
     warm = _warm_for(store) if now is None else None
-    token = None if warm is None else warm.access(client)
-    if token is not None:
+    if warm is not None:
+        token, generation = warm.grant(client, getattr(store, "generation", None))
         status, body = client.call(method, path, form, token=token, headers=headers)
         if status == 401:
-            newer = warm.refused(client, token)
+            newer = warm.refused(client, token, generation)
             if newer is not None:
                 status, body = client.call(method, path, form, token=newer, headers=headers)
         return status, body

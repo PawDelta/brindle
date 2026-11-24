@@ -22,6 +22,7 @@ from pro_fixtures import BASE, backend, claims, pro_env, sign, signing_key  # no
 from test_plans import session  # noqa: F401
 from test_share_panel_access import panel  # noqa: F401
 from test_share_people_regression import SlowLibrary, found
+from test_pro_remote_learning import login_as
 from test_shared_plan_docs import TEAM_LOGIN, parts  # noqa: F401
 
 try:
@@ -111,9 +112,10 @@ def quick_requests(monkeypatch):
     monkeypatch.setattr(daemon_app, "REQUEST_DEADLINE", 0.5)
 
 
-@pytest.mark.variant("the 2026-11-24 incident end to end: a share route behind another brindle's held refresh lock")
-def test_a_people_search_near_expiry_reads_no_keychain_and_never_waits(quick_requests, panel, parts, backend,
-                                                                       monkeypatch):
+@pytest.fixture
+def route(quick_requests, panel, parts, backend, monkeypatch):
+    """The share panel's routes as the daemon runs them: the real session and entitlement
+    check, the sign-in in a (fake) login keychain, and (after the change) a warm sign-in."""
     pid, _, app = panel
     SlowLibrary(backend)
     keychain = Keychain(monkeypatch)
@@ -125,6 +127,12 @@ def test_a_people_search_near_expiry_reads_no_keychain_and_never_waits(quick_req
     monkeypatch.setattr(ad, "require_entitlement", REAL_ENTITLEMENT)
     clock = Clock()
     holder = warm(monkeypatch, credentials.KeychainStore(), backend, clock)
+    return pid, app, keychain, record, clock, holder
+
+
+@pytest.mark.variant("the 2026-11-24 incident end to end: a share route behind another brindle's held refresh lock")
+def test_a_people_search_near_expiry_reads_no_keychain_and_never_waits(route, backend):
+    pid, app, keychain, record, clock, holder = route
     if holder is not None:
         keychain.put({**record, "access_expires_at": time.time() + 30})       # persisted near expiry
         holder.renew()              # the daemon's start: the token is rotated with one read and one write
@@ -139,6 +147,97 @@ def test_a_people_search_near_expiry_reads_no_keychain_and_never_waits(quick_req
     with lock_held():                                    # ... and another brindle holds the refresh lock
         assert found(app, pid) == ["owner_1"]
     assert (keychain.reads, refreshes(backend)) == before
+
+
+def test_a_lapsed_entitlement_is_reloaded_off_the_request_path(route, backend):
+    pid, app, keychain, record, clock, holder = route
+    now = int(time.time())
+    lapsed = sign(backend.key, claims(features=list(TEAM_LOGIN), iat=now - 7200, exp=now - 60))
+    keychain.put({**record, "entitlement": lapsed})
+    holder.renew()                                   # the token is held with an entitlement that has lapsed
+    renewed = {**keystore._decode(keychain.items[(credentials.SERVICE, credentials.ACCOUNT)]),
+               "entitlement": record["entitlement"]}
+    keychain.put(renewed)                            # another brindle renewed the entitlement since
+    reads = keychain.reads
+    with lock_held():
+        assert app.get(f"/v1/plans/{pid}/people?q=own").status_code != 200     # answered at once, from memory
+        reload = holder._flight                      # its reload waits for the lock, off the request
+        assert reload is not None and keychain.reads == reads
+    landed(holder, reload)
+    assert found(app, pid) == ["owner_1"]
+    assert keychain.reads == reads + 1 and refreshes(backend) == 0
+
+
+def test_a_request_never_sends_for_a_sign_in_replaced_under_it(parts, backend, monkeypatch):
+    keychain = Keychain(monkeypatch)
+    store = credentials.KeychainStore()
+    store.save(parts[2]["store"].load())
+    holder = warm(monkeypatch, store, backend, Clock())
+    holder.renew()
+
+    def login_elsewhere(base=BASE):
+        t = backend.issue()
+        keychain.put({"access_token": t["access_token"], "refresh_token": t["refresh_token"],
+                      "access_expires_at": time.time() + 900, "base_url": base,
+                      "entitlement": sign(backend.key, claims(sub="user_2", features=list(TEAM_LOGIN)))})
+        with auth.refresh_lock():
+            auth._note_signin()
+        return t["access_token"]
+
+    # Another account signs in between the request's session (client, entitlement) and its token.
+    view, record = auth.warm_pin(store)
+    client = auth.Client(record["base_url"], backend)
+    login_elsewhere()
+    sent = len(backend.calls)
+    with pytest.raises(auth.AuthError) as changed:
+        auth.authed(client, view, "GET", "/me")
+    assert changed.value.code == "record_changed" and len(backend.calls) == sent
+
+    # A 401 that comes back once another account has been taken up is not sent again as that account.
+    view, _ = auth.warm_pin(store)
+    me = backend.routes["GET /me"]
+
+    def refused_meanwhile(form, headers):
+        login_elsewhere()
+        holder.grant(client)                          # a concurrent request takes up the new account
+        return 401, {"error": "invalid_token"}
+
+    backend.routes["GET /me"] = refused_meanwhile
+    assert auth.authed(client, view, "GET", "/me")[0] == 401
+    assert backend.paths().count("GET /me") == 1
+    backend.routes["GET /me"] = me
+
+    # The sign-in moves to another backend: a client for the old one gets nothing sent.
+    login_elsewhere("https://other.test/api/brindle/v1")
+    sent = len(backend.calls)
+    with pytest.raises(auth.AuthError) as moved:
+        auth.authed(client, store, "GET", "/me")
+    assert moved.value.code == "record_changed" and len(backend.calls) == sent
+
+
+def test_a_login_right_after_a_refused_refresh_is_the_sign_in_then(parts, backend, monkeypatch):
+    client, store, _ = expired(parts, backend, monkeypatch)
+    backend.revoked = True
+    real_lock, logged_in = auth.refresh_lock, []
+
+    @contextmanager
+    def then_login():
+        try:
+            with real_lock():
+                yield
+        finally:
+            if backend.revoked and not logged_in:   # once the refused refresh lets go of the lock
+                logged_in.append(True)
+                backend.revoked = False
+                login_as(backend, store)
+                with real_lock():
+                    auth._note_signin()
+
+    monkeypatch.setattr(auth, "refresh_lock", then_login)
+    with pytest.raises(auth.AuthError) as refused:
+        auth.authed(client, store, "GET", "/me")
+    assert refused.value.revoked and logged_in
+    assert auth.authed(client, store, "GET", "/me")[0] == 200
 
 
 class CountingCondition(threading.Condition):
@@ -227,16 +326,23 @@ def test_a_401_on_an_unexpired_token_never_waits_for_the_lock(parts, backend, mo
 
 
 def test_a_refused_refresh_signs_out_once(parts, backend, monkeypatch):
-    client, store, _ = expired(parts, backend, monkeypatch)
+    keychain = Keychain(monkeypatch)
+    store, client, clock = credentials.KeychainStore(), parts[2]["client"], Clock()
+    store.save(parts[2]["store"].load())
+    holder = warm(monkeypatch, store, backend, clock)
+    holder.renew()
+    clock.now += 1000                           # expired: the Mac was suspended past its renewal
     backend.revoked = True                      # the session was ended elsewhere
     with pytest.raises(auth.AuthError) as refused:
         auth.authed(client, store, "GET", "/me")
     assert refused.value.revoked
-    assert store.load() is None
+    assert not keychain.items
+    io = (keychain.reads, keychain.writes)
     with pytest.raises(auth.AuthError) as again:
         auth.authed(client, store, "GET", "/me")
     assert again.value.code == "not_logged_in"
-    assert refreshes(backend) == 1               # signed out once: nothing more is sent
+    assert refreshes(backend) == 1               # signed out once: nothing more is sent...
+    assert (keychain.reads, keychain.writes) == io       # ... or read
 
 
 def test_a_login_elsewhere_replaces_the_sign_in_while_the_old_one_is_cached(parts, backend, monkeypatch):

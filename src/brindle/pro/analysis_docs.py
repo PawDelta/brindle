@@ -319,8 +319,15 @@ def on_merged(repo_root: str, docs: list[Doc]) -> None:
 def _session(client=None, store=None):
     from brindle.pro import auth, credentials
 
-    # The daemon's warm sign-in holds it in memory: its requests read no keychain.
-    store = auth.warm_view(store or credentials.default_store())
+    store = store or credentials.default_store()
+    # The daemon's warm sign-in holds it in memory: its requests read no keychain, and the
+    # client, entitlement and token all come from the one sign-in pinned here.
+    pinned = auth.warm_pin(store)
+    if pinned is not None:
+        store, creds = pinned
+        if client is None:
+            client = auth.Client(creds.get("base_url"), auth.UrllibTransport(timeout=SEND_WAIT))
+        return client, store
     if client is None:
         creds = store.load() or {}
         client = auth.Client(creds.get("base_url"), auth.UrllibTransport(timeout=SEND_WAIT))
