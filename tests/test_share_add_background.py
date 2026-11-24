@@ -1,20 +1,17 @@
 """The share panel's Add answers at once (202) and the daemon lands the invite
-in the background (brindle/pro/share_invites.py): only once that answer is
-delivered, as the account that asked; offline it waits and tries again, a
-restart resumes it, and a refusal stays on the row until the person asks again."""
-
-import asyncio
-import json
+in the background (brindle/pro/share_invites.py): only once the app sends back
+the answer's receipt, as the account that asked; offline it waits and tries
+again, a restart resumes it, and a refusal stays until the person asks again."""
 
 import pytest
 
 from brindle.db import DB
-from brindle.daemon import lifecycle, routes_visuals
+from brindle.daemon import lifecycle
 from brindle.pro import auth, share_invites
 from brindle.pro import shared_docs as sd
-from pro_fixtures import backend, pro_env, signing_key  # noqa: F401
+from pro_fixtures import backend, claims, pro_env, sign, signing_key  # noqa: F401
 from test_plans import AUTH, TOKEN, session  # noqa: F401
-from test_share_panel_access import panel, person  # noqa: F401
+from test_share_panel_access import acked, add_person, panel, person  # noqa: F401
 from test_shared_plan_docs import BASE, parts, sent  # noqa: F401
 
 ANN = {"sub": "ann", "access": "comment"}
@@ -59,38 +56,56 @@ def queued(app, pid):
     return {p["sub"]: p for p in app.get(f"/v1/plans/{pid}/invites").json()["people"]}
 
 
-def test_an_invite_is_sent_only_once_its_answer_is_delivered(panel, backend, db):
-    """Through the real response: while its write is blocked the watch sends
-    nothing; a cancelled write puts it back; a delivered one lands it."""
+def receipt(got):
+    return got.json()["invite"]["receipt"]
+
+
+def ack(app, pid, *receipts):
+    assert app.post(f"/v1/plans/{pid}/invites/receipts", json={"receipts": list(receipts)}).status_code == 200
+
+
+def test_a_change_is_sent_only_once_the_app_has_its_answer(panel, backend, db):
+    """Through the daemon's own routes: a 202 the app never acknowledged
+    (it went away, or the request was cancelled) is never sent, by the watch
+    either; its receipt sends it; and a restart lets go of one never acknowledged."""
     pid, library, app = panel
+    got = app.post(f"/v1/plans/{pid}/people", json=ANN)
+    assert got.status_code == 202 and got.json()["invite"]["state"] == "sharing"
+    assert queued(app, pid)["ann"]["receipt"] == receipt(got)               # shown, and still to be acknowledged
+    lifecycle._send_share_invites()                                         # the watch, meanwhile
+    assert not [k for k, _, _ in backend.calls if "analysis-docs" in k]
 
-    async def answer(release):
-        response = routes_visuals.plan_person_invite(db, {"id": pid}, dict(ANN))
-        assert response.status_code == 202 and json.loads(response.body)["invite"]["state"] == "sharing"
-        entered, go = asyncio.Event(), asyncio.Event()
-
-        async def send(message):
-            if message["type"] == "http.response.body":
-                entered.set()
-                await go.wait()
-
-        task = asyncio.create_task(response({"type": "http"}, None, send))
-        await entered.wait()
-        assert queued(app, pid)["ann"]["state"] == "sharing"             # the person sees it at once
-        assert await asyncio.to_thread(lifecycle._send_share_invites) is None   # the watch, meanwhile
-        assert not [k for k, _, _ in backend.calls if "analysis-docs" in k]
-        if release:
-            go.set()
-            await task
-        else:
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-
-    asyncio.run(answer(release=False))
-    assert share_invites.pending(db, pid) == [] and not sent(backend, "POST /analysis-docs")   # never told: undone
-    asyncio.run(answer(release=True))
+    ack(app, pid, receipt(got))
     assert person(app, pid, "ann")["access"] == "comment" and share_invites.pending(db, pid) == []
+
+    # Bo's answer never reached the app before that daemon stopped: the next one lets it go.
+    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "bo", "access": "view"}).status_code == 202
+    db.conn.execute("UPDATE plan_invites SET boot='earlier' WHERE sub='bo'")
+    lifecycle._send_share_invites()
+    assert person(app, pid, "bo") is None and share_invites.pending(db, pid) == []
+    assert [f["scope"]["id"] for f in sent(backend, f"POST {BASE}/share")] == ["ann"]
+
+
+def test_overlapping_answers_send_each_acknowledged_change_once(panel, backend, db):
+    """A then B for the same person, both out; A's answer arrives, B's never does:
+    A is sent. A receipt for a change already superseded is let go."""
+    pid, library, app = panel
+    first = app.post(f"/v1/plans/{pid}/people", json=ANN)
+    second = app.put(f"/v1/plans/{pid}/people/ann", json={"access": "edit"})
+    assert second.status_code == 202
+    assert queued(app, pid)["ann"]["access"] == "edit"                      # the newest is what shows
+    shares = lambda: [f["access"] for f in sent(backend, f"POST {BASE}/share")]   # noqa: E731
+    ack(app, pid, receipt(first))
+    assert shares() == ["comment"]                                          # A, though B is newer and unanswered
+    ack(app, pid, receipt(second))
+    assert shares() == ["comment", "edit"] and share_invites.pending(db, pid) == []
+    assert person(app, pid, "ann")["access"] == "edit"
+
+    # B' then a late receipt for an older change: nothing older is sent over the newer one.
+    newer = app.put(f"/v1/plans/{pid}/people/ann", json={"access": "view"})
+    assert newer.status_code == 200                                         # landed: written straight to the Library
+    ack(app, pid, receipt(first))
+    assert person(app, pid, "ann")["access"] == "view"
 
 
 @pytest.mark.variant("an invite sent again before its backoff is due (due_at ignored) hammers an offline Library; "
@@ -98,7 +113,7 @@ def test_an_invite_is_sent_only_once_its_answer_is_delivered(panel, backend, db)
 def test_an_offline_invite_lands_once_the_library_is_back(panel, backend, db, clock):
     pid, library, app = panel
     back = offline(backend, library, db)
-    assert app.post(f"/v1/plans/{pid}/people", json=ANN).status_code == 202
+    assert add_person(app, pid, ANN).status_code == 202
     assert person(app, pid, "ann")["state"] == "sharing"                    # still on its way, not failed
     tried = len(sent(backend, "POST /analysis-docs"))
 
@@ -112,40 +127,60 @@ def test_an_offline_invite_lands_once_the_library_is_back(panel, backend, db, cl
     assert share_invites.pending(db, pid) == []
 
 
-def test_an_invite_is_never_sent_as_another_account(panel, backend, db):
+@pytest.mark.parametrize("when", [
+    pytest.param("before", marks=pytest.mark.variant("signed in as someone else before the send starts")),
+    pytest.param("during", marks=pytest.mark.variant("switched after the send's check, before its first Library call")),
+])
+def test_an_invite_is_never_sent_as_another_account(panel, parts, backend, db, monkeypatch, when):
     pid, library, app = panel
-    response = routes_visuals.plan_person_invite(db, {"id": pid}, dict(ANN))
-    library.actor = "someone_else"                  # signed in to another account before it went out
+    store = parts[2]["store"]
 
-    async def written(message):
-        pass
+    def switch():
+        store.save({**store.load(), "entitlement": sign(backend.key, claims(sub="someone_else",
+                                                                            features=["analysis_docs", "analysis_docs_team"]))})
 
-    asyncio.run(response({"type": "http"}, None, written))
+    got = app.post(f"/v1/plans/{pid}/people", json=ANN)
+    if when == "before":
+        switch()
+    else:
+        checked = sd._require_team
+
+        def then_switch(s):
+            ent = checked(s)
+            switch()                                # once the send has checked, before it asks the Library
+            return ent
+
+        monkeypatch.setattr(sd, "_require_team", then_switch)
+    ack(app, pid, receipt(got))
     assert not [k for k, _, _ in backend.calls if "analysis-docs" in k]     # nothing uploaded or granted
-    assert sd.link(db, pid) is None
     assert queued(app, pid)["ann"]["state"] == "failed"
 
 
-def test_a_restart_resumes_a_pending_invite_and_undoes_one_never_answered(panel, backend, db, clock):
+def test_a_change_to_a_pending_person_is_only_the_asking_accounts(panel, db):
+    pid, library, app = panel
+    assert app.post(f"/v1/plans/{pid}/people", json=ANN).status_code == 202
+    library.actor = "someone_else"                  # the require_entitlement the panel fixture reads
+    assert app.put(f"/v1/plans/{pid}/people/ann", json={"access": "edit"}).status_code == 409
+    assert app.delete(f"/v1/plans/{pid}/people/ann").status_code == 409
+    assert queued(app, pid)["ann"]["access"] == "comment"
+
+
+def test_a_restart_resumes_an_acknowledged_invite(panel, backend, db, clock):
     pid, library, app = panel
     back = offline(backend, library, db)
-    assert app.post(f"/v1/plans/{pid}/people", json=ANN).status_code == 202
-    # Bo's request was still being answered when that daemon stopped: no answer can come now.
-    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "bo", "access": "view"}).status_code == 202
-    db.conn.execute("UPDATE plan_invites SET ready=0, boot='earlier', undo='\"new\"' WHERE sub='bo'")
+    assert add_person(app, pid, ANN).status_code == 202
     back()
     share_invites._locks.clear()                    # a new daemon: only the database remembers it
     clock[0] += share_invites.backoff(1)
     lifecycle._send_share_invites()                 # its watch's first tick
     assert person(app, pid, "ann")["access"] == "comment"
-    assert person(app, pid, "bo") is None and share_invites.pending(db, pid) == []
-    assert [f["scope"]["id"] for f in sent(backend, f"POST {BASE}/share")] == ["ann"]
+    assert share_invites.pending(db, pid) == []
 
 
 def test_a_refusal_is_shown_and_not_sent_again_until_asked(panel, backend, db, clock):
     pid, library, app = panel
     library.create_status = 403
-    assert app.post(f"/v1/plans/{pid}/people", json=ANN).status_code == 202
+    assert add_person(app, pid, ANN).status_code == 202
     ann = person(app, pid, "ann")
     assert ann["state"] == "failed" and ann["error"]
 
@@ -158,7 +193,7 @@ def test_a_refusal_is_shown_and_not_sent_again_until_asked(panel, backend, db, c
     assert queued(app, pid)["ann"]["state"] == "failed"
 
     library.create_status = 200
-    assert app.post(f"/v1/plans/{pid}/people", json=ANN).status_code == 202     # Try again
+    assert add_person(app, pid, ANN).status_code == 202                     # Try again
     assert person(app, pid, "ann")["access"] == "comment"
     assert share_invites.pending(db, pid) == []
 
@@ -166,9 +201,9 @@ def test_a_refusal_is_shown_and_not_sent_again_until_asked(panel, backend, db, c
 def test_changes_while_an_invite_is_out_land_after_it_in_order(panel, backend, db, clock):
     pid, library, app = panel
     back = offline(backend, library, db)
-    assert app.post(f"/v1/plans/{pid}/people", json=ANN).status_code == 202
-    assert app.put(f"/v1/plans/{pid}/people/ann", json={"access": "edit"}).status_code == 202
-    assert app.put(f"/v1/plans/{pid}/people/ann/sign-off", json={"must": True}).status_code == 202
+    assert add_person(app, pid, ANN).status_code == 202
+    assert acked(app, pid, app.put(f"/v1/plans/{pid}/people/ann", json={"access": "edit"})).status_code == 202
+    assert acked(app, pid, app.put(f"/v1/plans/{pid}/people/ann/sign-off", json={"must": True})).status_code == 202
     back()
     clock[0] += share_invites.BACKOFF_MOST
     share_invites.run(db)
@@ -177,8 +212,8 @@ def test_changes_while_an_invite_is_out_land_after_it_in_order(panel, backend, d
 
     # Stop sharing with someone whose invite may have landed (its answer lost): a removal, sent after it.
     lose_share_answers(backend)
-    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "bo", "access": "view"}).status_code == 202
-    assert app.delete(f"/v1/plans/{pid}/people/bo").status_code == 202
+    assert add_person(app, pid, {"sub": "bo", "access": "view"}).status_code == 202
+    assert acked(app, pid, app.delete(f"/v1/plans/{pid}/people/bo")).status_code == 202
     assert person(app, pid, "bo") is None                                   # shown as gone at once
     clock[0] += share_invites.BACKOFF_MOST
     share_invites.run(db)
@@ -186,11 +221,11 @@ def test_changes_while_an_invite_is_out_land_after_it_in_order(panel, backend, d
     assert person(app, pid, "bo") is None and share_invites.pending(db, pid) == []
 
 
-@pytest.mark.variant("the race the seq guard exists for: a newer change committed while the older send is out; "
-                     "deleting the row on that answer by sub alone would drop the change unsent")
+@pytest.mark.variant("the race the id guard exists for: a newer change acknowledged while the older send is out; "
+                     "deleting the person's rows on that answer would drop the change unsent")
 def test_a_change_made_while_the_invite_is_being_sent_goes_out_after_it(panel, backend, db, clock):
     pid, library, app = panel
-    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "bo", "access": "view"}).status_code == 202
+    assert add_person(app, pid, {"sub": "bo", "access": "view"}).status_code == 202
     share = backend.routes[f"POST {BASE}/share"]
 
     def meanwhile(form, headers):
@@ -198,30 +233,30 @@ def test_a_change_made_while_the_invite_is_being_sent_goes_out_after_it(panel, b
         if form["scope"]["id"] == "ann" and form["access"] == "comment":
             own = DB()
             row = share_invites.change(own, pid, "ann", "access", "edit")
-            own.conn.execute("UPDATE plan_invites SET ready=1 WHERE seq=?", (row["seq"],))     # its answer delivered
+            share_invites.ack(own, pid, [row["receipt"]])
             own.conn.close()
         return share(form, headers)
 
     backend.routes[f"POST {BASE}/share"] = meanwhile
-    assert app.post(f"/v1/plans/{pid}/people", json=ANN).status_code == 202
+    assert add_person(app, pid, ANN).status_code == 202
     assert [f["access"] for f in sent(backend, f"POST {BASE}/share") if f["scope"]["id"] == "ann"] == ["comment", "edit"]
     assert person(app, pid, "ann")["access"] == "edit" and share_invites.pending(db, pid) == []
 
 
 def test_try_again_on_a_refused_removal_removes_and_never_grants(panel, backend, db, clock):
     pid, library, app = panel
-    assert app.post(f"/v1/plans/{pid}/people", json=ANN).status_code == 202       # shared, so removals reach it
+    assert add_person(app, pid, ANN).status_code == 202                     # shared, so removals reach it
     restore = lose_share_answers(backend)
-    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "bo", "access": "view"}).status_code == 202
+    assert add_person(app, pid, {"sub": "bo", "access": "view"}).status_code == 202
     restore()
     revoke = backend.routes[f"DELETE {BASE}/share/user/bo"]
     backend.routes[f"DELETE {BASE}/share/user/bo"] = lambda f, h: (403, {"error": "forbidden"})
-    assert app.delete(f"/v1/plans/{pid}/people/bo").status_code == 202
+    assert acked(app, pid, app.delete(f"/v1/plans/{pid}/people/bo")).status_code == 202
     bo = queued(app, pid)["bo"]
     assert (bo["op"], bo["state"]) == ("remove", "failed")
     assert person(app, pid, "bo")["state"] == "failed"                     # still listed: they still have it
 
     backend.routes[f"DELETE {BASE}/share/user/bo"] = revoke
-    assert app.delete(f"/v1/plans/{pid}/people/bo").status_code == 202    # Try again: the removal
+    assert acked(app, pid, app.delete(f"/v1/plans/{pid}/people/bo")).status_code == 202     # Try again: the removal
     assert person(app, pid, "bo") is None and share_invites.pending(db, pid) == []
     assert [f["scope"]["id"] for f in sent(backend, f"POST {BASE}/share")] == ["ann", "bo"]   # never granted again

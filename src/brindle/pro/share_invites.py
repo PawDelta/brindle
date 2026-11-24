@@ -1,35 +1,38 @@
 """Giving a person a plan without waiting for the Library (the share panel's
-Add): the invite is written to ``plan_invites`` and answered at once (202), and
+Add): the change is written to ``plan_invites`` and answered at once (202), and
 the daemon lands it in the background with share_access.plan_write.
 
-- Sent only once the answer is delivered: a row a request writes is not
-  ``ready`` until that request's 202 has been written to the app
-  (``delivered``). A write that fails or is cancelled puts the row back as it
-  was (``undeliver``), and a row a daemon left unconfirmed when it stopped is
-  put back by the next one (``run``), so nothing is shared that the person was
-  never told of, and nothing waits for a confirmation that can't come.
-- Sent as the account that asked: the row keeps it (``owner``, ``org_id``),
-  and a send under any other sign-in is refused, never made.
+- Sent only once the app has the answer: each change has a ``receipt`` the
+  202 carries, and it is sent only after the app sends that receipt back
+  (``ack``). HTTP can't say whether an answer reached the app (a server
+  writes to a closed connection without an error), so the app's own receipt
+  is the confirmation. One it never got (the app went away, the request was
+  cancelled) is never sent: it stays unacknowledged, shown with its receipt
+  when the panel next reads it (which then acknowledges it, the person having
+  now seen it), and the next daemon drops the ones an earlier one left.
+- One row per change, ``id`` never reused: a person's newest row is what the
+  panel shows, and their newest acknowledged row is what is sent, so an
+  acknowledged change is never held up by a newer one that isn't, and an
+  answer to an older send never touches a newer change.
+- Sent as the account that asked: each row keeps it (``owner``, ``org_id``),
+  and the send runs with a credential store bound to it (``_Bound``): if a
+  different account is signed in at any read of the credentials, a refresh
+  included, nothing more is sent. A change to a pending person is made only
+  by the account their change belongs to.
 - Safe to send again: the plan keeps its one Library doc (shared_docs.ensure_doc
-  finds the one an earlier create left), and a repeated invite for the same
-  person updates their row, never a second one.
+  finds the one an earlier create left), and the Library's share is per person.
 - While the Library can't be reached, or is busy, it is tried again later with
   a growing wait (``due_at``), up to MOST_TRIES; a refusal is kept on the row
   (``failed``) until the person asks again (Try again).
-- A change to the same person while their invite is out (access, sign-off,
-  Stop sharing) goes into the same row, with a new ``seq``: one plan's rows are
-  sent one at a time under its lock, and an answer to an older ``seq`` never
-  drops the newer change, so the changes land in the order they were made.
 - The rows survive a daemon restart: its watch (daemon.lifecycle) runs the due
   ones on every tick.
 
-The Library's own access list stays the truth once an invite lands: the row
-is gone then, and ``merge`` only adds what is still on its way.
+The Library's own access list stays the truth once a change lands: its rows
+are gone then, and ``merge`` only adds what is still on its way.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import secrets
 import sqlite3
@@ -50,16 +53,21 @@ MOST_TRIES = 20             # about an hour and a quarter of no answer: then it 
 
 clock = time.time            # tests drive it
 
-BOOT = secrets.token_hex(8)  # this daemon: rows it wrote and hasn't confirmed are its own requests' still
-_UNDONE = ("op", "access", "sign_off", "tries", "due_at", "error", "failed", "owner", "org_id", "ready", "boot", "undo")
+BOOT = secrets.token_hex(8)  # this daemon: its own unacknowledged rows may still be acknowledged
 
 _locks: dict[str, threading.Lock] = {}
 _locks_lock = threading.Lock()
 
 
+class AccountChanged(ServiceError):
+    def __init__(self) -> None:
+        super().__init__("account_changed", "brindle is signed in to another account than the one that asked: "
+                         "add them again to share it from this one", 409)
+
+
 @contextmanager
 def held(plan_id: str) -> Iterator[None]:
-    """One plan's invites (and Stop sharing with everyone) one at a time."""
+    """One plan's sends (and Stop sharing with everyone) one at a time."""
     with _locks_lock:
         lock = _locks.setdefault(plan_id, threading.Lock())
     with lock:
@@ -70,24 +78,28 @@ def backoff(tries: int) -> float:
     return min(BACKOFF_MOST, BACKOFF_FIRST * 2 ** max(0, tries - 1))
 
 
-def _row(c: sqlite3.Connection, plan_id: str, sub: str) -> dict | None:
-    row = c.execute("SELECT * FROM plan_invites WHERE plan_id=? AND sub=?", (plan_id, sub)).fetchone()
+def _newest(c: sqlite3.Connection, plan_id: str, sub: str) -> dict | None:
+    row = c.execute("SELECT * FROM plan_invites WHERE plan_id=? AND sub=? ORDER BY id DESC LIMIT 1",
+                    (plan_id, sub)).fetchone()
     return None if row is None else dict(row)
 
 
 def dto(row: dict) -> dict:
-    """The row as the access list shows a person: ``op`` invite or remove;
-    ``state`` sharing or removing (still being sent), or failed (refused:
-    ``error`` says why)."""
+    """A person's newest change as the panel shows it: ``op`` invite or
+    remove; ``state`` sharing or removing (on its way), or failed (refused:
+    ``error`` says why); ``receipt`` while the app hasn't acknowledged it."""
     state = "failed" if row["failed"] else "removing" if row["op"] == "remove" else "sharing"
     return {"sub": row["sub"], "name": None, "access": row["access"],
             "sign_off": "required" if row["sign_off"] else None, "op": row["op"], "state": state,
-            "error": row["failed"] or row["error"]}
+            "error": row["failed"] or row["error"], "receipt": None if row["acked"] else row["receipt"]}
 
 
 def pending(db: DB, plan_id: str) -> list[dict]:
+    """Each person's newest change on the plan, in the order they were first made."""
     return [dict(r) for r in db.conn.execute(
-        "SELECT * FROM plan_invites WHERE plan_id=? ORDER BY created_at, sub", (plan_id,))]
+        "SELECT * FROM plan_invites p WHERE plan_id=? AND id=(SELECT MAX(id) FROM plan_invites q"
+        " WHERE q.plan_id=p.plan_id AND q.sub=p.sub) ORDER BY (SELECT MIN(id) FROM plan_invites q"
+        " WHERE q.plan_id=p.plan_id AND q.sub=p.sub)", (plan_id,))]
 
 
 def merge(access: dict, rows: list[dict]) -> dict:
@@ -96,7 +108,7 @@ def merge(access: dict, rows: list[dict]) -> dict:
     removed is left out, unless that removal was refused."""
     people = {p["sub"]: p for p in access.get("people") or []}
     for row in rows:
-        shown = dto(row)
+        shown = {k: v for k, v in dto(row).items() if k != "receipt"}
         if row["op"] == "remove" and not row["failed"]:
             people.pop(row["sub"], None)
             continue
@@ -111,6 +123,17 @@ def merge(access: dict, rows: list[dict]) -> dict:
 # -- the routes' side: written at once ----------------------------------------------------
 
 
+def _claims(creds: dict | None) -> tuple[str, str | None] | None:
+    from brindle.pro import license
+
+    try:
+        claims = license.verify_signed((creds or {}).get("entitlement") or "", typ=license.TYP,
+                                       token_use=license.TOKEN_USE)
+    except license.LicenseError:
+        return None
+    return claims.get("sub"), claims.get("org_id")
+
+
 def _identity(store=None) -> tuple[str, str | None]:
     """The signed-in account and org, from the entitlement verified on this Mac (nothing is sent)."""
     from brindle.pro import analysis_docs as ad
@@ -121,17 +144,19 @@ def _identity(store=None) -> tuple[str, str | None]:
     return ent.sub, ent.org_id
 
 
-def _unconfirmed(old: dict | None) -> tuple[int, str, str]:
-    """ready, boot and undo for a row a request is changing from ``old``."""
-    undo = "new" if old is None else {k: old[k] for k in _UNDONE}
-    return 0, BOOT, json.dumps(undo)
+def _insert(c: sqlite3.Connection, plan_id: str, sub: str, op: str, access: str, sign_off: int,
+            owner: str, org_id: str | None) -> dict:
+    now = clock()
+    c.execute("INSERT INTO plan_invites (plan_id, sub, receipt, boot, op, access, sign_off, owner, org_id, due_at,"
+              " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              (plan_id, sub, secrets.token_urlsafe(16), BOOT, op, access, sign_off, owner, org_id, now, now))
+    return _newest(c, plan_id, sub)
 
 
 def record(db: DB, plan_id: str, sub: Any, access: Any, sign_off: Any, *, store=None) -> dict:
-    """Write one person's invite to send, as the signed-in account; a second
-    for the same person replaces the first and asks again (Try again).
-    Refused here, before anything is written, when the request itself is
-    wrong. The row, not ready until the answer is delivered."""
+    """One person's invite to send, as the signed-in account; a second for
+    the same person supersedes the first once acknowledged (Try again).
+    Refused here, before anything is written, when the request itself is wrong."""
     from brindle import plan_docs
     from brindle.pro import share_access as sa
     from brindle.pro import shared_docs as sd
@@ -141,93 +166,113 @@ def record(db: DB, plan_id: str, sub: Any, access: Any, sign_off: Any, *, store=
         raise ServiceError("invalid", "sign_off is true or false", 400)
     sd._review_open(plan_docs._plan(db, plan_id))
     owner, org_id = _identity(store)
-    now = clock()
     with db.tx() as c:
-        old = _row(c, plan_id, sub)
-        ready, boot, undo = _unconfirmed(old)
-        if old is None:
-            c.execute("INSERT INTO plan_invites (plan_id, sub, access, sign_off, due_at, owner, org_id, ready, boot,"
-                      " undo, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                      (plan_id, sub, access, int(sign_off), now, owner, org_id, ready, boot, undo, now))
-        else:
-            c.execute("UPDATE plan_invites SET op='invite', access=?, sign_off=?, seq=seq+1, tries=0, due_at=?,"
-                      " error=NULL, failed=NULL, owner=?, org_id=?, ready=?, boot=?, undo=? WHERE plan_id=? AND sub=?",
-                      (access, int(sign_off), now, owner, org_id, ready, boot, undo, plan_id, sub))
-        return _row(c, plan_id, sub)
+        return _insert(c, plan_id, sub, "invite", access, int(sign_off), owner, org_id)
 
 
-def change(db: DB, plan_id: str, sub: str, field: str, value: Any) -> dict | None:
+def _mine(old: dict, store) -> None:
+    if _identity(store) != (old["owner"], old["org_id"]):
+        raise AccountChanged()
+
+
+def change(db: DB, plan_id: str, sub: str, field: str, value: Any, *, store=None) -> dict | None:
     """A change to a person whose invite is still out (``field`` access or
-    sign_off) goes into that invite, sent after it; None when nothing is out
-    for them (the route writes it now)."""
+    sign_off), sent after it; None when nothing is out for them (the route
+    writes it now)."""
     from brindle.pro import share_access as sa
 
     if field == "access":
         value = sa._access(value)
     elif not isinstance(value, bool):
         raise ServiceError("invalid", "must is true or false", 400)
-    else:
-        value = int(value)
+    old = _newest(db.conn, plan_id, sub)
+    if old is None:
+        return None
+    _mine(old, store)
     with db.tx() as c:
-        old = _row(c, plan_id, sub)
+        old = _newest(c, plan_id, sub)
         if old is None:
-            return None
+            return None             # it landed meanwhile: the route writes it now
         if old["op"] == "remove":
             raise ServiceError("conflict", "they're being removed from this plan", 409)
-        ready, boot, undo = _unconfirmed(old)
-        c.execute(f"UPDATE plan_invites SET {field}=?, seq=seq+1, tries=0, due_at=?, error=NULL, failed=NULL,"
-                  " ready=?, boot=?, undo=? WHERE plan_id=? AND sub=?",
-                  (value, clock(), ready, boot, undo, plan_id, sub))
-        return _row(c, plan_id, sub)
+        new = {**old, field: int(value) if field == "sign_off" else value}
+        return _insert(c, plan_id, sub, "invite", new["access"], new["sign_off"], old["owner"], old["org_id"])
 
 
-def withdraw(db: DB, plan_id: str, sub: str) -> dict | None:
+def withdraw(db: DB, plan_id: str, sub: str, *, store=None) -> dict | None:
     """Stop sharing with a person whose invite is still out: one never sent
-    is dropped here; one that may have landed becomes a removal, sent after
-    it (a refused removal is asked again). None when nothing is out for
-    them; ``{}`` when it was dropped; else the row now."""
+    is dropped here; one that may have landed is removed, sent after it (a
+    refused removal is asked again). None when nothing is out for them;
+    ``{}`` when it was dropped; else the removal's row."""
+    old = _newest(db.conn, plan_id, sub)
+    if old is None:
+        return None
+    _mine(old, store)
     with db.tx() as c:
-        old = _row(c, plan_id, sub)
+        old = _newest(c, plan_id, sub)
         if old is None:
             return None
-        if old["op"] == "invite" and not old["sent"]:
+        sent = c.execute("SELECT MAX(sent) FROM plan_invites WHERE plan_id=? AND sub=?", (plan_id, sub)).fetchone()[0]
+        if old["op"] == "invite" and not sent:
             c.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=?", (plan_id, sub))
             return {}
-        ready, boot, undo = _unconfirmed(old)
-        c.execute("UPDATE plan_invites SET op='remove', seq=seq+1, tries=0, due_at=?, error=NULL, failed=NULL,"
-                  " ready=?, boot=?, undo=? WHERE plan_id=? AND sub=?", (clock(), ready, boot, undo, plan_id, sub))
-        return _row(c, plan_id, sub)
+        return _insert(c, plan_id, sub, "remove", old["access"], old["sign_off"], old["owner"], old["org_id"])
 
 
 def dismiss(db: DB, plan_id: str, sub: str) -> None:
     """Let a refused change go: the Library keeps what it has."""
     with db.tx() as c:
-        if not c.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=? AND failed IS NOT NULL",
-                         (plan_id, sub)).rowcount:
+        old = _newest(c, plan_id, sub)
+        if old is None or not old["failed"]:
             raise ServiceError("not_found", "nothing refused to dismiss for them", 404)
+        c.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=?", (plan_id, sub))
+
+
+def ack(db: DB, plan_id: str, receipts: Any) -> int:
+    """The app has the answers that named ``receipts``: those changes may be
+    sent now, each superseding the person's older ones. A receipt for a
+    change already superseded, landed or dropped is let go. How many were new."""
+    if not isinstance(receipts, list) or not all(isinstance(r, str) for r in receipts):
+        raise ServiceError("invalid", "receipts is a list of the receipts the app was given", 400)
+    done = 0
+    with db.tx() as c:
+        for receipt in receipts:
+            row = c.execute("SELECT * FROM plan_invites WHERE plan_id=? AND receipt=? AND acked=0",
+                            (plan_id, receipt)).fetchone()
+            if row is None:
+                continue
+            older = c.execute("SELECT MAX(sent) FROM plan_invites WHERE plan_id=? AND sub=? AND id<?",
+                              (plan_id, row["sub"], row["id"])).fetchone()[0]
+            c.execute("UPDATE plan_invites SET acked=1, sent=MAX(sent, ?) WHERE id=?", (older or 0, row["id"]))
+            c.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=? AND id<?", (plan_id, row["sub"], row["id"]))
+            done += 1
+    return done
 
 
 def drop_all(db: DB, plan_id: str) -> None:
     """Stop sharing with everyone: nothing still out is sent after it (hold
-    ``held(plan_id)``, so an invite out now lands first and is revoked with the rest)."""
+    ``held(plan_id)``, so a change out now lands first and is undone with the rest)."""
     db.conn.execute("DELETE FROM plan_invites WHERE plan_id=?", (plan_id,))
 
 
-# -- the answer: delivered, or not --------------------------------------------------------
+def _drop_earlier(db: DB) -> None:
+    """Changes an earlier daemon wrote that the app never acknowledged: no
+    answer naming them can reach it now, so they are let go."""
+    db.conn.execute("DELETE FROM plan_invites WHERE acked=0 AND boot!=?", (BOOT,))
 
 
-def delivered(plan_id: str, sub: str, seq: int) -> None:
-    """The request that wrote ``seq`` has had its answer written: the row may
-    be sent now. Sends what is due on the plan, with no request deadline;
-    a failure is only logged, the row keeps it."""
+# -- the daemon's side: sent in the background --------------------------------------------
+
+
+def kick(plan_id: str) -> None:
+    """After an acknowledgement's answer: send what is due on the plan now,
+    with no request deadline. A failure is only logged, the row keeps it."""
     from brindle import spawn
 
     try:
         with spawn.after_response():
             db = DB()
             try:
-                db.conn.execute("UPDATE plan_invites SET ready=1, boot=NULL, undo=NULL"
-                                " WHERE plan_id=? AND sub=? AND seq=? AND ready=0", (plan_id, sub, seq))
                 run(db, plan_id)
             finally:
                 db.conn.close()
@@ -235,49 +280,18 @@ def delivered(plan_id: str, sub: str, seq: int) -> None:
         log.debug("brindle: couldn't send a plan's invites", exc_info=True)
 
 
-def undeliver(plan_id: str, sub: str, seq: int) -> None:
-    """The answer to the request that wrote ``seq`` was never written (the
-    app went away, or the request was cancelled): put the row back as it was."""
-    db = DB()
-    try:
-        with db.tx() as c:
-            row = c.execute("SELECT * FROM plan_invites WHERE plan_id=? AND sub=? AND seq=? AND ready=0",
-                            (plan_id, sub, seq)).fetchone()
-            if row is not None:
-                _undo(c, dict(row))
-    finally:
-        db.conn.close()
-
-
-def _undo(c: sqlite3.Connection, row: dict) -> None:
-    before = json.loads(row["undo"] or '"new"')
-    key = (row["plan_id"], row["sub"], row["seq"])
-    if before == "new":
-        c.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=? AND seq=?", key)
-        return
-    c.execute(f"UPDATE plan_invites SET {', '.join(f'{k}=?' for k in _UNDONE)}, seq=seq+1"
-              " WHERE plan_id=? AND sub=? AND seq=?", (*(before[k] for k in _UNDONE), *key))
-
-
-def _undo_earlier(db: DB) -> None:
-    """Rows an earlier daemon wrote whose answers it never confirmed: no
-    answer to them can come now, so each is put back."""
-    with db.tx() as c:
-        for row in c.execute("SELECT * FROM plan_invites WHERE ready=0 AND (boot IS NULL OR boot!=?)",
-                             (BOOT,)).fetchall():
-            _undo(c, dict(row))
-
-
-# -- the daemon's side: sent in the background --------------------------------------------
+_DUE = ("SELECT * FROM plan_invites p WHERE plan_id=? AND acked=1 AND failed IS NULL AND due_at<=?"
+        " AND id=(SELECT MAX(id) FROM plan_invites q WHERE q.plan_id=p.plan_id AND q.sub=p.sub AND q.acked=1)"
+        " ORDER BY id LIMIT 1")
 
 
 def run(db: DB, plan_id: str | None = None, *, now: float | None = None, client=None, store=None) -> int:
-    """Send the due invites, of ``plan_id`` or (the watch) every plan; how many landed."""
+    """Send the due changes, of ``plan_id`` or (the watch) every plan; how many landed."""
     now = clock() if now is None else now
     if plan_id is None:
-        _undo_earlier(db)
+        _drop_earlier(db)
     ids = [plan_id] if plan_id else [r[0] for r in db.conn.execute(
-        "SELECT DISTINCT plan_id FROM plan_invites WHERE ready=1 AND failed IS NULL AND due_at<=?", (now,))]
+        "SELECT DISTINCT plan_id FROM plan_invites WHERE acked=1 AND failed IS NULL AND due_at<=?", (now,))]
     landed = 0
     for pid in ids:
         with held(pid):
@@ -288,15 +302,12 @@ def run(db: DB, plan_id: str | None = None, *, now: float | None = None, client=
 def _run_plan(db: DB, plan_id: str, now: float, client, store) -> int:
     landed = 0
     while True:
-        row = db.conn.execute("SELECT * FROM plan_invites WHERE plan_id=? AND ready=1 AND failed IS NULL"
-                              " AND due_at<=? ORDER BY created_at, sub LIMIT 1", (plan_id, now)).fetchone()
+        row = db.conn.execute(_DUE, (plan_id, now)).fetchone()
         if row is None:
             return landed
         row = dict(row)
-        key = (plan_id, row["sub"], row["seq"])
-        with db.tx() as c:          # a change since the read is the next one to send
-            if not c.execute("UPDATE plan_invites SET tries=tries+1, sent=1 WHERE plan_id=? AND sub=? AND seq=?"
-                             " AND ready=1", key).rowcount:
+        with db.tx() as c:          # superseded since the read: the next one to send
+            if not c.execute("UPDATE plan_invites SET tries=tries+1, sent=1 WHERE id=?", (row["id"],)).rowcount:
                 continue
         try:
             _send(db, row, client, store)
@@ -304,16 +315,42 @@ def _run_plan(db: DB, plan_id: str, now: float, client, store) -> int:
             again, why = _outcome(e)
             tries = row["tries"] + 1
             if again and tries < MOST_TRIES:
-                db.conn.execute("UPDATE plan_invites SET error=?, due_at=? WHERE plan_id=? AND sub=? AND seq=?",
-                                (why, now + backoff(tries), *key))
+                db.conn.execute("UPDATE plan_invites SET error=?, due_at=? WHERE id=?",
+                                (why, now + backoff(tries), row["id"]))
                 _changed(db, plan_id)
-                return landed       # the Library isn't answering: the plan's other rows wait too
-            db.conn.execute("UPDATE plan_invites SET failed=?, error=NULL WHERE plan_id=? AND sub=? AND seq=?",
-                            (why, *key))
+                return landed       # the Library isn't answering: the plan's other changes wait too
+            db.conn.execute("UPDATE plan_invites SET failed=?, error=NULL WHERE id=?", (why, row["id"]))
         else:
             landed += 1
-            db.conn.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=? AND seq=?", key)
+            db.conn.execute("DELETE FROM plan_invites WHERE plan_id=? AND sub=? AND id<=?",
+                            (plan_id, row["sub"], row["id"]))
         _changed(db, plan_id)
+
+
+class _Bound:
+    """The credential store, as the account a change belongs to: every read,
+    and every write a refresh makes, first checks that it is still that
+    account (and org) signed in, and stops with AccountChanged when not."""
+
+    def __init__(self, store, owner: str, org_id: str | None) -> None:
+        self._store, self._who = store, (owner, org_id)
+
+    def _check(self, creds: dict | None) -> dict | None:
+        if _claims(creds) != self._who:
+            raise AccountChanged()
+        return creds
+
+    def load(self) -> dict | None:
+        return self._check(self._store.load())
+
+    def save(self, creds: dict) -> None:
+        self._check(self._store.load())             # nobody signed in as someone else meanwhile
+        if creds.get("entitlement"):
+            self._check(creds)                      # and the refresh is for this account
+        self._store.save(creds)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._store, name)
 
 
 def _send(db: DB, row: dict, client, store) -> None:
@@ -323,9 +360,9 @@ def _send(db: DB, row: dict, client, store) -> None:
 
     plan_id, sub = row["plan_id"], row["sub"]
     client, store = ad._session(client, store)
+    store = _Bound(store, row["owner"], row["org_id"])
     if _identity(store) != (row["owner"], row["org_id"]):
-        raise ServiceError("account_changed", "brindle is signed in to another account than the one that asked: "
-                           "add them again to share it from this one", 409)
+        raise AccountChanged()
     if row["op"] == "remove":
         share = sd.link(db, plan_id)
         if share is None or share["doc_id"] is None:
@@ -348,6 +385,11 @@ def _outcome(e: BaseException) -> tuple[bool, str]:
     from brindle.pro import analysis_docs as ad
     from brindle.pro import auth
 
+    cause: BaseException | None = e
+    while cause is not None:
+        if isinstance(cause, AccountChanged):     # however deep a credential read raised it
+            return False, cause.message
+        cause = cause.__cause__ or cause.__context__
     if isinstance(e, ServiceError):
         err, again = e, e.http_status in (429, 502, 503, 504)
     elif isinstance(e, (RuntimeError, auth.AuthError, keystore.KeychainReadBlocked)):

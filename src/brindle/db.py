@@ -1375,27 +1375,28 @@ CREATE TABLE IF NOT EXISTS plan_shares (
 -- A change to one person's share still on its way to the Library
 -- (brindle.pro.share_invites): written before the Library hears of it, so
 -- the share panel answers at once and the daemon lands it in the background,
--- after a restart too. One row per person: a later change replaces it.
+-- after a restart too. One row per change: a person's newest row is what
+-- the panel shows, and their newest acknowledged row is what is sent.
 CREATE TABLE IF NOT EXISTS plan_invites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,   -- never reused: an answer to an older send never matches a newer change
     plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
     sub TEXT NOT NULL,
+    receipt TEXT NOT NULL UNIQUE,        -- the app sends it back once it has the answer that named it
+    acked INTEGER NOT NULL DEFAULT 0,    -- 1 once it did: only then may it be sent
+    boot TEXT NOT NULL,                  -- the daemon that wrote it: an earlier one's unacknowledged rows are dropped
     op TEXT NOT NULL DEFAULT 'invite',   -- invite | remove
     access TEXT NOT NULL,                -- view | comment | edit
     sign_off INTEGER NOT NULL DEFAULT 0,
-    seq INTEGER NOT NULL DEFAULT 1,      -- bumped by each change, so a late answer never drops a newer one
-    tries INTEGER NOT NULL DEFAULT 0,    -- since the person last asked: the backoff and its limit
-    sent INTEGER NOT NULL DEFAULT 0,     -- 1 once any attempt reached for the Library
+    owner TEXT NOT NULL,                 -- the account that asked: sent only as that account
+    org_id TEXT,
+    tries INTEGER NOT NULL DEFAULT 0,    -- since the person asked: the backoff and its limit
+    sent INTEGER NOT NULL DEFAULT 0,     -- 1 once any attempt for this person reached for the Library
     due_at REAL NOT NULL,
     error TEXT,                          -- why the last attempt didn't land; it is still being tried
     failed TEXT,                         -- the Library refused it: shown with Try again, not sent until then
-    owner TEXT NOT NULL,                 -- the account that asked, checked again before anything is sent
-    org_id TEXT,
-    ready INTEGER NOT NULL DEFAULT 0,    -- 1 once the answer to the request that wrote it was delivered
-    boot TEXT,                           -- the daemon that wrote it, while not ready: an earlier one's is undone
-    undo TEXT,                           -- JSON: the row before that request ("new": none), while not ready
-    created_at REAL NOT NULL,
-    PRIMARY KEY (plan_id, sub)
+    created_at REAL NOT NULL
 );
+CREATE INDEX IF NOT EXISTS plan_invites_person ON plan_invites(plan_id, sub, id);
 -- The repo a Library folder was made for (brindle.pro.library_folders): the
 -- server keeps folders per person, team or org and refuses any other field,
 -- so which repo a folder belongs to is kept here, by the folder it names.

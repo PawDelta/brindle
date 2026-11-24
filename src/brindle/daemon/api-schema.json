@@ -16184,6 +16184,10 @@
       "path": "/v1/plans/{id}/invites"
     },
     {
+      "method": "POST",
+      "path": "/v1/plans/{id}/invites/receipts"
+    },
+    {
       "method": "DELETE",
       "path": "/v1/plans/{id}/invites/{sub}"
     },

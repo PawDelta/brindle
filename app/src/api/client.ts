@@ -914,7 +914,8 @@ export interface ShareAccess {
 }
 /* A change to one person the daemon sends in the background (brindle/pro/share_invites.py), kept on
    this Mac: an invite (op invite) or Stop sharing (op remove), still being sent (state sharing or
-   removing; `error`: why it hasn't landed yet) or refused (state failed; `error`: the reason). */
+   removing; `error`: why it hasn't landed yet) or refused (state failed; `error`: the reason).
+   `receipt`: until the app sends it back (ackPlanInvites), the daemon doesn't send the change. */
 export interface ShareQueued {
   sub: string;
   name: null;
@@ -923,6 +924,7 @@ export interface ShareQueued {
   op: "invite" | "remove";
   state: "sharing" | "removing" | "failed";
   error: string | null;
+  receipt: string | null;
 }
 
 export interface DesignWorkItems {
@@ -2476,6 +2478,11 @@ export class DaemonClient {
   /* The changes to people still on their way to the Library, read from this Mac alone. */
   planInvites(id: string) {
     return this.get<{ people: ShareQueued[] }>(`/plans/${encodeURIComponent(id)}/invites`);
+  }
+
+  /* The app has the answers that named these receipts: the daemon may send those changes now. */
+  ackPlanInvites(id: string, receipts: string[]) {
+    return this.post<{ acknowledged: number }>(`/plans/${encodeURIComponent(id)}/invites/receipts`, { receipts });
   }
 
   /* Let a refused change to one person go: the Library keeps what it has. */

@@ -45,6 +45,7 @@ export function planSource(client: PlansClient & PlanDocClient & Partial<PlanSha
       shareScope: client.sharePlan && ((scope) => client.sharePlan!(id, scope)),
       stopAll: client.unsharePlan && (() => client.unsharePlan!(id)),
       invites: client.planInvites && (() => client.planInvites!(id)),
+      ack: client.ackPlanInvites && ((receipts) => client.ackPlanInvites!(id, receipts)),
       dismiss: client.dismissPlanInvite && ((sub) => client.dismissPlanInvite!(id, sub)),
     } : undefined,
     history: client.planHistory && client.planRevisionChanges ? {

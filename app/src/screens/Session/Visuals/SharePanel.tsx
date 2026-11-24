@@ -33,6 +33,8 @@ export interface SharePeopleTarget {
   /* The author's plan only: the changes still being sent, from this Mac (shown while the Library
      can't be reached), and letting a refused one go. */
   invites?(): Promise<{ people: ShareQueued[] }>;
+  /* The panel has these answers: the daemon sends a change only once its receipt comes back. */
+  ack?(receipts: string[]): Promise<unknown>;
   dismiss?(sub: string): Promise<Plan>;
 }
 type Answer = Plan & { invite?: ShareQueued };
@@ -110,6 +112,11 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const latest = useRef({ target, writes, onBusy, onStopAll });
   latest.current = { target, writes, onBusy, onStopAll };
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; accessGeneration.current++; searchGeneration.current++; invitesGeneration.current++; }; }, []);
+  // The daemon sends a change only once its answer reached the panel: each one it shows is sent back.
+  const receive = (rows: ShareQueued[]) => {
+    const receipts = rows.map((q) => q.receipt).filter((r): r is string => !!r);
+    if (receipts.length) latest.current.target?.ack?.(receipts).catch(() => {});
+  };
   useEffect(() => {
     if (!visible) return;
     const escape = (e: KeyboardEvent) => {
@@ -132,7 +139,10 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     });
     // What is still being sent comes from this Mac: it shows while the Library can't be reached.
     target.invites?.().then((got) => {
-      if (invitesGeneration.current === invitesAt) setQueued(Object.fromEntries(got.people.map((q) => [q.sub, q])));
+      if (invitesGeneration.current !== invitesAt) return;
+      setQueued(Object.fromEntries(got.people.map((q) => [q.sub, q])));
+      // A change whose own answer never arrived (the app went away meanwhile) is shown now: the person has it.
+      receive(got.people);
     }, () => {});
   }, [visible, target, reload, shared]);
   // A change the daemon is still sending lands in the background: the plan changes when it does
@@ -237,6 +247,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const personWork = (sub: string, label: string, call: (t: SharePeopleTarget) => Promise<Answer>): Work =>
     ({ key: `person:${sub}`, label, run: async () => {
       const got = await call(latest.current.target!);
+      if (got.invite) receive([got.invite]);
       if (mounted.current) {
         invitesGeneration.current++;
         setQueued((old) => { const next = { ...old }; if (got.invite) next[sub] = got.invite; else delete next[sub]; return next; });

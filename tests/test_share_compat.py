@@ -37,7 +37,7 @@ from brindle.pro import analysis_docs as ad
 from brindle.pro import auth, credentials
 from pro_fixtures import backend, claims, pro_env, sign, signing_key  # noqa: F401
 from test_plans import AUTH, TOKEN, session  # noqa: F401
-from test_share_panel_access import PeopleLibrary, as_, person
+from test_share_panel_access import PeopleLibrary, add_person, as_, person
 from test_shared_plan_docs import DESIGN, DOC, TEAM_LOGIN, parts, sent  # noqa: F401
 
 ANN = {"kind": "user", "id": "ann"}
@@ -161,7 +161,7 @@ def test_the_share_reaches_the_invitee_online_or_the_first_time_they_sign_in(db,
     else:
         assert not (tmp_path / "ann").exists()          # ann has never signed in to brindle anywhere
 
-    added = app.post(f"/v1/plans/{pid}/people", json=ANN_SIGNS)
+    added = add_person(app, pid,ANN_SIGNS)
     assert added.status_code == 202, added.json()
     assert ANN in library.scopes and library.reviewers == [{"sub": "ann", "required": True}]   # it is in the Library
     assert [i["doc_id"] for i in library.inbox["ann"]] == [DOC]                                # waiting on her account
@@ -182,7 +182,7 @@ def test_the_share_reaches_the_invitee_online_or_the_first_time_they_sign_in(db,
 def test_a_share_cut_off_midway_is_never_half_done_and_try_again_lands_once(compat, backend, cut):
     pid, library, app, _ = compat
     library.cut = cut
-    first = app.post(f"/v1/plans/{pid}/people", json=ANN_SIGNS)
+    first = add_person(app, pid,ANN_SIGNS)
     assert first.status_code == 202, first.json()
     assert person(app, pid, "ann")["state"] == "sharing"        # no answer: still on its way, not refused
     gate = app.get(f"/v1/plans/{pid}").json()["gate"]
@@ -195,7 +195,7 @@ def test_a_share_cut_off_midway_is_never_half_done_and_try_again_lands_once(comp
         assert library.reviewers == [{"sub": "ann", "required": True}]
 
     library.cut = None
-    again = app.post(f"/v1/plans/{pid}/people", json=ANN_SIGNS)
+    again = add_person(app, pid,ANN_SIGNS)
     assert again.status_code == 202, again.json()
     assert len(sent(backend, "POST /analysis-docs")) == 1                # the one doc
     assert library.scopes.count(ANN) == 1 and len(library.inbox["ann"]) == 1   # shared once, told once
@@ -211,7 +211,7 @@ def test_a_share_cut_off_midway_is_never_half_done_and_try_again_lands_once(comp
 def test_a_share_answer_from_another_library_version_still_shows_the_sign_off(compat, answers):
     pid, library, app, _ = compat
     library.answers = answers
-    assert app.post(f"/v1/plans/{pid}/people", json=ANN_SIGNS).status_code == 202
+    assert add_person(app, pid,ANN_SIGNS).status_code == 202
     added = app.get(f"/v1/plans/{pid}").json()
     assert signers(added) == ["ann"]          # the build waits for ann from the moment she is added
     assert added["gate"]["state"] == "waiting"
@@ -224,7 +224,7 @@ def test_a_share_answer_from_another_library_version_still_shows_the_sign_off(co
 def test_an_unshare_answered_without_the_design_view(compat, who):
     pid, library, app, _ = compat
     for sub in ("ann", "bo"):
-        assert app.post(f"/v1/plans/{pid}/people", json={**ANN_SIGNS, "sub": sub}).status_code == 202
+        assert add_person(app, pid,{**ANN_SIGNS, "sub": sub}).status_code == 202
     library.answers = "older"
     if who == "one":
         removed = app.delete(f"/v1/plans/{pid}/people/ann")
@@ -249,7 +249,7 @@ def test_asking_someone_to_sign_off_keeps_their_access_on_either_library(compat,
     the current Library and on one before #328, which also refuses the new
     ``{sign_off}`` (422): neither may cost an editor their edit."""
     pid, library, app, _ = compat
-    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": access}).status_code == 202
+    assert add_person(app, pid,{"sub": "ann", "access": access}).status_code == 202
     library.older = older
     base = f"/v1/plans/{pid}" if target == "plan" else f"/v1/library/designs/{DOC}"
     asked = app.put(f"{base}/reviewers/ann", json={"required": True})
@@ -267,7 +267,7 @@ def test_an_older_client_still_gets_access_and_sign_off_from_the_current_library
     from brindle.pro import share_access
 
     pid, library, app, net = compat
-    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": "view"}).status_code == 202
+    assert add_person(app, pid,{"sub": "ann", "access": "view"}).status_code == 202
     status, view = net["client"].call("PUT", f"{DESIGN}/permissions/ann", {"role": "reviewer", "required": True},
                                       token=net["store"].load()["access_token"])
     assert status == 200, view
@@ -295,7 +295,7 @@ ROW = {"id": "ann", "display_name": "Ann Lee", "email": "ann@example.test", "rol
 ])
 def test_people_search_reads_rows_from_another_library_version(compat, backend, library_rows, panel_rows):
     pid, _, app, _ = compat
-    assert app.post(f"/v1/plans/{pid}/people", json={"sub": "ann", "access": "comment"}).status_code == 202
+    assert add_person(app, pid,{"sub": "ann", "access": "comment"}).status_code == 202
     backend.routes[f"GET {DESIGN}/people"] = lambda f, h: (200, library_rows)
     got = app.get(f"/v1/plans/{pid}/people")
     assert got.status_code == 200, got.json()
