@@ -3,7 +3,7 @@ import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { LoroDoc } from "loro-crdt";
 import { afterEach, expect, it, vi } from "vitest";
-import { fromBase64, type Plan, type SharedDesign, type VisualDTO } from "../../../api/client";
+import { fromBase64, type Plan, type PlanVerdict, type SharedDesign, type VisualDTO } from "../../../api/client";
 import { FakeDaemon } from "../../../test/fakeDaemon";
 import { DocEditor } from "./DocEditor";
 import { DocPresence } from "./DocPresence";
@@ -311,6 +311,32 @@ it("shows the live text, not the revision's, after Done editing, once frozen and
   fireEvent.click(screen.getByRole("button", { name: "Reopen" }));
   await settle();
   showsTyped();
+});
+
+it("Stop sharing and build on a live doc approves it as a personal doc: no frozen version to wait for or to name", async () => {
+  const daemon = new FakeDaemon();
+  const live = daemon.client();
+  const visual: VisualDTO = { id: "doc", session: "boss", title: "Workers", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
+  const plan: Plan = { id: "doc", session: "boss", title: "Workers", rev: 1, state: "open", markdown: "", lede: "", decisions: [], split: [], queued: 0, created_at: 1,
+    sections: [{ id: "summary", title: "Summary", markdown: "Workers run here." }],
+    gate: { state: "ready", required: 0, signed: 0, waiting_on: [], reviewers: [],
+      unconfirmed: { reason: "offline", message: "The Library can't be reached.", approval_held: false, can_stop_sharing: true } } };
+  daemon.seedLive("doc", { summary: "Workers run here." }, { plan, me: "Ann", author: "Ann" });
+  const verdicts: PlanVerdict[] = [];
+  const client = {
+    visualLive: live.visualLive.bind(live), plan: async () => plan,
+    decidePlan: async (_id: string, verdict: PlanVerdict) => { verdicts.push(verdict); return plan; },
+    visuals: async () => [visual], answerVisual: async () => visual, dismissVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => {},
+    commentPlan: async () => plan, replyPlan: async () => plan, resolvePlanThread: async () => plan, suggestPlan: async () => plan, acceptPlanSuggestion: async () => plan, rejectPlanSuggestion: async () => plan, editPlan: async () => plan, confirmPlan: async () => plan,
+    sharePlan: async () => plan, setPlanReviewers: async () => plan, syncPlan: async () => plan, overridePlanPolicy: async () => plan, signOffPlan: async () => plan,
+    docScopes: async () => ({ scopes: [] }), libraryPeople: async () => ({ people: [], me: "Ann" }), stopSharingPlan: async () => plan,
+  };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  await settle();
+  await act(async () => fireEvent.click(within(screen.getByTestId("plan-unconfirmed")).getByRole("button", { name: "Stop sharing and build" })));
+  await settle();
+  expect(verdicts).toEqual([expect.objectContaining({ approved: true })]);
+  expect(verdicts[0]).not.toHaveProperty("version");
 });
 
 it("types a suggestion only in Suggesting on unlocked text: in Viewing or once frozen it is shown read only", async () => {

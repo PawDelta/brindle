@@ -1272,7 +1272,9 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
             shut = _gate(c, p)
             if shut is not None and shut["state"] in GATE_SHUT:
                 raise ServiceError("gate_closed", shut["reason"], 409)
-            if version is not None and _is_version(c, p["id"], rev, version) is False:
+            # A frozen version is approved only while it is still this revision here: a share
+            # dropped since (no versions any more) or moved on is a plan to read again.
+            if version is not None and _is_version(c, p["id"], rev, version) is not True:
                 raise ServiceError("stale", f"version {version} isn't the one out for sign-off now; read the plan "
                                    "again", 409, rev=rev)
         claimed = c.execute("UPDATE plans SET state=?, decision=?, updated_at=? WHERE id=? AND rev=? AND state='open'",

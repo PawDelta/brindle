@@ -921,6 +921,51 @@ def test_an_approval_held_through_an_outage_applies_only_to_the_version_it_was_g
         assert p["state"] == "open" and plans.gate(db, p)["approval_refused"]
 
 
+@pytest.mark.parametrize("meanwhile", [
+    "refrozen",     # the author's sign-off: a sync lands a same-text version 3 while version 2 is checked
+    "unshared",     # the approval: the share is dropped while version 2 is checked
+])
+def test_what_lands_while_a_frozen_version_is_checked_never_takes_its_sign_off_or_approval(
+        db, parts, backend, monkeypatch, meanwhile):
+    from brindle import doc_templates
+
+    pid, lib, net = parts
+    monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
+
+    def sign(form, headers):            # as the server: only the head
+        if form["rev"] != lib.rev:
+            return 409, {"error": "stale", "rev": lib.rev}
+        lib.sign_offs.append({"rev": form["rev"], "sub": "user_1", "at": 9.0})
+        return 200, lib.view()
+
+    backend.routes[f"POST {DESIGN}/sign-offs"] = sign
+    sd.share(db, pid, TEAM, reviewers=[{"sub": "user_1"}] if meanwhile == "refrozen" else [], **net)
+    lib.open_draft()
+    sd.sync(db, pid, **net)
+    lib.draft.insert("summary", 0, "Agreed: ")
+    lib.freeze()                                    # version 2
+    real, landed = doc_templates.require, []
+
+    def checked(here, *args, **kw):                 # between matching version 2 and acting on it
+        real(here, *args, **kw)
+        if not landed:
+            landed.append(True)
+            if meanwhile == "refrozen":
+                lib.freeze()                        # version 3, the same text
+                sd.sync(here, pid, **net)
+            else:
+                with here.tx() as c:
+                    sd.drop_share(c, c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (pid,)).fetchone())
+
+    monkeypatch.setattr(doc_templates, "require", checked)
+    screen = {"rev": 1, "version": 2}
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        post = lambda tail, **body: app.post(f"/v1/plans/{pid}/{tail}", json=body)  # noqa: E731
+        got = post("sign-off", **screen) if meanwhile == "refrozen" else post("decide", approved=True, **screen)
+    assert landed and got.json()["error"]["code"] == "stale"
+    assert lib.sign_offs == [] and plans.get(db, pid)["state"] == "open"
+
+
 @pytest.mark.parametrize(("action", "frozen"), [
     ("approve", "filled"),      # the cached draft's Summary is empty, the frozen version's is not: approved
     ("approve", "emptied"),     # the cached draft's Summary is filled, the frozen version's is empty: refused

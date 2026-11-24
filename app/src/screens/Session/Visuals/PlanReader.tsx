@@ -806,10 +806,13 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const said = !!note.trim() || pending || edited || differs;
   const canRequest = said;
   const drafts = Object.fromEntries(plan.decisions.flatMap((d) => (drafted(d) ? [[d.id, drafted(d)!]] : [])));
-  const decide = async (approved: boolean) => {
-    if (historical || !client || (approved && reviewBlocked)) return;
+  /* `shared`: false once the person stopped sharing it, when it is approved as a personal doc, with no
+     frozen version to wait for or to name. */
+  const decide = async (approved: boolean, shared = true) => {
+    if (historical || !client || (approved && shared && reviewBlocked)) return;
     setSending(approved ? "approve" : "changes");
-    const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(reviewVersion === undefined ? {} : { version: reviewVersion }), ...(attached.length ? { attachments: attached } : {}) }));
+    const version = shared ? reviewVersion : undefined;
+    const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(version === undefined ? {} : { version }), ...(attached.length ? { attachments: attached } : {}) }));
     if (!alive.current) return;
     setSending(null);
     if (now) {
@@ -833,7 +836,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (historical) return;
     setSending("approve");
     const now = await send(() => sharing!.stopSharingPlan!(plan.id, plan.rev));
-    if (now) await decide(true);
+    if (now) await decide(true, false);
     else if (alive.current) setSending(null);
   };
   const signOff = async () => {
