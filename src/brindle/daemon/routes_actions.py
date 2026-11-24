@@ -1918,7 +1918,7 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
             matching = {size for size, order in clear_tiers.items() if current.get(size) == order}
             changed_sizes = matching | replacements.keys()
             if not changed_sizes:
-                return value
+                return config.KEEP_SETTING
             # Drop aliases for changed sizes, too, so they cannot override a canonical key.
             return {**{k: v for k, v in routing.items() if config.normalize_weight(k) not in changed_sizes},
                     **replacements}
@@ -1963,7 +1963,7 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
                 for size, order in sizes.items():
                     if current.get(size) == order:
                         changes.setdefault(name, {}).setdefault(size, None)
-            return merge_agent_model_changes(stored, changes) if changes else value
+            return merge_agent_model_changes(stored, changes) if changes else config.KEEP_SETTING
 
         path = update("agent_models", update_agents)
         updated.append("agent_models")
