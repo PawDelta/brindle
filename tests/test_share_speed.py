@@ -64,6 +64,7 @@ def _library_wave(backend, *paths):
     return spans
 
 
+@pytest.mark.variant("perf: catches access reads going sequential again")
 def test_access_overlaps_all_three_library_reads(shared, backend):
     pid, _, _ = shared
     paths = [f"GET {BASE}", f"GET {DESIGN}", f"GET {DESIGN}/people"]
@@ -95,6 +96,7 @@ def _show_teammate_name(backend):
         200, {"people": [{"id": "u_e", "display_name": "Dana"}]})
 
 
+@pytest.mark.variant("perf: catches an idle sync re-reading the people directory")
 def test_idle_sync_skips_the_directory(shared, backend, db):
     pid, library, net = shared
     _add_teammate_comment(library)
@@ -107,6 +109,7 @@ def test_idle_sync_skips_the_directory(shared, backend, db):
     assert backend.paths() == [f"GET {DESIGN}"]
 
 
+@pytest.mark.variant("perf: catches the idle-sync skip never re-reading names after an outage")
 def test_idle_sync_recovers_names_after_a_directory_outage(shared, backend, db):
     pid, library, net = shared
     _add_teammate_comment(library)
@@ -124,6 +127,7 @@ def test_idle_sync_recovers_names_after_a_directory_outage(shared, backend, db):
     assert backend.paths() == [f"GET {DESIGN}"]
 
 
+@pytest.mark.variant("perf: catches the first share repeating the access reads")
 def test_first_share_sync_can_return_access_with_one_set_of_reads(shared, backend):
     pid, _, _ = shared
     with TestClient(build_app(TOKEN), headers=AUTH) as app:
@@ -202,6 +206,7 @@ def test_first_share_sync_applies_design_when_metadata_is_unavailable(shared, ba
     assert shared_docs.link(db, pid)["access_refused"] == "forbidden"
 
 
+@pytest.mark.variant("perf: catches a commenter waiting out a names call that always refuses")
 def test_commenter_open_overlaps_title_and_design_without_asking_for_names(shared, backend):
     _, library, net = shared
     library.author = "u_author"
@@ -227,6 +232,7 @@ def test_editor_open_overlaps_names_with_an_outstanding_title(shared, backend):
     assert max(spans.values()) + 150 == 150
 
 
+@pytest.mark.variant("perf: catches credentials loaded once per layer again")
 def test_shared_access_loads_credentials_once_per_request(shared, monkeypatch):
     pid, _, net = shared
     reads = []
