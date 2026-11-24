@@ -326,7 +326,7 @@ def test_an_entitlement_due_with_the_token_gets_its_own_pass(parts, backend, mon
 
 
 @pytest.mark.parametrize("failed", [
-    "reload",               # a held sign-in's entitlement reload failed
+    pytest.param("reload", marks=pytest.mark.variant("a held sign-in's failed reload carried to a new login")),
     pytest.param("load", marks=pytest.mark.variant("failed before any record was held: nothing else marks it")),
 ])
 def test_a_new_sign_in_inherits_no_failed_reload(parts, backend, monkeypatch, failed):
