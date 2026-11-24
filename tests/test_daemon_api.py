@@ -1004,7 +1004,7 @@ def test_routing_reads_and_clears_saved_orders_by_scope(repo, db, monkeypatch):
 
     app = build_app(TOKEN)
     for scope in ("user", "repo", "local"):
-        clear = {size: [{"setting": entry["setting"], "agent": entry["agent"]}
+        clear = {size: [{"setting": entry["setting"], "agent": entry["agent"], "order": entry["order"]}
                         for entry in orders[size]["saved"] if entry["scope"] == scope]
                  for size in ("heavy", "medium")}
         code, reply = asyncio.run(_read_request(app, "/v1/routing", AUTH, method="PUT", payload={
@@ -1017,6 +1017,30 @@ def test_routing_reads_and_clears_saved_orders_by_scope(repo, db, monkeypatch):
     assert after["kinds"]["heavy"]["locked"]
     assert after["kinds"]["advanced"]["learned"] == "dev.gpt"
     assert "routing_heavy" not in config.user_settings()
+
+
+def test_reset_routing_preserves_orders_changed_since_get(repo, db):
+    from brindle import config
+
+    config.set_user("routing", {"heavy": ["dev.gpt"]})
+    config.set_user("routing_heavy", "claude-opus")
+    config.set_user("agent_models", {"qa": {"heavy": ["dev.gpt"]}})
+    code, routing = _get("/v1/routing", AUTH, f"repo={repo}&scope=user&learned=0")
+    assert code == 200, routing
+    observed = routing["orders"]["heavy"]["saved"]
+
+    recommended = routing["orders"]["heavy"]["recommended"]
+    config.set_user("routing", {"heavy": recommended})
+    config.set_user("routing_heavy", "codex")
+    config.set_user("agent_models", {"qa": {"heavy": recommended}})
+    current = config.user_settings()
+
+    code, reply = asyncio.run(_read_request(build_app(TOKEN), "/v1/routing", AUTH, method="PUT", payload={
+        "repo": str(repo), "scope": "user",
+        "clear_orders": {"heavy": [{k: entry[k] for k in ("setting", "agent", "order")} for entry in observed]},
+    }))
+    assert code == 200, reply
+    assert config.user_settings() == current
 
 
 def test_model_less_agent_can_be_created_and_edited(repo, db):

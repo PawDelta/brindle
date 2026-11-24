@@ -1767,13 +1767,13 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     ``agents`` changes per-size model orders, with null removing a size override
     in the selected scope.
     ``clear_orders`` removes saved orders in that scope, by size and setting,
-    without writing a replacement order or changing locks.
+    if they still match the order seen by the caller.
     A profile the org's policy doesn't allow, or any change while the policy
     applies but can't be read, is refused (403)."""
     from brindle import config, profiles, providers
     from brindle.service.routing import (
         RoutingPolicy, legacy_medium_override, merge_agent_model_changes, parse_agent_model_changes,
-        shadows_legacy_medium,
+        saved_picker_order, saved_profile_orders, shadows_legacy_medium,
     )
 
     repo = _get(body, "repo", required=True)
@@ -1786,18 +1786,23 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     excluded = _get(body, "exclude_providers", list)
     kinds = _get(body, "kinds", dict) or {}
     clear_orders = _get(body, "clear_orders", dict) or {}
-    clear_tiers, clear_picks, clear_agents = set(), set(), {}
+    clear_tiers: dict[str, list[str]] = {}
+    clear_picks: dict[str, list[str]] = {}
+    clear_agents: dict[str, dict[str, list[str]]] = {}
     for size, entries in clear_orders.items():
         if size not in config.WEIGHTS or not isinstance(entries, list):
             raise ServiceError("invalid", "clear_orders must map job sizes to lists of saved settings")
         for entry in entries:
-            setting = entry.get("setting") if isinstance(entry, dict) else None
+            order = entry.get("order") if isinstance(entry, dict) else None
+            if not isinstance(order, list) or not all(isinstance(n, str) for n in order):
+                raise ServiceError("invalid", f"{size}: clear_orders requires the observed order")
+            setting = entry.get("setting")
             if setting == "routing":
-                clear_tiers.add(size)
+                clear_tiers[size] = order
             elif setting == "picker" and scope == "user":
-                clear_picks.add(size)
+                clear_picks[size] = order
             elif setting == "agent_models" and isinstance(entry.get("agent"), str) and entry["agent"]:
-                clear_agents.setdefault(entry["agent"], {})[size] = None
+                clear_agents.setdefault(entry["agent"], {})[size] = order
             else:
                 raise ServiceError("invalid", f"{size}: invalid saved order for {scope} scope")
     lock_changes: dict[str, bool] = {}
@@ -1906,13 +1911,17 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
               "repo": functools.partial(config.update_repo, repo)}[scope]
     if tiers or clear_tiers:
         replacements = {config.normalize_weight(tier): order for tier, order in (tiers or {}).items()}
-        changed_sizes = clear_tiers | replacements.keys()
 
         def update_tiers(value):
             routing = value if isinstance(value, dict) else {}
+            current = saved_profile_orders(routing, profile_root) if clear_tiers else {}
+            matching = {size for size, order in clear_tiers.items() if current.get(size) == order}
+            changed_sizes = matching | replacements.keys()
+            if not changed_sizes:
+                return value
             # Drop aliases for changed sizes, too, so they cannot override a canonical key.
             return {**{k: v for k, v in routing.items() if config.normalize_weight(k) not in changed_sizes},
-                    **{k: v for k, v in replacements.items() if k not in clear_tiers}}
+                    **replacements}
 
         if scope == "user":
             for size in replacements:
@@ -1940,15 +1949,23 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     for key, value in extra.items():
         path = write(key, value)
         updated.append(key)
-    for size in sorted(clear_picks):
+    for size, order in sorted(clear_picks.items()):
         key = f"routing_{size}"
-        config.forget_user(key)
+        config.forget_user(key, matches=lambda value: saved_picker_order(value) == order)
         path = config.user_config_path()
         updated.append(key)
-    for name, sizes in clear_agents.items():
-        agent_changes.setdefault(name, {}).update(sizes)
-    if agent_changes:
-        path = update("agent_models", lambda value: merge_agent_model_changes(value, agent_changes))
+    if agent_changes or clear_agents:
+        def update_agents(value):
+            stored = value if isinstance(value, dict) else {}
+            changes = {name: dict(sizes) for name, sizes in agent_changes.items()}
+            for name, sizes in clear_agents.items():
+                current = saved_profile_orders(stored.get(name), profile_root)
+                for size, order in sizes.items():
+                    if current.get(size) == order:
+                        changes.setdefault(name, {}).setdefault(size, None)
+            return merge_agent_model_changes(stored, changes) if changes else value
+
+        path = update("agent_models", update_agents)
         updated.append("agent_models")
     if not updated:
         raise ServiceError("invalid", "give tiers, reviewer, exclude_providers, kinds, agents or clear_orders")

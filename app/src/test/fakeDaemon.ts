@@ -2457,7 +2457,9 @@ export class FakeDaemon {
     const clearOrders = body.clear_orders as RoutingPut["clear_orders"];
     const clearedTiers = new Set<string>();
     for (const [size, entries] of Object.entries(clearOrders ?? {})) {
-      for (const { setting, agent } of entries) {
+      for (const { setting, agent, order } of entries) {
+        const current = setting === "routing" ? file.routing?.[size] : agent ? file.agent_models?.[agent]?.[size] : undefined;
+        if (current?.length !== order.length || !current.every((name, index) => name === order[index])) continue;
         if (setting === "routing") clearedTiers.add(size);
         if (setting === "agent_models" && agent) (agentChanges[agent] ??= {})[size] = null;
       }
@@ -2512,7 +2514,9 @@ export class FakeDaemon {
       file.agent_models = stored;
       updated.push("agent_models");
     }
-    if (updated.length === 0) return error("invalid", "give tiers, reviewer, exclude_providers, kinds or agents", 400);
+    if (updated.length === 0 && !Object.values(clearOrders ?? {}).some((entries) => entries.length > 0)) {
+      return error("invalid", "give tiers, reviewer, exclude_providers, kinds, agents or clear_orders", 400);
+    }
     return json({ updated, path });
   }
 

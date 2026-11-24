@@ -82,7 +82,7 @@ export interface RoutingPut {
      shared table: null for a size goes back to following the job size. */
   agents?: Record<string, { models: Record<string, { model: string; fallbacks?: string[] } | null> }>;
   /* Remove only these saved entries in scope, leaving locks and learning alone. */
-  clear_orders?: Record<string, Pick<RoutingSavedOrderDTO, "setting" | "agent">[]>;
+  clear_orders?: Record<string, Pick<RoutingSavedOrderDTO, "setting" | "agent" | "order">[]>;
 }
 
 export interface KindPut {

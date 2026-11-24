@@ -733,16 +733,17 @@ def _replace_json(path: Path, data: dict) -> None:
         raise
 
 
-def forget_user(key: str) -> bool:
+def forget_user(key: str, *, matches=None) -> bool:
     """Remove one key from ``~/.brindle/config.json``; True once it's gone.
     Only for a setting an org applied that its fresh setup no longer has
     (``company_login.clear_env(stale=True)``): removing it only stops it
     being applied, so unlike :func:`set_user` this also runs in an agent's
-    CLI call (``brindle doctor`` from a session)."""
+    CLI call (``brindle doctor`` from a session). When given, ``matches``
+    checks the current value under the writer lock before removing it."""
     path = user_config_path()
     with _USER_WRITE:
         data = _read_json(path)
-        if key not in data:
+        if key not in data or (matches is not None and not matches(data[key])):
             return False
         del data[key]
         _replace_json(path, data)

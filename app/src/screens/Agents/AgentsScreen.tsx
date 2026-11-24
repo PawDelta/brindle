@@ -975,9 +975,9 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   const resetOrders = async () => {
     if (!repo || frozen || busy) return;
     const byScope = new Map<RoutingScope, NonNullable<RoutingPut["clear_orders"]>>();
-    for (const { scope, size, setting, agent } of differences) {
+    for (const { scope, size, setting, agent, order } of differences) {
       const orders = byScope.get(scope) ?? {};
-      (orders[size] ??= []).push({ setting, agent });
+      (orders[size] ??= []).push({ setting, agent, order });
       byScope.set(scope, orders);
     }
     const started = seq.current;
