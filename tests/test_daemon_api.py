@@ -980,15 +980,22 @@ def test_routing_user_view_runs_no_learner_and_no_sign_in_probe(seeded, monkeypa
 def test_routing_reads_and_clears_saved_orders_by_scope(repo, db, monkeypatch):
     from brindle import autopilot, config
 
-    config.set_user("routing", {"medium": ["dev.gpt"], "heavy": ["dev.gpt"], "light": config.DEFAULT_ROUTING["light"]})
+    medium_order = ["dev.gpt", "removed-profile"]
+    config.set_user("routing", {"medium": medium_order, "heavy": ["dev.gpt"]})
     config.set_user("routing_heavy", "claude-opus")
-    config.set_user("routing_locked", {"medium": True})
     config.set_repo(str(repo), "routing", {"medium": ["dev.gpt"]})
     config.set_local(str(repo), "agent_models", {"qa": {
         "heavy": ["dev.gpt"], "light": config.DEFAULT_ROUTING["light"]}})
     monkeypatch.setattr(autopilot, "_route_by_weight", lambda db, cfg, repo, size, *_: (
         ("dev.gpt", True, "") if size == "advanced" else (None, False, "")))
 
+    app = build_app(TOKEN)
+    code, reply = asyncio.run(_read_request(app, "/v1/routing", AUTH, method="PUT", payload={
+        "repo": str(repo), "scope": "user", "kinds": {
+            "medium": {"keep_order": True}, "light": {"keep_order": True},
+        },
+    }))
+    assert code == 200, reply
     query = f"repo={repo}&scope=user&include_repo_orders=1"
     code, routing = _get("/v1/routing", AUTH, query)
     assert code == 200, routing
@@ -998,12 +1005,14 @@ def test_routing_reads_and_clears_saved_orders_by_scope(repo, db, monkeypatch):
             for entry in orders["heavy"]["saved"]} == {
         ("user", "routing", None, False), ("user", "picker", None, False), ("local", "agent_models", "qa", False)}
     assert [(entry["scope"], entry["order"], entry["locked"]) for entry in orders["medium"]["saved"]] == [
-        ("user", ["dev.gpt"], True), ("repo", ["dev.gpt"], False)]
-    assert orders["light"]["saved"][0]["order"] == orders["light"]["recommended"]
+        ("user", medium_order, True), ("repo", ["dev.gpt"], False)]
+    light_order = orders["light"]["saved"][0]
+    assert light_order["scope"] == "user"
+    assert light_order["locked"]
+    assert light_order["order"] == orders["light"]["recommended"]
     assert orders["advanced"]["saved"] == []
     assert routing["kinds"]["advanced"]["learned"] == "dev.gpt"
 
-    app = build_app(TOKEN)
     for scope in ("user", "repo", "local"):
         clear = {size: [{"setting": entry["setting"], "agent": entry["agent"], "order": entry["order"]}
                         for entry in orders[size]["saved"] if entry["scope"] == scope]

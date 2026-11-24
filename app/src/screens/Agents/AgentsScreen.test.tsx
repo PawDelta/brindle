@@ -139,12 +139,17 @@ describe("agents tab", () => {
   it("resets only saved differences in their original scopes and keeps learned picks", async () => {
     const { daemon } = setup({
       routingConfig: {
-        user: { routing: { light: DEFAULT_ROUTING.light, medium: ["developer-codex"], heavy: ["developer-codex"] }, routing_locked: ["medium"] },
+        user: { routing: { light: DEFAULT_ROUTING.light, medium: ["developer-codex", "removed-profile"], heavy: ["developer-codex"] } },
         repo: { agent_models: { qa: { heavy: ["developer-codex"] } } },
         local: {},
       },
-      learned: { advanced: "developer-codex" },
+      learned: { medium: "developer-fable", advanced: "developer-codex" },
     });
+    await screen.findByTestId("kind-medium");
+    const learned = within(row("medium")).getByTestId("learned");
+    fireEvent.click(within(learned).getByRole("button", { name: "use mine instead" }));
+    await waitFor(() => expect(within(row("medium")).queryByTestId("learned")).toBeNull());
+    expect(daemon.data.routingConfig.user.routing?.medium).toEqual(["developer-codex", "removed-profile"]);
     const notice = await screen.findByTestId("routing-differs");
     expect(Array.from(notice.querySelectorAll<HTMLElement>("[data-routing-notice]"), (el) => [
       el.dataset.size, el.dataset.routingNotice,

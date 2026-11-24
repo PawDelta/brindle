@@ -490,10 +490,7 @@ function SizeRow({ size, state, choiceOf: info, choices, missing, panel, adding,
           {learned && (
             <span className="pl-[22px] text-xs text-ink-3" data-testid="learned">
               brindle learned it does better here ·{" "}
-              <button type="button" className={link} disabled={busy} onClick={() => put({
-                locked: true,
-                ...(own.length ? { model: own[0], fallbacks: own.slice(1) } : {}),
-              })}>
+              <button type="button" className={link} disabled={busy} onClick={() => put({ keep_order: true })}>
                 use mine instead
               </button>
             </span>

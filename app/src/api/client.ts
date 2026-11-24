@@ -86,6 +86,8 @@ export interface RoutingPut {
 }
 
 export interface KindPut {
+  /** Save and lock the engine's current order for this job size. */
+  keep_order?: true;
   model?: string;
   fallbacks?: string[];
   locked?: boolean;
