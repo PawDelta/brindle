@@ -209,13 +209,14 @@ it("shows an add from the daemon's answer while the Library can't be read, after
   const lib = library();
   const sends = lib.target.invite;
   const read = lib.target.access;
-  let down = true;
+  let down = false;
   lib.target.access = async () => {
     if (down) throw new DaemonError("busy", "Can't reach your Library.", 503);
     return read();
   };
   // The daemon answers at once with the row it will send, and keeps it on this Mac until it lands.
   lib.target.invite = async (sub, access, signOff) => {
+    down = true;
     lib.calls.push(`invite ${sub} ${access} ${signOff}`);
     const q: ShareQueued = { sub, name: null, access, sign_off: signOff ? "required" : null, op: "invite", state: "sharing", error: null, receipt: `r-${sub}`, rev: 1 };
     lib.queue.push(structuredClone(q));
@@ -231,6 +232,7 @@ it("shows an add from the daemon's answer while the Library can't be read, after
   fireEvent.click(within(screen.getByTestId("share-result-lena")).getByRole("button"));
   await act(async () => fireEvent.click(screen.getByTestId("share-add-confirm")));
   expect(row("lena").dataset.state).toBe("sharing");                     // from the add's own answer
+  expect(within(screen.getByTestId("share-access")).getByRole("alert")).toBeTruthy();
   expect(lib.acks).toEqual(["r-lena"]);                                   // whose receipt goes back, so it is sent
   expect(within(row("lena")).queryByRole("button", { name: "What lena can do" })).toBeNull();     // nothing to change until it lands
   holdReads = false;
@@ -331,6 +333,29 @@ it("filters several edits using one directory read per panel opening", async () 
   fireEvent.click(screen.getByRole("button", { name: "Close share" }));
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Open" })));
   expect(reads).toBe(2);
+});
+
+it("waits for access before a directory match can be used to invite someone", async () => {
+  const lib = library({ people: [{ sub: "sam", name: null, access: "view", sign_off: null }] });
+  let releaseAccess!: (access: ShareAccess) => void;
+  const pending = new Promise<ShareAccess>((resolve) => { releaseAccess = resolve; });
+  lib.target.access = () => pending;
+  await act(async () => render(<Reader lib={lib} />));
+  const input = screen.getByTestId("share-search");
+  fireEvent.change(input, { target: { value: "sam" } });
+  const result = screen.getByTestId("share-result-sam");
+  const match = within(result).getByRole<HTMLButtonElement>("button");
+  fireEvent.click(match);
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(screen.queryByTestId("share-add")).toBeNull();
+  expect(match.disabled).toBe(true);
+
+  await act(async () => releaseAccess(lib.state));
+  expect(result.classList.contains("dim")).toBe(true);
+  expect(match.disabled).toBe(false);
+  fireEvent.click(match);
+  expect(screen.getByTestId("share-menu-sam")).toBeTruthy();
+  expect(screen.queryByTestId("share-add")).toBeNull();
 });
 
 it("says why a search failed", async () => {

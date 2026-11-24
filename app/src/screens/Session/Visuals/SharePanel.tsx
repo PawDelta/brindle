@@ -5,7 +5,7 @@
    Every write changes one person or scope (brindle/pro/share_access.py), never the whole list. */
 
 import { Fragment, useEffect, useRef, useState, type ReactNode } from "react";
-import { DaemonError, type DocScope, type LibraryPerson, type Plan, type PolicyPreviewRow, type ShareAccess, type ShareAccessLevel, type ShareQueued } from "../../../api/client";
+import type { DocScope, LibraryPerson, Plan, PolicyPreviewRow, ShareAccess, ShareAccessLevel, ShareQueued } from "../../../api/client";
 import type { PlanGateRowDTO } from "../../../api/schema";
 import type { Writes } from "./PlanReader";
 import { displayName, initials } from "./PlanCards";
@@ -81,8 +81,11 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
 }) {
   const shared = !!plan.gate;
   const [access, setAccess] = useState<ShareAccess | null>(null);
-  const [accessBusy, setAccessBusy] = useState<string | null>(null);
+  const [accessError, setAccessError] = useState<string | null>(null);
+  const [accessReadyFor, setAccessReadyFor] = useState<{ target: SharePeopleTarget; reload: number; shared: boolean } | null>(null);
   const [reload, setReload] = useState(0);
+  const accessReady = visible && accessReadyFor !== null && accessReadyFor.target === target
+    && accessReadyFor.reload === reload && accessReadyFor.shared === shared;
   const [typed, setTyped] = useState("");
   const [focused, setFocused] = useState(false);
   const [menu, setMenu] = useState<string | null>(null);
@@ -141,12 +144,16 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   useEffect(() => {
     const generation = ++accessGeneration.current;
     const invitesAt = ++invitesGeneration.current;
+    setAccessReadyFor(null);
     if (!visible || !target) return;
-    setAccessBusy(null);
+    setAccessError(null);
     target.access().then((got) => {
-      if (accessGeneration.current === generation) setAccess(got);
+      if (accessGeneration.current !== generation) return;
+      setAccess(got);
+      setAccessReadyFor({ target, reload, shared });
+      setAdding((current) => current && got.people.some((p) => p.sub === current.sub) ? null : current);
     }, (e: unknown) => {
-      if (accessGeneration.current === generation && e instanceof DaemonError && e.code === "busy") setAccessBusy(e.message);
+      if (accessGeneration.current === generation) setAccessError(e instanceof Error ? e.message : "Couldn't read who has access.");
     });
     // What is still being sent comes from this Mac: it shows while the Library can't be reached.
     target.invites?.().then((got) => {
@@ -270,12 +277,13 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     ({ key: `scope:${scopeKey(s)}`, label, run: () => call(latest.current.target!) });
 
   const open = (p: LibraryPerson) => {
+    if (!accessReady) return;
     if (onPlan.has(p.sub)) { setMenu(`person:${p.sub}`); return; }
     setAdding({ sub: p.sub, name: personLabel(p), email: p.email, access: "comment", signOff: false });
   };
   // The person's row shows at once, saving; it stays (with Try again) if the Library refuses.
   const add = () => {
-    if (!adding) return;
+    if (!adding || !accessReady || onPlan.has(adding.sub)) return;
     const { sub, access: level, signOff: must, name } = adding;
     setAdded((old) => ({ ...old, [sub]: { sub, name, access: level, signOff: must ? "required" : null } }));
     run(personWork(sub, "Couldn't add", (t) => t.invite(sub, level, must)));
@@ -413,25 +421,29 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
             <i className={`bx ${adding.signOff ? "on" : ""}`} aria-hidden>{adding.signOff && <ShareCheck />}</i><span className="grow">Must sign off<span className="mx"> · the build waits for {firstWord(adding.name)}</span></span></button>
           {!listed && <p className="hint up">{access?.kept_here === false ? "Adding them shares this plan: it is saved to your Library on brindle servers." : "Adding them shares this plan: it is uploaded from this Mac to brindle servers. Your other plans stay here."}</p>}
           <div className="acts"><button className="sp-btn q" onClick={() => setAdding(null)}>Cancel</button>
-            <button className="sp-btn main" data-testid="share-add-confirm" disabled={busy[`person:${adding.sub}`]?.state === "saving"} onClick={add}>Add {firstWord(adding.name)}</button></div>
+            <button className="sp-btn main" data-testid="share-add-confirm" disabled={!accessReady || onPlan.has(adding.sub) || busy[`person:${adding.sub}`]?.state === "saving"} onClick={add}>Add {firstWord(adding.name)}</button></div>
         </div>
       </div>
         : !searching ? (!listed && <p className="hint">Only you can open this plan. Add a person or a team to share it.</p>)
         : <>
           {searchState === "loading" && <div data-testid="share-search-loading"><div className="sweep" /><div className="rows">{[96, 132, 78].map((w) => <div className="r" key={w}><i className="av skv" /><i className="sk" style={{ width: w }} /></div>)}</div></div>}
           {searchState === "error" && <div className="msg bad" role="alert" data-testid="share-search-error"><span className="grid grow">Couldn't search people.{searchWhy && <span className="note">{searchWhy}</span>}</span><button className="sp-btn q end" onClick={() => setAgain((n) => n + 1)}>Try again</button></div>}
+          {!accessReady && accessError === null && results.length > 0 && <div className="msg" role="status">Checking who has access…</div>}
           {(teamHits.length > 0 || searchState === "ready") && <div className="rows">
             {teamHits.map((t) => teamRow(t, true))}
-            {results.map((p, i) => <div key={p.sub} className={`r ${onPlan.has(p.sub) ? "dim" : i === highlight ? "act" : ""}`} onMouseEnter={() => setHighlight(i)} data-testid={`share-result-${p.sub}`}>
-              <i className="av">{initials(personLabel(p))}</i><button className="nm truncate text-left" title={`${personLabel(p)} · ${p.email}`} onClick={() => open(p)}>{personLabel(p)}<em>{p.email}</em></button>
-              {onPlan.has(p.sub) && <span className="st">Has access</span>}
-            </div>)}
+            {results.map((p, i) => {
+              const hasAccess = accessReady && onPlan.has(p.sub);
+              return <div key={p.sub} className={`r ${hasAccess ? "dim" : accessReady && i === highlight ? "act" : ""}`} onMouseEnter={() => setHighlight(i)} data-testid={`share-result-${p.sub}`}>
+                <i className="av">{initials(personLabel(p))}</i><button className="nm truncate text-left" title={`${personLabel(p)} · ${p.email}`} disabled={!accessReady} onClick={() => open(p)}>{personLabel(p)}<em>{p.email}</em></button>
+                {hasAccess && <span className="st">Has access</span>}
+              </div>;
+            })}
             {searchState === "ready" && !results.length && !teamHits.length && <div className="msg" data-testid="share-search-empty"><span className="grow">{query ? "Nobody matches." : "Type a name or an email."}</span></div>}
           </div>}
         </>}
     </section>}
     <section className="sec fill" data-testid="share-access">
-      {accessBusy !== null && <div className="msg bad" role="alert"><span className="grow">{accessBusy}</span><button className="sp-btn q end" onClick={() => setReload((n) => n + 1)}>Try again</button></div>}
+      {accessError !== null && <div className="msg bad" role="alert"><span className="grow">{accessError}</span><button className="sp-btn q end" onClick={() => setReload((n) => n + 1)}>Try again</button></div>}
       {/* A first add shows here at once, and stays with its error if the upload is refused. */}
       {(listed || people.length > 0) && <>
         <div className="lab"><b>Who has access</b><span>{[count && `${count} ${count === 1 ? "person" : "people"}`, scopes.length && `${scopes.length} ${scopes.length === 1 ? "team" : "teams"}`].filter(Boolean).join(" · ")}</span></div>
