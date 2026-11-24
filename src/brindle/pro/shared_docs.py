@@ -1438,8 +1438,15 @@ def _unreachable(e: Exception) -> bool:
 
 def _no_entitlement_why(store) -> str:
     """No verified entitlement here: renewing it says whether that is the network or the sign-in."""
-    from brindle.pro import auth
+    from brindle.pro import auth, credentials
 
+    warm = auth.warm_for(store or credentials.default_store())
+    if warm is not None:
+        # The daemon's warm sign-in renews it in the background, never on this request.
+        e = warm.recover()
+        if e is None:
+            return plans.LIBRARY_ERROR
+        return plans.OFFLINE if _unreachable(e) else plans.SIGN_IN
     client, store = ad._session(None, store)
     try:
         auth.refresh(client, store)

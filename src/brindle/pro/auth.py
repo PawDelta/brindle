@@ -796,8 +796,12 @@ class WarmSignIn(Protocol):
     def view(self):
         """The store as this process's requests read it (from memory)."""
 
-    def pin(self) -> tuple:
-        """(a view bound to the sign-in held now, that sign-in's record)."""
+    def pin(self, store=None) -> tuple:
+        """(a view bound to the sign-in held now, that sign-in's record); a ``store``
+        already pinned stays pinned, or fails closed if its sign-in was replaced."""
+
+    def recover(self) -> BaseException | None:
+        """Start a background reload of the entitlement; what the last refresh ran into."""
 
     def grant(self, client: Client, generation: int | None = None) -> tuple[str, int]:
         """(an unexpired access token for ``client``'s backend, its sign-in's generation);
@@ -812,9 +816,13 @@ class WarmSignIn(Protocol):
 _warm: WarmSignIn | None = None
 
 
-def _warm_for(store) -> WarmSignIn | None:
+def warm_for(store) -> WarmSignIn | None:
+    """The warm sign-in that keeps ``store``'s sign-in in this process, if any."""
     warm = _warm
     return warm if warm is not None and warm.serves(store) else None
+
+
+_warm_for = warm_for
 
 
 def warm_view(store):
@@ -830,7 +838,7 @@ def warm_pin(store) -> tuple | None:
     entitlement through the view and gets a token for that same sign-in, or fails
     closed. None when no warm sign-in keeps ``store``."""
     warm = _warm_for(store)
-    return None if warm is None else warm.pin()
+    return None if warm is None else warm.pin(store)
 
 
 def warm_access(client: Client, store) -> str | None:

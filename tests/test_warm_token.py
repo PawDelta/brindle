@@ -14,10 +14,11 @@ from subprocess import CompletedProcess
 
 import pytest
 
-from brindle import keystore, spawn
+from brindle import keystore, plans, spawn
 from brindle.daemon import app as daemon_app
 from brindle.pro import analysis_docs as ad
 from brindle.pro import auth, credentials
+from brindle.pro import shared_docs as sd
 from pro_fixtures import BASE, backend, claims, pro_env, sign, signing_key  # noqa: F401
 from test_plans import session  # noqa: F401
 from test_share_panel_access import panel  # noqa: F401
@@ -188,12 +189,21 @@ def test_a_request_never_sends_for_a_sign_in_replaced_under_it(parts, backend, m
     view, record = auth.warm_pin(store)
     client = auth.Client(record["base_url"], backend)
     new = login_elsewhere()
+    assert store.load()["access_token"] == record["access_token"]   # this process's keychain cache: the old one
     sent = len(backend.calls)
     with pytest.raises(auth.AuthError) as changed:
         auth.authed(client, view, "GET", "/me")
     assert changed.value.code == "record_changed" and len(backend.calls) == sent
-    # The next request is the new account's, though this process's keychain cache still has the old one.
-    assert store.load()["access_token"] == record["access_token"]
+    # A nested call made inside that operation keeps its pin rather than taking the new account...
+    monkeypatch.setattr(auth, "UrllibTransport", lambda **kw: backend)
+    with pytest.raises(auth.AuthError) as nested:
+        ad._call("GET", "/me", store=view)
+    assert nested.value.code == "record_changed"
+    # ... and a refresh through it under the lock never reads the new account's record.
+    with pytest.raises(keystore.CredentialError):
+        auth.refresh(client, view)
+    assert len(backend.calls) == sent
+    # The next request is the new account's.
     view, _ = auth.warm_pin(store)
     assert auth.authed(client, view, "GET", "/me")[0] == 200 and bearer(backend) == new
 
@@ -217,6 +227,66 @@ def test_a_request_never_sends_for_a_sign_in_replaced_under_it(parts, backend, m
     with pytest.raises(auth.AuthError) as moved:
         auth.authed(client, store, "GET", "/me")
     assert moved.value.code == "record_changed" and len(backend.calls) == sent
+
+
+def test_a_replacement_found_by_a_renewal_never_goes_out_with_the_old_bearer(parts, backend, monkeypatch):
+    keychain = Keychain(monkeypatch)
+    store, client = credentials.KeychainStore(), parts[2]["client"]
+    store.save(parts[2]["store"].load())
+    holder = warm(monkeypatch, store, backend, Clock())
+    holder.renew()
+    t = backend.issue()                         # another account signs in; its token needs rotating
+    keychain.put({"access_token": t["access_token"], "refresh_token": t["refresh_token"],
+                  "access_expires_at": time.time() + 10, "base_url": BASE,
+                  "entitlement": sign(backend.key, claims(sub="user_2", features=list(TEAM_LOGIN)))})
+    with auth.refresh_lock():
+        auth._note_signin()
+    reached, release = threading.Event(), threading.Event()
+    held_refresh(backend, lambda limit: reached.set() or release.wait(limit))
+    with holder._cond:                          # the background renewal finds it before any request does
+        renewal = holder._launch(holder._token)
+    assert reached.wait(10)                     # paused mid-rotation, the old bearer still unexpired
+    with spawn.deadline(0.05), pytest.raises(auth.AuthError):
+        auth.authed(client, store, "GET", "/me")
+    assert "GET /me" not in backend.paths()
+    release.set()
+    landed(holder, renewal)
+    assert auth.authed(client, store, "GET", "/me")[0] == 200
+    assert bearer(backend) == store.load()["access_token"] != t["access_token"]
+
+
+def test_the_no_entitlement_diagnostic_never_refreshes_on_the_request(parts, backend, monkeypatch):
+    store = parts[2]["store"]
+    holder = warm(monkeypatch, store, backend, Clock())
+    holder.renew()
+    with lock_held(), spawn.deadline(0.05):
+        assert sd._no_entitlement_why(store) == plans.LIBRARY_ERROR
+        reload = holder._flight                 # renewed in the background once the lock is free
+        assert reload is not None
+    landed(holder, reload)
+    assert refreshes(backend) == 0
+
+
+def test_a_missing_entitlement_is_reloaded_and_recovers_after_a_failed_reload(parts, backend, monkeypatch):
+    store, clock = parts[2]["store"], Clock()
+    store.save({k: v for k, v in store.load().items() if k != "entitlement"})
+    monkeypatch.setattr(auth, "_signed_in_providers", lambda: [])
+    issue, failures = backend.routes["GET /entitlement"], [1]
+    backend.routes["GET /entitlement"] = lambda f, h: (503, {"error": "unavailable"}) if failures and failures.pop() \
+        else issue(f, h)
+    holder = warm(monkeypatch, store, backend, clock)
+    holder.renew()
+    assert holder.view.load().get("entitlement") is None
+    reload = holder._flight                     # a request found none: its reload fails once
+    assert reload is not None
+    landed(holder, reload)
+    holder.view.load()
+    assert holder._flight is None               # requests don't start it over and over...
+    clock.now += holder.due_in()
+    holder.renew()                              # ... the next token renewal is followed by a reload
+    holder.renew()
+    assert holder.view.load().get("entitlement")
+    assert backend.paths().count("GET /entitlement") == 2
 
 
 def test_a_login_right_after_a_refused_refresh_is_the_sign_in_then(parts, backend, monkeypatch):
@@ -337,10 +407,14 @@ def test_a_refused_refresh_signs_out_once(parts, backend, monkeypatch):
     holder.renew()
     clock.now += 1000                           # expired: the Mac was suspended past its renewal
     backend.revoked = True                      # the session was ended elsewhere
+    reads = keychain.reads
     with pytest.raises(auth.AuthError) as refused:
         auth.authed(client, store, "GET", "/me")
     assert refused.value.revoked
     assert not keychain.items
+    # The read under the lock, and the one that checks no newer sign-in was saved before deleting
+    # it (the supervisor's call: a refusal is rare, deleting an older CLI's new login is not OK).
+    assert keychain.reads - reads == 2
     io = (keychain.reads, keychain.writes)
     with pytest.raises(auth.AuthError) as again:
         auth.authed(client, store, "GET", "/me")
