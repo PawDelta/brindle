@@ -1,14 +1,13 @@
 import { useState } from "react";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
-import { DaemonError, type DesignShareLink, type DocScope, type LibraryPerson, type Plan, type ShareAccess, type SharePerson, type ShareQueued } from "../../../api/client";
+import { DaemonError, type DesignShareLink, type DocScope, type LibraryPerson, type Plan, type ShareAccess, type ShareQueued } from "../../../api/client";
 import { SharePanel, type SharePeopleTarget } from "./SharePanel";
 import { ShareLinkPanel, type ShareLinkTarget } from "./ShareLink";
 
 afterEach(cleanup);
 
-const people: SharePerson[] = ["sam", "lena"].map((id) => ({ id, display_name: id, email: `${id}@example.com`,
-  teams: [{ id: "platform", name: "Platform" }], role: "member", on_plan: false, on_plan_role: null }));
+const people: LibraryPerson[] = ["sam", "lena"].map((sub) => ({ sub, display_name: sub, email: `${sub}@example.com` }));
 const teams: DocScope[] = [{ kind: "group", id: "platform", name: "Platform", can_share: true }, { kind: "org", id: "o1", name: "PawDelta", can_share: true }];
 const empty: Plan = { id: "p1", rev: 1, title: "Design", state: "open", decisions: [], split: [], sections: [],
   session: "boss", created_at: 1, lede: "", markdown: "", queued: 0,
@@ -36,7 +35,7 @@ function library(start: Partial<ShareAccess> = {}, signed: string[] = []) {
   });
   const person = (sub: string) => state.people.find((p) => p.sub === sub)!;
   const target: Required<SharePeopleTarget> = {
-    search: async () => ({ people }),
+    members: async () => ({ people }),
     access: async () => structuredClone(state),
     invite: (sub, access, signOff) => write(`invite ${sub} ${access} ${signOff}`, sub, () => {
       state.shared = true;
@@ -62,11 +61,11 @@ function library(start: Partial<ShareAccess> = {}, signed: string[] = []) {
   return { state, calls, target, refuse, plan, held, queue, acks, set hold(on: boolean) { hold = on; } };
 }
 
-function Reader({ lib, directory = [], onStopAll }: { lib: ReturnType<typeof library>; directory?: LibraryPerson[]; onStopAll?: () => void }) {
+function Reader({ lib, onStopAll }: { lib: ReturnType<typeof library>; onStopAll?: () => void }) {
   const [plan, setPlan] = useState(lib.plan());
   const [visible, show] = useState(true);
   return <><button onClick={() => show(true)}>Open</button><button onClick={() => setPlan(lib.plan())}>Plan changed</button><SharePanel plan={plan} target={lib.target} nameOf={(s) => s} onBusy={() => {}} owned onStopAll={onStopAll}
-    teams={teams} directory={directory} writes={{ begin: () => true, end: (p) => setPlan(p ?? lib.plan()) }} visible={visible} onClose={() => show(false)} /></>;
+    teams={teams} writes={{ begin: () => true, end: (p) => setPlan(p ?? lib.plan()) }} visible={visible} onClose={() => show(false)} /></>;
 }
 const row = (sub: string) => screen.getByTestId(`share-person-${sub}`);
 const choose = async (sub: string, item: string) => {
@@ -75,14 +74,14 @@ const choose = async (sub: string, item: string) => {
 };
 
 it("lists each person's access and sign-off, teams and the org as rows, with display names that fit", async () => {
-  const named = { ...people[0], id: "63a34f9d", display_name: `David ${"Longsurname".repeat(12)} Jones` };
+  const named = { sub: "63a34f9d", display_name: `David ${"Longsurname".repeat(12)} Jones` };
   const lib = library({ scopes: [{ kind: "group", id: "platform" }, { kind: "org", id: "o1" }], people: [
-    { sub: named.id, name: named.display_name, access: "edit", sign_off: "required" },
+    { sub: named.sub, name: named.display_name, access: "edit", sign_off: "required" },
     { sub: "lena", name: null, access: "comment", sign_off: "required" },
     { sub: "sam", name: null, access: "view", sign_off: null },
-  ] }, [named.id]);
+  ] }, [named.sub]);
   await act(async () => render(<Reader lib={lib} />));
-  const david = row(named.id);
+  const david = row(named.sub);
   expect([david.dataset.access, david.dataset.signOff, david.dataset.state]).toEqual(["edit", "required", "signed_off"]);
   expect(david.querySelector(".av")?.textContent).toBe("DJ");
   expect(david.querySelector(".nm")?.getAttribute("title")).toBe(named.display_name);
@@ -180,8 +179,8 @@ it("stops sharing with one person, one team, or everyone", async () => {
 
 it("shares a plan nobody has yet from the same panel, saying it uploads a plan kept on this Mac", async () => {
   const lib = library({ shared: false, kept_here: true });
-  const directory = [{ sub: "lena", email: "lena@example.com", display_name: "Lena Ortiz" }];
-  await act(async () => render(<Reader lib={lib} directory={directory} />));
+  lib.target.members = async () => ({ people: [{ sub: "lena", email: "lena@example.com", first_name: "Lena", last_name: "Ortiz" }] });
+  await act(async () => render(<Reader lib={lib} />));
   expect(screen.getByTestId("share-upload").textContent).toContain("kept on this Mac");
   expect(screen.getByTestId("share-team-group-platform")).toBeTruthy();
   await act(async () => fireEvent.change(screen.getByTestId("share-search"), { target: { value: "ort" } }));
@@ -210,13 +209,14 @@ it("shows an add from the daemon's answer while the Library can't be read, after
   const lib = library();
   const sends = lib.target.invite;
   const read = lib.target.access;
-  let down = true;
+  let down = false;
   lib.target.access = async () => {
     if (down) throw new DaemonError("busy", "Can't reach your Library.", 503);
     return read();
   };
   // The daemon answers at once with the row it will send, and keeps it on this Mac until it lands.
   lib.target.invite = async (sub, access, signOff) => {
+    down = true;
     lib.calls.push(`invite ${sub} ${access} ${signOff}`);
     const q: ShareQueued = { sub, name: null, access, sign_off: signOff ? "required" : null, op: "invite", state: "sharing", error: null, receipt: `r-${sub}`, rev: 1 };
     lib.queue.push(structuredClone(q));
@@ -232,6 +232,7 @@ it("shows an add from the daemon's answer while the Library can't be read, after
   fireEvent.click(within(screen.getByTestId("share-result-lena")).getByRole("button"));
   await act(async () => fireEvent.click(screen.getByTestId("share-add-confirm")));
   expect(row("lena").dataset.state).toBe("sharing");                     // from the add's own answer
+  expect(within(screen.getByTestId("share-access")).getByRole("alert")).toBeTruthy();
   expect(lib.acks).toEqual(["r-lena"]);                                   // whose receipt goes back, so it is sent
   expect(within(row("lena")).queryByRole("button", { name: "What lena can do" })).toBeNull();     // nothing to change until it lands
   holdReads = false;
@@ -300,24 +301,66 @@ it("a team is shared from the first panel and then listed as a row", async () =>
   expect(screen.queryByTestId("share-team-group-platform")).toBeNull();
 });
 
-it("discards a stale search", async () => {
-  const replies: ((people: SharePerson[]) => void)[] = [];
+it("discards a directory response from a previous opening", async () => {
+  const replies: ((people: LibraryPerson[]) => void)[] = [];
   const lib = library();
-  const target: SharePeopleTarget = { ...lib.target, search: (q) => q.q ? new Promise((resolve) => replies.push((rows) => resolve({ people: rows }))) : Promise.resolve({ people }) };
-  await act(async () => render(<SharePanel plan={empty} target={target} writes={{ begin: () => true, end: () => {} }}
-    nameOf={(s) => s} onBusy={() => {}} visible onClose={() => {}} />));
-  const input = screen.getByTestId("share-search");
-  fireEvent.change(input, { target: { value: "old" } });
-  fireEvent.change(input, { target: { value: "new" } });
+  lib.target.members = () => new Promise((resolve) => replies.push((rows) => resolve({ people: rows })));
+  await act(async () => render(<Reader lib={lib} />));
+  fireEvent.click(screen.getByRole("button", { name: "Close share" }));
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Open" })));
+  fireEvent.focus(screen.getByTestId("share-search"));
   await act(async () => replies[1]([people[1]]));
   await act(async () => replies[0]([people[0]]));
   expect(screen.queryByTestId("share-result-sam")).toBeNull();
   expect(screen.getByTestId("share-result-lena")).toBeTruthy();
 });
 
+it("filters several edits using one directory read per panel opening", async () => {
+  const lib = library({ people: [{ sub: "sam", name: null, access: "comment", sign_off: null }] });
+  let reads = 0;
+  const read = lib.target.members;
+  lib.target.members = async () => { reads++; return read(); };
+  await act(async () => render(<Reader lib={lib} />));
+  expect(reads).toBe(1);
+  const input = screen.getByTestId("share-search");
+  await act(async () => fireEvent.focus(input));
+  for (const value of ["s", "sa", "sam", " SAM@ "]) {
+    await act(async () => fireEvent.change(input, { target: { value } }));
+    expect(screen.getByTestId("share-result-sam")).toBeTruthy();
+  }
+  expect(screen.queryByTestId("share-result-lena")).toBeNull();
+  expect(reads).toBe(1);
+  fireEvent.click(screen.getByRole("button", { name: "Close share" }));
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Open" })));
+  expect(reads).toBe(2);
+});
+
+it("waits for access before a directory match can be used to invite someone", async () => {
+  const lib = library({ people: [{ sub: "sam", name: null, access: "view", sign_off: null }] });
+  let releaseAccess!: (access: ShareAccess) => void;
+  const pending = new Promise<ShareAccess>((resolve) => { releaseAccess = resolve; });
+  lib.target.access = () => pending;
+  await act(async () => render(<Reader lib={lib} />));
+  const input = screen.getByTestId("share-search");
+  fireEvent.change(input, { target: { value: "sam" } });
+  const result = screen.getByTestId("share-result-sam");
+  const match = within(result).getByRole<HTMLButtonElement>("button");
+  fireEvent.click(match);
+  fireEvent.keyDown(input, { key: "Enter" });
+  expect(screen.queryByTestId("share-add")).toBeNull();
+  expect(match.disabled).toBe(true);
+
+  await act(async () => releaseAccess(lib.state));
+  expect(result.classList.contains("dim")).toBe(true);
+  expect(match.disabled).toBe(false);
+  fireEvent.click(match);
+  expect(screen.getByTestId("share-menu-sam")).toBeTruthy();
+  expect(screen.queryByTestId("share-add")).toBeNull();
+});
+
 it("says why a search failed", async () => {
   const lib = library();
-  const target: SharePeopleTarget = { ...lib.target, search: () => Promise.reject(new Error("the daemon's reason")) };
+  const target: SharePeopleTarget = { ...lib.target, members: () => Promise.reject(new Error("the daemon's reason")) };
   await act(async () => render(<SharePanel plan={empty} target={target} writes={{ begin: () => true, end: () => {} }}
     nameOf={(s) => s} onBusy={() => {}} visible onClose={() => {}} />));
   await act(async () => fireEvent.focus(screen.getByTestId("share-search")));

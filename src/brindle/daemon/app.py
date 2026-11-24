@@ -25,6 +25,7 @@ from brindle.daemon.routes_actions import ROUTES as ACTIONS
 from brindle.daemon.routes_goal import ROUTES as GOAL_ROUTES
 from brindle.daemon.routes_org_permissions import ROUTES as ORG_PERMISSION_ROUTES
 from brindle.daemon.routes_visuals import ROUTES as VISUAL_ROUTES
+from brindle.daemon.routes_visuals import OrgMembersCache
 
 API_VERSION = "1.0"
 REQUEST_DEADLINE = 50.0   # seconds a read request's processes get (the app waits 60)
@@ -142,4 +143,5 @@ def build_app(token: str, port: int | None = None, poller=None) -> ASGIApp:
     app.state.poller = poller
     app.state.heavy_read_lane = routes_read.HeavyReadLane()
     app.state.snapshot_view = routes_read.SnapshotView()
+    app.state.org_members = OrgMembersCache()
     return Guard(Deadlines(app), token, port)

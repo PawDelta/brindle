@@ -2710,8 +2710,8 @@ export class DaemonClient {
   }
 
   /* The people of the person's org, to pick reviewers from, without the person (me); admin_org, the org whose rules they can override. */
-  libraryPeople() {
-    return this.get<{ people: LibraryPerson[]; me?: string; admin_org?: string | null }>("/library/people");
+  libraryPeople(repo?: string) {
+    return this.get<{ people: LibraryPerson[]; me?: string; admin_org?: string | null }>("/library/people", repo ? { repo } : {});
   }
 
   async keptVisuals(): Promise<KeptVisualDTO[]> {
