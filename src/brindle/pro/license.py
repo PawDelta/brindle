@@ -515,6 +515,9 @@ def clear_cache() -> None:
     """Forget the cached entitlement, here and on disk, and bump the
     generation so a read already in flight can't store what it saw."""
     global _cache
+    from brindle.pro import credentials
+
+    credentials.forget_request_records()
     _cache = None
     from brindle.config import brindle_home
     from brindle.pro._files import write_private
@@ -573,7 +576,8 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
             return hit
     try:
         store = store or credentials.default_store()
-        creds = store.load()
+        # The global cache's generation check must be able to read again from disk.
+        creds = store.load() if default or refresh else credentials.request_load(store)
     except credentials.CredentialError as e:
         raise LicenseError(str(e)) from e
     if not creds or not (creds.get("entitlement") or creds.get("refresh_token")):

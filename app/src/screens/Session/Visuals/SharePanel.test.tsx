@@ -34,7 +34,7 @@ function library(start: Partial<ShareAccess> = {}, signed: string[] = []) {
     else finish();
   });
   const person = (sub: string) => state.people.find((p) => p.sub === sub)!;
-  const target: Required<SharePeopleTarget> = {
+  const target: Required<Omit<SharePeopleTarget, "syncAccess">> & Pick<SharePeopleTarget, "syncAccess"> = {
     members: async () => ({ people }),
     access: async () => structuredClone(state),
     invite: (sub, access, signOff) => write(`invite ${sub} ${access} ${signOff}`, sub, () => {
@@ -293,10 +293,15 @@ it("tries a refused removal again as a removal, never as an add", async () => {
 
 it("a team is shared from the first panel and then listed as a row", async () => {
   const lib = library({ shared: false, kept_here: false });
+  const access = lib.target.access;
+  const reads: string[] = [];
+  lib.target.access = async () => { reads.push("access"); return access(); };
+  lib.target.syncAccess = async () => { reads.push("sync"); return access(); };
   await act(async () => render(<Reader lib={lib} />));
   expect(screen.getByTestId("share-upload").textContent).toContain("Library on brindle servers");
   await act(async () => fireEvent.click(within(screen.getByTestId("share-team-group-platform")).getByRole("button", { name: "Share" })));
   expect(lib.calls).toEqual(["shareScope group:platform"]);
+  expect(reads).toEqual(["access", "sync"]);
   expect(screen.getByTestId("share-scope-group-platform")).toBeTruthy();
   expect(screen.queryByTestId("share-team-group-platform")).toBeNull();
 });

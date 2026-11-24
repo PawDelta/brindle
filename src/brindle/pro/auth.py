@@ -880,6 +880,8 @@ def authed(client: Client, store, method: str, path: str, form: dict | None = No
     renewal is started). It fails closed (``record_changed``) rather than send for
     another sign-in or backend than the one ``store`` (a pinned view) and ``client``
     were made for."""
+    from brindle.pro import credentials
+
     warm = _warm_for(store) if now is None else None
     if warm is not None:
         token, generation = warm.grant(client, getattr(store, "generation", None))
@@ -890,17 +892,17 @@ def authed(client: Client, store, method: str, path: str, form: dict | None = No
                 status, body = client.call(method, path, form, token=newer, headers=headers)
         return status, body
     t = time.time() if now is None else now
-    cur = store.load() or {}
+    cur = credentials.request_load(store) or {}
     if not cur.get("refresh_token"):
         raise AuthError("not logged in to brindle Pro (run `brindle account login`)",
                         code="not_logged_in")
     if float(cur.get("access_expires_at") or 0) <= t + ACCESS_SLACK:
         refresh(client, store, cur, now=now)
-        cur = store.load() or {}
+        cur = credentials.request_load(store) or {}
     status, body = client.call(method, path, form, token=cur.get("access_token"), headers=headers)
     if status == 401:
         refresh(client, store, cur, now=now, force=True)
-        cur = store.load() or {}
+        cur = credentials.request_load(store) or {}
         status, body = client.call(method, path, form, token=cur.get("access_token"), headers=headers)
     return status, body
 

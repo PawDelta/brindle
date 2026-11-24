@@ -37,6 +37,10 @@ export function planSource(client: PlansClient & PlanDocClient & Partial<PlanSha
       && client.removePlanPerson && client.removePlanScope ? {
       members: () => client.libraryPeople!(),
       access: () => client.planAccess!(id),
+      syncAccess: client.syncPlanAccess && (async () => {
+        const synced = await client.syncPlanAccess!(id).catch(() => undefined);
+        return synced?.access ?? client.planAccess!(id);
+      }),
       invite: (sub, access, signOff) => client.invitePlanPerson!(id, sub, access, signOff),
       change: (sub, access) => client.setPlanPersonAccess!(id, sub, access),
       signOff: (sub, must) => client.setPlanPersonSignOff!(id, sub, must),

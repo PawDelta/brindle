@@ -182,7 +182,12 @@ def refused(db: DB, p: dict, resp: dict, status: int) -> None:
 def ask(db: DB, p: dict, method: str, path: str, body: dict | None = None, *, client, store) -> dict:
     """A Library call about plan ``p``'s review: its answer, or ``RuntimeError``
     with a readable reason, after recording a refusal by an org rule."""
-    status, resp = ad._call(method, path, body, client=client, store=store)
+    return checked(db, p, ad._call(method, path, body, client=client, store=store), body)
+
+
+def checked(db: DB, p: dict, result: tuple[int, dict], body: dict | None = None) -> dict:
+    """Record a Library answer on the thread that owns the plan's database."""
+    status, resp = result
     if status != 200:
         refused(db, p, resp, status)
         code = resp.get("error") if isinstance(resp.get("error"), str) else None

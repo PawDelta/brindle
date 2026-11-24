@@ -116,10 +116,13 @@ def _json(fn: Callable[[DB, Request], Any]) -> Callable[[Request], JSONResponse]
     request's DB, including on error responses."""
     @wraps(fn)
     def handler(request: Request) -> JSONResponse:
+        from brindle.pro import credentials
+
         try:
             db = DB()
             try:
-                return JSONResponse(fn(db, request))
+                with credentials.reading():
+                    return JSONResponse(fn(db, request))
             finally:
                 db.conn.close()
         except Exception as e:  # noqa: BLE001 - every engine error maps to a ServiceError
