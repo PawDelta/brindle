@@ -33,6 +33,8 @@ export function useEscBack(onBack: () => void) {
   useEffect(() => {
     const esc = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || e.defaultPrevented) return;
+      e.preventDefault();
+      e.stopPropagation();
       const typing = e.target instanceof HTMLElement && e.target.closest("input, textarea");
       if (typing) (typing as HTMLElement).blur();
       else back.current();
