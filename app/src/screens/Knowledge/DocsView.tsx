@@ -679,6 +679,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
         <LibraryList
           key={JSON.stringify([repo, scope, session, picks, stage, folder, inRepo, q, author, reviewer, changed])}
           client={client}
+          repo={repo}
           groups={groups}
           queue={queue}
           records={records}

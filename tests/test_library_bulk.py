@@ -15,6 +15,8 @@ from pro_fixtures import backend, pro_env, signing_key  # noqa: F401 - fixtures
 from test_plans import session  # noqa: F401 - fixture
 from test_shared_plan_docs import DOC, TEAM, parts  # noqa: F401 - fixture
 
+REPO = "/repo with spaces"
+
 
 @pytest.fixture
 def library(monkeypatch):
@@ -56,11 +58,28 @@ def library(monkeypatch):
     pytest.param("unshare", {"scope": "team:old-team"}, {"folder": "old", "shared": set()},
                  marks=pytest.mark.variant("bulk unshare must revoke the given scope on every doc")),
 ])
-def test_bulk_action_updates_each_doc(db, library, action, options, expected):
-    got = actions.bulk_docs(db, {}, {"action": action, "ids": ["one", "two"], **options})
+def test_bulk_action_updates_each_doc(db, library, monkeypatch, action, options, expected):
+    api = actions.docs_api
 
-    assert got == {"results": [{"id": "one", "ok": True}, {"id": "two", "ok": True}]}
+    def repo_api(method, path, body=None, *, repo):
+        if repo != REPO:
+            raise ServiceError("not_found", "Document is missing in this repo", 404)
+        return api(method, path, body, repo=repo)
+
+    monkeypatch.setattr(actions, "docs_api", repo_api)
+    second = "two"
+    if action == "move":
+        second = "local-two"
+        kept = {"doc_id": second, "server_id": "two"}
+        monkeypatch.setattr(local_library, "get", {second: kept}.get)
+        monkeypatch.setattr(local_library, "update", lambda doc_id, **fields: kept.update(fields))
+
+    got = actions.bulk_docs(db, {}, {"action": action, "ids": ["one", second], "repo": REPO, **options})
+
+    assert got == {"results": [{"id": "one", "ok": True}, {"id": second, "ok": True}]}
     assert library == {"one": expected, "two": expected}
+    if action == "move":
+        assert local_library.view(kept)["design"]["folder"]["id"] == "new"
 
 
 @pytest.mark.variant("a missing document must preserve its own error code and allow later deletes")
@@ -122,6 +141,8 @@ def test_bulk_export_deduplicates_titles_and_skips_refused_docs(db, monkeypatch,
     titles = {"one": "Release notes", "two": "Release notes", "refused": "Restricted"}
 
     def api(method, path, *, repo, query=None):
+        if repo != REPO:
+            raise ServiceError("not_found", "Document is missing in this repo", 404)
         _, doc_id, *tail = path.removeprefix("/").split("/")
         if not tail:
             return {"title": titles[doc_id]}
@@ -137,7 +158,10 @@ def test_bulk_export_deduplicates_titles_and_skips_refused_docs(db, monkeypatch,
         return {auth.BINARY_KEY: buf.getvalue()}
 
     monkeypatch.setattr(actions, "docs_api", api)
-    got = actions.export_docs(db, {}, {"ids": ["one", "refused", "two"], "format": fmt, "destination": "sharepoint"})
+    monkeypatch.setattr(local_library, "get", {"local-two": {"server_id": "two"}}.get)
+    got = actions.export_docs(db, {}, {
+        "ids": ["one", "refused", "local-two"], "format": fmt, "destination": "sharepoint", "repo": REPO,
+    })
 
     assert got["filename"].endswith(".zip")
     assert got["skipped"] == [{"id": "refused", "code": "not_entitled"}]
@@ -151,10 +175,38 @@ def test_bulk_export_deduplicates_titles_and_skips_refused_docs(db, monkeypatch,
             assert data.decode() == f"# {doc_id}"
 
 
-def test_bulk_routes_reject_over_limit_before_touching_docs(db, library):
+def test_local_only_plan_download_respects_policy_and_exports_saved_markdown(db, monkeypatch):
+    kept = {"doc_id": "local-one", "title": "Local plan", "files": [{"name": "plan.md", "md": "# On this device"}]}
+    monkeypatch.setattr(local_library, "get", {"local-one": kept}.get)
+
+    def unexpected_doc_call(*args, **kwargs):
+        pytest.fail("a local-only plan must not be sent to the Library")
+
+    def policy_api(method, path, *, repo):
+        if repo != REPO:
+            raise ServiceError("not_found", "Export policy is missing in this repo", 404)
+        return {"export_destinations": ["download"]}
+
+    monkeypatch.setattr(actions, "docs_api", unexpected_doc_call)
+    monkeypatch.setattr(actions, "docs_org_api", policy_api)
+    body = {"ids": ["local-one"], "format": "zip", "repo": REPO}
+    assert actions.export_docs(db, {}, {**body, "destination": "sharepoint"})["skipped"] == [
+        {"id": "local-one", "code": "destination_not_allowed"},
+    ]
+    got = actions.export_docs(db, {}, body)
+    assert not got["skipped"]
+    with ZipFile(io.BytesIO(base64.b64decode(got["content_b64"]))) as archive:
+        with ZipFile(io.BytesIO(archive.read("Local plan.zip"))) as plan:
+            assert plan.read("plan.md") == b"# On this device"
+
+
+def test_bulk_routes_reject_over_limit_before_touching_docs(db, monkeypatch):
+    def unexpected_upstream(*args, **kwargs):
+        pytest.fail("over-limit request reached the Library")
+
+    monkeypatch.setattr(actions, "docs_api", unexpected_upstream)
     ids = ["one"] * 501
     for run, fields in ((actions.bulk_docs, {"action": "delete"}), (actions.export_docs, {"format": "md"})):
         with pytest.raises(ServiceError) as refused:
             run(db, {}, {"ids": ids, **fields})
         assert refused.value.http_status == 400
-    assert set(library) == {"one", "two"}

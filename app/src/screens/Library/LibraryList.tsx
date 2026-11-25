@@ -93,6 +93,7 @@ export type BulkDocsClient = Partial<Pick<DaemonClient, "bulkDocs" | "exportDocs
 
 interface LibraryListProps {
   client: BulkDocsClient;
+  repo?: string;
   groups: DocGroup[];
   queue: Queue;
   records: Map<string, DesignRecord>;
@@ -113,13 +114,14 @@ const outcome: Record<Action, [string, string]> = {
   download: ["Downloaded", "downloaded"],
 };
 
-export function LibraryList({ client, groups, queue, records, scopes, folders, repos, matches, onOpen }: LibraryListProps) {
+export function LibraryList({ client, repo, groups, queue, records, scopes, folders, repos, matches, onOpen }: LibraryListProps) {
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [menu, setMenu] = useState<Menu | null>(null);
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
   const [failures, setFailures] = useState<Map<string, BulkDocResult>>(() => new Map());
   const deleteDescription = useId();
+  const moveDescription = useId();
   const anchor = useRef<string | null>(null);
   const running = useRef(false);
 
@@ -127,6 +129,7 @@ export function LibraryList({ client, groups, queue, records, scopes, folders, r
   const picked = rows.filter((doc) => selected.has(doc.id));
   const ids = picked.map((doc) => doc.id);
   const hasSelection = ids.length > 0;
+  const hasLocalOnly = picked.some((doc) => doc.local_only);
 
   function clear() {
     setSelected(new Set());
@@ -212,28 +215,28 @@ export function LibraryList({ client, groups, queue, records, scopes, folders, r
     }
   }
 
-  function bulk(action: BulkDocsRequest["action"], options: Omit<BulkDocsRequest, "action" | "ids"> = {}) {
+  function bulk(action: BulkDocsRequest["action"], options: Omit<BulkDocsRequest, "action" | "ids" | "repo"> = {}) {
     if (!client.bulkDocs) return;
     const submit = client.bulkDocs.bind(client);
-    void run(action, async () => (await submit({ action, ids, ...options })).results);
+    void run(action, async () => (await submit({ action, ids, repo, ...options })).results);
   }
 
   function download() {
     if (!client.exportDocs) return;
     const exportDocs = client.exportDocs.bind(client);
     void run("download", async () => {
-      const got = await exportDocs(ids, "zip");
-      const skipped = new Map(got.skipped.map(({ id, code }) => [id, code]));
-      if (ids.some((id) => !skipped.has(id))) {
-        const bytes = Uint8Array.from(atob(got.content_b64), (c) => c.charCodeAt(0));
+      const { downloads, skipped } = await exportDocs(ids, "zip", "download", repo);
+      for (const [index, archive] of downloads.entries()) {
+        const bytes = Uint8Array.from(atob(archive.content_b64), (c) => c.charCodeAt(0));
         const url = URL.createObjectURL(new Blob([bytes], { type: "application/zip" }));
         const link = document.createElement("a");
         link.href = url;
-        link.download = got.filename;
+        link.download = downloads.length > 1 ? archive.filename.replace(/\.zip$/i, ` (${index + 1}).zip`) : archive.filename;
         link.click();
         URL.revokeObjectURL(url);
       }
-      return ids.map((id) => ({ id, ok: !skipped.has(id), code: skipped.get(id) }));
+      const refused = new Map(skipped.map((result) => [result.id, result]));
+      return ids.map((id) => ({ id, ok: !refused.has(id), ...refused.get(id) }));
     });
   }
 
@@ -259,13 +262,16 @@ export function LibraryList({ client, groups, queue, records, scopes, folders, r
           <div className={`${card} mx-8 mb-2 flex flex-col gap-1 pt-2`}>
             <div className="flex flex-wrap items-center gap-1" role="toolbar" aria-label="Selected plans">
               <span className="mr-2 text-sm font-medium">{ids.length} selected</span>
-              <button type="button" className={button} disabled={busy || !client.bulkDocs} aria-expanded={menu === "move"} onClick={() => setMenu(menu === "move" ? null : "move")}>Move to folder</button>
+              <button type="button" className={button} disabled={busy || !client.bulkDocs || hasLocalOnly}
+                aria-describedby={hasLocalOnly ? moveDescription : undefined} aria-expanded={menu === "move"}
+                onClick={() => setMenu(menu === "move" ? null : "move")}>Move to folder</button>
               <button type="button" className={button} disabled={busy || !client.bulkDocs} aria-expanded={menu === "share"} onClick={() => setMenu(menu === "share" ? null : "share")}>Share / Stop sharing</button>
               <button type="button" className={button} disabled={busy || !client.exportDocs} onClick={download}>Download</button>
               <button type="button" className={`${quiet} text-sap`} disabled={busy || !client.bulkDocs} aria-haspopup="dialog" aria-expanded={menu === "delete"} onClick={() => setMenu(menu === "delete" ? null : "delete")}>Delete</button>
               <button type="button" className={quiet} disabled={busy} onClick={clear}>Clear</button>
             </div>
-            {menu === "move" && (
+            {hasLocalOnly && <p id={moveDescription} className="text-xs text-ink-2">Plans saved only on this device can’t be moved to Library folders.</p>}
+            {menu === "move" && !hasLocalOnly && (
               <div className={`${card} flex flex-col gap-1 px-s2 py-s1 text-sm`} role="group" aria-label="Move to folder">
                 {!folders.length && <span className="text-ink-2">There are no Library folders yet.</span>}
                 {folderTree(folders, rows, records, repos).map((tree) => (

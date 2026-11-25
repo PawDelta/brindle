@@ -19,6 +19,7 @@ const docs: AnalysisDoc[] = [
 
 const archiveBytes = "PK\x03\x04";
 const archiveName = "selected-plans.zip";
+const repo = "/repo with spaces";
 
 function library({ failure, hiddenShare }: { failure?: BulkDocResult; hiddenShare?: string } = {}) {
   let remaining = docs;
@@ -29,8 +30,10 @@ function library({ failure, hiddenShare }: { failure?: BulkDocResult; hiddenShar
     token: "t",
     fetch: async (url, init) => {
       const path = new URL(String(url)).pathname;
+      const body = JSON.parse(String(init?.body));
+      if (body.repo !== repo) return Response.json({ error: { code: "not_found", message: "Wrong library" } }, { status: 404 });
       if (path.endsWith("/library/docs/bulk")) {
-        const request = JSON.parse(String(init?.body)) as BulkDocsRequest;
+        const request = body as BulkDocsRequest;
         const { action, confirm, ids, scope } = request;
         const results = ids.map((id) => {
           if (action === "delete") {
@@ -51,7 +54,7 @@ function library({ failure, hiddenShare }: { failure?: BulkDocResult; hiddenShar
         return Response.json({ results });
       }
       if (path.endsWith("/library/docs/export")) {
-        const { ids, format } = JSON.parse(String(init?.body));
+        const { ids, format } = body;
         if (format === "zip" && ids.join(",") === "first,third") {
           return Response.json({ filename: archiveName, content_b64: btoa(archiveBytes), skipped: [] });
         }
@@ -79,7 +82,7 @@ function library({ failure, hiddenShare }: { failure?: BulkDocResult; hiddenShar
     bulkDocs: daemon.bulkDocs.bind(daemon),
     exportDocs: daemon.exportDocs.bind(daemon),
   };
-  render(<DocsView client={client} />);
+  render(<DocsView client={client} repo={repo} />);
 }
 
 const rowCheck = (id: string) => within(document.querySelector<HTMLElement>(`[data-doc="${id}"]`)!).getByRole<HTMLInputElement>("checkbox");
@@ -182,4 +185,43 @@ it("offers to stop sharing a plan after it has been bulk shared", async () => {
   fireEvent.click(rowCheck("first"));
   fireEvent.click(screen.getByRole("button", { name: "Share / Stop sharing" }));
   expect(await within(screen.getByRole("group", { name: "Share with" })).findByRole("button", { name: /^Stop sharing with / })).toBeTruthy();
+});
+
+it("keeps successful bulk changes when a later batch fails", async () => {
+  const ids = Array.from({ length: 501 }, (_, i) => `doc-${i}`);
+  const remaining = new Set(ids);
+  const client = new DaemonClient({
+    baseUrl: "http://daemon.test",
+    token: "t",
+    fetch: async (_url, init) => {
+      const batch = JSON.parse(String(init?.body));
+      if (batch.repo !== repo || batch.ids.length > 500 || batch.ids.includes(ids[500])) {
+        return Response.json({ error: { code: "invalid", message: "Batch refused" } }, { status: 400 });
+      }
+      return Response.json({ results: batch.ids.map((id: string) => ({ id, ok: remaining.delete(id) })) });
+    },
+  });
+
+  const result = await client.bulkDocs({ action: "delete", ids, repo });
+  expect([...remaining]).toEqual([ids[500]]);
+  expect(result.results.filter(({ ok }) => !ok)).toEqual([expect.objectContaining({ id: ids[500], code: "invalid" })]);
+});
+
+it("downloads successful archives from each batch of a large selection", async () => {
+  const ids = Array.from({ length: 501 }, (_, i) => `doc-${i}`);
+  const client = new DaemonClient({
+    baseUrl: "http://daemon.test",
+    token: "t",
+    fetch: async (_url, init) => {
+      const batch = JSON.parse(String(init?.body));
+      if (batch.repo !== repo || batch.ids.length > 500) {
+        return Response.json({ error: { code: "invalid", message: "Batch refused" } }, { status: 400 });
+      }
+      return Response.json({ filename: archiveName, content_b64: btoa(batch.ids.join(",")), skipped: [] });
+    },
+  });
+
+  const { downloads, skipped } = await client.exportDocs(ids, "zip", "download", repo);
+  expect(skipped).toEqual([]);
+  expect(downloads.flatMap(({ content_b64 }) => atob(content_b64).split(","))).toEqual(ids);
 });

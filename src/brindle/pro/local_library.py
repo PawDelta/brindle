@@ -318,6 +318,7 @@ def listed(query: dict | None = None, scope: dict | None = None, store=None) -> 
     """The docs kept here as the server lists docs (``topic``, ``kind`` and
     ``session`` filter them), each in the person's own ``scope``."""
     return [{**{k: r[k] for k in LISTED if k in r}, "doc_id": r["doc_id"], "local": True,
+             "local_only": not r.get("server_id"),
              **({"scope": scope} if scope else {})}
             for r in records(store) if _matches(r, query or {})]
 
@@ -325,8 +326,13 @@ def listed(query: dict | None = None, scope: dict | None = None, store=None) -> 
 def view(record: dict, scope: dict | None = None) -> dict:
     """One doc as the server shows it (``GET /analysis-docs/{id}``)."""
     shared = [s for s in record.get("shared") or [] if isinstance(s, dict)]
+    server_id = record.get("server_id")
+    placement = record.get("server_folder") or {}
+    folder = placement.get("folder") if server_id and placement.get("server_id") == server_id else None
     return {**{k: record[k] for k in LISTED if k in record}, "id": record["doc_id"], "local": True,
+            "local_only": not server_id,
             "files": record.get("files") or [], "scopes": [*([scope] if scope else []), *shared],
+            **({"design": {"folder": folder}} if folder else {}),
             **({"scope": scope} if scope else {})}
 
 

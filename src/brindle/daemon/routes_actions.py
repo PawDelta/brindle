@@ -2753,10 +2753,10 @@ def unshare_doc(db: DB, params: dict, body: Body) -> Any:
     return got
 
 
-def _folder_call(body: Body, run: Callable) -> Any:
+def _folder_call(body: Body, run: Callable, *, repo: str | None = None) -> Any:
     """Run a pro/library_folders write on the scope named by the body's ``scope``
     (user, team:<id> or org:<id>), through docs_api; bad input is a 400."""
-    repo = _get(body, "repo")
+    repo = repo or _get(body, "repo")
     kind, scope_id = doc_scope(_get(body, "scope", required=True), _docs_entitlement(repo).sub)
     try:
         return run(kind, scope_id, lambda m, p, b=None: docs_api(m, p, b, repo=repo))
@@ -2784,9 +2784,24 @@ def create_library_folder(db: DB, params: dict, body: Body) -> Any:
 def move_doc_to_folder(db: DB, params: dict, body: Body) -> Any:
     """Place the design in the ``folder`` (an id) of ``scope``."""
     from brindle.pro import library_folders as folders
+    from brindle.pro import local_library
 
-    return _folder_call(body, lambda kind, scope_id, api: folders.move_doc(
-        params["id"], kind, scope_id, _get(body, "folder", required=True), api=api))
+    doc_id = params["id"]
+    kept = local_library.get(doc_id)
+    server_id = doc_id if kept is None else kept.get("server_id")
+    if not server_id:
+        raise ServiceError("local_only", "A plan saved only on this device cannot be moved to a Library folder.", 409)
+    folder = _get(body, "folder", required=True)
+
+    def move(kind, scope_id, api):
+        got = folders.move_doc(server_id, kind, scope_id, folder, api=api)
+        if kept is not None:
+            local_library.update(doc_id, server_folder={"server_id": server_id, "folder": {
+                "scope": {"kind": kind, "id": scope_id}, "id": folder,
+            }})
+        return got
+
+    return _folder_call(body, move, repo=params.get("repo"))
 
 
 def _work_call(params: dict, body: Body, run: Callable) -> Any:
@@ -2947,11 +2962,12 @@ def bulk_docs(db: DB, params: dict, body: Body) -> Any:
     if run is None:
         raise ServiceError("invalid", "action is delete, move, share or unshare")
     _get(body, "confirm", bool)
+    repo = params.get("repo") or _get(body, "repo")
 
     results = []
     for doc_id in ids:
         try:
-            run(db, {**params, "id": doc_id}, body)
+            run(db, {**params, "id": doc_id, "repo": repo}, body)
         except Exception as e:  # noqa: BLE001 - a failed document must not stop the batch
             err = from_exception(e)
             if err.code == "internal":
@@ -3007,24 +3023,75 @@ def export_doc(db: DB, params: dict, body: Body) -> Any:
     return _doc_export_result(name, data, _get(body, "dir"))
 
 
+def _library_export_name(label: str, fmt: str, used: set[str]) -> str:
+    stem = re.sub(r"[^\w -]+", "-", label).strip(" -") or "doc"
+    name = f"{stem}.{fmt}"
+    number = 2
+    while name.casefold() in used:
+        name = f"{stem} ({number}).{fmt}"
+        number += 1
+    used.add(name.casefold())
+    return name
+
+
+def _local_doc_export(kept: dict, fmt: str) -> bytes:
+    from zipfile import ZIP_DEFLATED, ZipFile
+
+    files = [(f.get("name") or "doc.md", f["md"]) for f in kept.get("files") or []
+             if isinstance(f.get("md"), str) and f["md"]]
+    if not files:
+        raise ServiceError("invalid", "the plan has no saved text")
+    if fmt == "md":
+        return "\n\n".join(text for _, text in files).encode()
+    buf = io.BytesIO()
+    used = set()
+    with ZipFile(buf, "w", compression=ZIP_DEFLATED) as archive:
+        for name, text in files:
+            archive.writestr(_library_export_name(PurePosixPath(name.replace("\\", "/")).stem, "md", used), text)
+    return buf.getvalue()
+
+
 def export_docs(db: DB, params: dict, body: Body) -> Any:
     """Bundle each permitted Library export as a separately named archive entry."""
     from zipfile import ZIP_DEFLATED, ZipFile
+
+    from brindle.pro import local_library
 
     ids = _library_doc_ids(body)
     fmt = _get(body, "format", required=True)
     if fmt not in ("md", "zip"):
         raise ServiceError("invalid", "format is md or zip")
     destination = _export_destination(body)
+    repo = params.get("repo") or _get(body, "repo")
+
+    @functools.cache
+    def local_export_denial() -> str | None:
+        try:
+            policy = docs_org_api("GET", "policy", repo=repo)
+        except ServiceError as e:
+            return e.code
+        if destination not in policy.get("export_destinations", ["download"]):
+            return "destination_not_allowed"
+        return None
+
     skipped = []
     used = set()
     buf = io.BytesIO()
     with ZipFile(buf, "w", compression=ZIP_DEFLATED) as archive:
         for doc_id in ids:
-            doc_params = {**params, "id": doc_id}
             try:
-                doc = docs_api("GET", _doc_path(doc_params), repo=params.get("repo"))
-                data = _doc_export_bytes(doc_params, fmt, destination)
+                kept = local_library.get(doc_id)
+                server_id = doc_id if kept is None else kept.get("server_id")
+                if server_id:
+                    doc_params = {"id": server_id, "repo": repo}
+                    doc = docs_api("GET", _doc_path(doc_params), repo=repo)
+                    data = _doc_export_bytes(doc_params, fmt, destination)
+                else:
+                    if denied := local_export_denial():
+                        skipped.append({"id": doc_id, "code": denied})
+                        continue
+                    doc = kept
+                    data = _local_doc_export(kept, fmt)
             except Exception as e:  # noqa: BLE001 - a failed document must not stop the batch
                 err = from_exception(e)
                 if err.code == "internal":
@@ -3033,14 +3100,7 @@ def export_docs(db: DB, params: dict, body: Body) -> Any:
                 continue
             title = doc.get("title")
             label = title if isinstance(title, str) and title.strip() else doc_id
-            stem = re.sub(r"[^\w -]+", "-", label).strip(" -") or "doc"
-            name = f"{stem}.{fmt}"
-            number = 2
-            while name.casefold() in used:
-                name = f"{stem} ({number}).{fmt}"
-                number += 1
-            used.add(name.casefold())
-            archive.writestr(name, data)
+            archive.writestr(_library_export_name(label, fmt, used), data)
     return {**_doc_export_result("library.zip", buf.getvalue()), "skipped": skipped}
 
 
