@@ -370,7 +370,10 @@ def pr_state_of(url: str, payload: dict | None, *, previous: dict[str, Any] | No
     if head := payload.get("headRefOid"):
         out["head_sha"] = head
     mergeable = payload.get("mergeable")
-    if mergeable == "CONFLICTING" or (mergeable == "UNKNOWN" and previous and previous.get("conflicting")):
+    if mergeable == "CONFLICTING" or (
+        mergeable == "UNKNOWN" and head and previous
+        and previous.get("head_sha") == head and previous.get("conflicting")
+    ):
         out["conflicting"] = True
     marks = []      # per check: "pass", "fail" or "wait" (a check run not completed, a status still pending)
     for check in payload.get("statusCheckRollup") or []:

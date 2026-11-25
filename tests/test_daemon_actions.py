@@ -1838,6 +1838,14 @@ def test_session_pr_unknown_mergeability_keeps_last_conflict(db, session_pr_forg
     mergeable, = forge.items()
     assert mergeable.detail != conflict.detail
 
+    forge.payload["mergeable"] = "CONFLICTING"
+    session_review._read_pr_state(forge.url, forge.ws.repo_root)
+    forge.payload.update(mergeable="UNKNOWN", headRefOid="new-head")
+    session_review._read_pr_state(forge.url, forge.ws.repo_root)
+    pushed, = forge.items()
+    assert pushed.pr_head_sha == "new-head"
+    assert pushed.detail == mergeable.detail
+
 
 def test_auto_merge_session_pr_failure_reaches_inbox_once(db, session_pr_forge):
     from brindle.daemon import session_review
