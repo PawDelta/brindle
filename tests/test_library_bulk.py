@@ -22,7 +22,7 @@ REPO = "/repo with spaces"
 
 
 @pytest.fixture
-def library(monkeypatch):
+def library(monkeypatch, tmp_path):
     docs = {doc_id: {"folder": "old", "shared": {("group", "old-team")}} for doc_id in ("one", "two")}
 
     def api(method, path, body=None, **kwargs):
@@ -47,7 +47,7 @@ def library(monkeypatch):
             pytest.fail(f"unexpected Library operation: {method} {path}")
         return {}
 
-    monkeypatch.setattr(local_library, "get", lambda doc_id: None)
+    monkeypatch.setattr(local_library, "_path", lambda doc_id, store=None: tmp_path / f"{doc_id}.json")
     monkeypatch.setattr(actions, "_docs_entitlement", lambda repo: SimpleNamespace(sub="owner"))
     monkeypatch.setattr(actions, "docs_api", api)
     return docs
@@ -74,9 +74,7 @@ def test_bulk_action_updates_each_doc(db, library, monkeypatch, action, options,
     second = "two"
     if action == "move":
         second = "local-two"
-        kept = {"doc_id": second, "server_id": "two"}
-        monkeypatch.setattr(local_library, "get", {second: kept}.get)
-        monkeypatch.setattr(local_library, "update", lambda doc_id, **fields: kept.update(fields))
+        local_library._write(local_library._path(second), {"doc_id": second, "server_id": "two"})
 
     got = actions.bulk_docs(db, {}, {"action": action, "ids": ["one", second], "repo": REPO, **options})
 
@@ -108,17 +106,40 @@ def test_bulk_action_updates_each_doc(db, library, monkeypatch, action, options,
 
 
 def test_bulk_move_succeeds_when_writing_the_local_placement_fails(db, library, monkeypatch):
-    kept = {"doc_id": "local-two", "server_id": "two"}
-    monkeypatch.setattr(local_library, "get", {"local-two": kept}.get)
+    local_library._write(local_library._path("local-two"), {"doc_id": "local-two", "server_id": "two"})
 
     def unwritable(*args, **kwargs):
         raise OSError("Library cache is read-only")
 
-    monkeypatch.setattr(local_library, "update", unwritable)
+    monkeypatch.setattr(local_library, "_write", unwritable)
     body = {"action": "move", "ids": ["local-two"], "folder": "new", "scope": "user", "repo": REPO}
 
     assert actions.bulk_docs(db, {}, body) == {"results": [{"id": "local-two", "ok": True}]}
     assert library["two"]["folder"] == "new"
+
+
+def test_folder_refresh_cannot_restore_a_deleted_local_plan(db, library, monkeypatch):
+    doc_id = "local-two"
+    local_library._write(local_library._path(doc_id), {"doc_id": doc_id, "server_id": "two"})
+    monkeypatch.setattr(reads, "docs_api", actions.docs_api)
+    write = local_library._write
+    deleted = False
+
+    def delete_before_write(path, record):
+        nonlocal deleted
+        body = {"action": "delete", "ids": [doc_id], "confirm": True, "repo": REPO}
+        assert actions.bulk_docs(db, {}, body) == {"results": [{"id": doc_id, "ok": True}]}
+        deleted = True
+        write(path, record)
+
+    monkeypatch.setattr(local_library, "_write", delete_before_write)
+    request = Request({"type": "http", "path_params": {"id": doc_id},
+                       "query_string": urlencode({"repo": REPO}).encode()})
+
+    reads.analysis_doc.__wrapped__(db, request)
+
+    assert deleted and "two" not in library
+    assert local_library.get(doc_id) is None
 
 
 @pytest.mark.variant("a missing document must preserve its own error code and allow later deletes")
