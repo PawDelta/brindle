@@ -679,6 +679,7 @@ export interface InboxItemDTO {
   notice_id?: string | null;
   permission?: PermissionDTO | null;
   plan_offer?: PlanOfferDTO | null;
+  pr_head_sha?: string | null;
   read?: boolean | null;
   reason: string;
   request_id?: string | null;

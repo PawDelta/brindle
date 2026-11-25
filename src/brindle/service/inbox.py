@@ -202,16 +202,19 @@ def _failure_marker(*parts: str | None) -> str:
     return json.dumps(["failed", *parts])
 
 
-def _pr_problem(db: DB, root_id: str, branch: str, opened: dict | None) -> tuple[str, str] | None:
+def _pr_problem(db: DB, root_id: str, branch: str, opened: dict | None) -> tuple[str, str, str | None] | None:
     from brindle.daemon import session_review
 
-    recorded = db.conn.execute("SELECT url FROM session_prs WHERE root_id = ? AND branch = ?"
+    recorded = db.conn.execute("SELECT url, pushed_sha FROM session_prs WHERE root_id = ? AND branch = ?"
                                " AND url IS NOT NULL AND merged_at IS NULL", (root_id, branch)).fetchone()
     # A local fix can move HEAD beyond the PR: its failure still needs attention.
     urls = dict.fromkeys([r["url"] for r in (recorded, opened) if r])
     for url in urls:
         if problem := session_review.pr_problem(db, root_id, url):
-            return url, problem
+            detail, sha = problem
+            if sha is None and recorded and recorded["url"] == url:
+                sha = recorded["pushed_sha"]
+            return url, detail, sha
     return None
 
 
@@ -222,7 +225,8 @@ def dismiss_marker(db: DB, root_id: str, branch: str, path: str) -> str | None:
     """
     head, opened = _opened_pr(db, root_id, branch, path)
     if problem := _pr_problem(db, root_id, branch, opened):
-        return _failure_marker(head, *problem)
+        url, detail, _ = problem
+        return _failure_marker(head, url, detail)
     if opened:
         return f"{head}|{opened['url']}"
     prep = db.conn.execute("SELECT sha, state, check_cmd, output FROM session_pr_prep WHERE root_id = ? AND branch = ?"
@@ -266,11 +270,11 @@ def _pr_items(db: DB, root_id: str, branch: str, home: Workspace, link: dict) ->
     declined = db.conn.execute("SELECT sha FROM session_pr_declined WHERE root_id = ? AND branch = ?",
                                (root_id, branch)).fetchone()
     if problem := _pr_problem(db, root_id, branch, opened):
-        if declined and declined["sha"] == _failure_marker(head, *problem):
+        url, detail, sha = problem
+        if declined and declined["sha"] == _failure_marker(head, url, detail):
             return []
-        url, detail = problem
         return [InboxItemDTO(kind="pr_failed", reason="PR needs attention", detail=detail,
-                             url=url, **_pr_facts(db, root_id, home, head, url=url), **link)]
+                             url=url, pr_head_sha=sha, **_pr_facts(db, root_id, home, head, url=url), **link)]
     if opened:
         # Dismissed for this PR at any commit: a push to it doesn't bring the card back.
         if declined and declined["sha"].endswith(f"|{opened['url']}"):
@@ -309,7 +313,7 @@ def _dismiss_key(item: InboxItemDTO) -> str:
     if item.kind == "permission" and item.agent_id and item.permission and item.permission.request_id:
         return permission_dismiss_key(item.agent_id, item.permission.request_id)
     data = item.to_json()
-    for k in ("decision_count", "from_name", "file_count", "checks_state", "access_role"):
+    for k in ("decision_count", "from_name", "file_count", "checks_state", "access_role", "pr_head_sha"):
         data.pop(k, None)  # enrichment preserves existing dismissal keys
     if data.get("choices") is None:
         data.pop("choices", None)   # added later: an item without choices keeps the key it always had

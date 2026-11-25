@@ -327,6 +327,7 @@ class InboxItemDTO(_DTO):
     visual_id: str | None = None   # a visual's open question: GET /v1/sessions/{root_id}/visuals
     plan_offer: PlanOfferDTO | None = None
     url: str | None = None         # a pr_opened item's: the open PR on GitHub
+    pr_head_sha: str | None = None  # a pr_failed item's: the head on GitHub
 
 
 class VisualOptionDTO(_DTO):
