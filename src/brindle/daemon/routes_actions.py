@@ -2932,8 +2932,8 @@ def delete_doc(db: DB, params: dict, body: Body) -> Any:
             shared = _doc_has_shares(docs_api("GET", _doc_path({"id": server_id}), repo=repo))
         if shared:
             raise ServiceError("shared_plan", "Deleting this document from the Library stops sharing it.", 409)
-    # The Library checks for shares again at deletion, including any added after the read above.
-    query = {"confirm": "true"} if confirm else None
+    # Guard unconfirmed deletes against shares added after the read above.
+    query = None if confirm else {"if_unshared": "true"}
     if kept is None:
         got = docs_api("DELETE", _doc_path(params), repo=repo, query=query)
     else:
