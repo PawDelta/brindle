@@ -25,6 +25,10 @@ def library(monkeypatch):
         if doc_id not in docs:
             raise ServiceError("not_found", "Document is missing", 404)
         doc = docs[doc_id]
+        if method == "GET" and not tail:
+            owner = {"kind": "user", "id": "owner"}
+            scopes = [{"kind": kind, "id": scope_id} for kind, scope_id in doc["shared"]]
+            return {"scope": owner, "scopes": [dict(owner, name="Owner"), *scopes]}
         if method == "DELETE" and not tail:
             del docs[doc_id]
         elif method == "PUT" and tail == ["design", "folder"]:
@@ -61,6 +65,8 @@ def test_bulk_action_updates_each_doc(db, library, action, options, expected):
 
 @pytest.mark.variant("a missing document must preserve its own error code and allow later deletes")
 def test_bulk_delete_continues_after_a_doc_fails(db, library):
+    for doc in library.values():
+        doc["shared"].clear()
     got = actions.bulk_docs(db, {}, {"action": "delete", "ids": ["one", "missing", "two"]})
 
     assert [(r["id"], r["ok"], r.get("code")) for r in got["results"]] == [
@@ -69,10 +75,34 @@ def test_bulk_delete_continues_after_a_doc_fails(db, library):
     assert got["results"][1]["error"] and not library
 
 
+@pytest.mark.parametrize("local", [False, pytest.param(True, marks=pytest.mark.variant(
+    "sharing recorded on this Mac also requires confirmation before either copy is deleted"))])
+def test_bulk_delete_requires_confirmation_for_an_ordinary_shared_doc(db, library, monkeypatch, local):
+    doc_id = "local-one" if local else "one"
+    kept = {}
+    if local:
+        kept[doc_id] = {"server_id": "one", "shared": [{"kind": "group", "id": "old-team"}]}
+        library["one"]["shared"].clear()
+    monkeypatch.setattr(local_library, "get", kept.get)
+    monkeypatch.setattr(local_library, "remove", kept.pop)
+    body = {"action": "delete", "ids": [doc_id]}
+
+    refused, = actions.bulk_docs(db, {}, body)["results"]
+    assert (refused["id"], refused["ok"], refused.get("code")) == (doc_id, False, "confirm_shared")
+    if local:
+        assert kept[doc_id]["shared"] and "one" in library
+    else:
+        assert library["one"]["shared"] == {("group", "old-team")}
+
+    assert actions.bulk_docs(db, {}, {**body, "confirm": True}) == {"results": [{"id": doc_id, "ok": True}]}
+    assert "one" not in library and not kept
+
+
 def test_bulk_delete_requires_confirmation_before_releasing_shared_plan(db, parts, library):
     pid, _, net = parts
     sd.share(db, pid, TEAM, reviewers=[{"sub": "u_a", "required": True}], **net)
-    library[DOC] = {}
+    library[DOC] = {"shared": set()}
+    library["one"]["shared"].clear()
     body = {"action": "delete", "ids": [DOC, "one"]}
 
     refused, deleted = actions.bulk_docs(db, {}, body)["results"]

@@ -2884,30 +2884,46 @@ def disconnect_tracker(db: DB, params: dict, body: Body) -> Any:
     return _work_call(params, body, lambda org, api, who: wi.disconnect(org, params["tracker"], api=api))
 
 
-def delete_doc(db: DB, params: dict, body: Body) -> Any:
-    """Delete a doc; one kept on this Mac goes from here, and its server copy
-    (while shared) first.
+def _doc_has_shares(doc: dict) -> bool:
+    """A scope other than the owner's means the Library document is shared."""
+    owner = doc.get("scope")
+    owner_key = (owner.get("kind"), owner.get("id")) if isinstance(owner, dict) else None
+    return any(isinstance(scope, dict) and (scope.get("kind"), scope.get("id")) != owner_key
+               for scope in doc.get("scopes") or [])
 
-    A doc an open plan is shared for review through is refused (409
-    ``shared_plan``, with the ``plans``) unless ``confirm`` is true; on
-    confirm, those plans are unshared here (shared_docs.release_deleted) and
-    become personal docs again, so no sync is left pointing at a deleted doc."""
+
+def delete_doc(db: DB, params: dict, body: Body) -> Any:
+    """Delete a Library doc and its server copy if kept on this Mac.
+
+    Shared docs require ``confirm`` (409 ``shared_plan``). Once deleted,
+    release open plans shared through the doc so their reviews can continue
+    locally."""
     from brindle.pro import local_library
     from brindle.pro import shared_docs as sd
 
+    repo = params.get("repo")
     kept = local_library.get(params["id"])
-    ids = [params["id"], *([kept["server_id"]] if kept and kept.get("server_id") else [])]
+    server_id = params["id"] if kept is None else kept.get("server_id")
+    ids = [params["id"]]
+    if server_id and server_id != params["id"]:
+        ids.append(server_id)
     stranded = sd.open_shares_of(db, ids)
-    if stranded and not _get(body, "confirm", bool, default=False):
-        names = ", ".join(f"“{s['title']}”" for s in stranded)
-        raise ServiceError("shared_plan", f"This plan is being reviewed ({names}). Deleting it from the Library "
-                           "stops sharing that plan: it becomes a personal plan again.", 409, plans=stranded)
+    if not _get(body, "confirm", bool, default=False):
+        if stranded:
+            names = ", ".join(f"“{s['title']}”" for s in stranded)
+            raise ServiceError("shared_plan", f"This plan is being reviewed ({names}). Deleting it from the Library "
+                               "stops sharing that plan: it becomes a personal plan again.", 409, plans=stranded)
+        shared = bool(kept and kept.get("shared"))
+        if not shared and server_id:
+            shared = _doc_has_shares(docs_api("GET", _doc_path({"id": server_id}), repo=repo))
+        if shared:
+            raise ServiceError("shared_plan", "Deleting this document from the Library stops sharing it.", 409)
     if kept is None:
-        got = docs_api("DELETE", _doc_path(params), repo=params.get("repo"))
+        got = docs_api("DELETE", _doc_path(params), repo=repo)
     else:
-        _docs_entitlement(params.get("repo"))
-        if kept.get("server_id"):
-            docs_api("DELETE", _doc_path({"id": kept["server_id"]}), repo=params.get("repo"))
+        _docs_entitlement(repo)
+        if server_id:
+            docs_api("DELETE", _doc_path({"id": server_id}), repo=repo)
         local_library.remove(params["id"])
         got = {"deleted": params["id"]}
     if stranded:

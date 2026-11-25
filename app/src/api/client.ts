@@ -2814,7 +2814,7 @@ export class DaemonClient {
     return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}/share`, { scope });
   }
 
-  /* A doc an open plan is shared through is refused (409 shared_plan) unless `confirm`; on confirm the plan stops being shared. */
+  /* Shared docs require `confirm` (409 shared_plan). Deletion ends sharing. */
   deleteDoc(id: string, confirm = false) {
     return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}`, confirm ? { confirm } : {});
   }
