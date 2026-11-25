@@ -351,9 +351,9 @@ _pr_flights: dict[str, Future] = {}
 _pr_changed: set[str] = set()      # PRs whose line changed, until refresh_pr_states announces them
 
 
-def pr_state_of(url: str, payload: dict | None) -> dict[str, Any] | None:
+def pr_state_of(url: str, payload: dict | None, *, previous: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """What the sidebar's PR line says about the PR at ``url``, from ``gh pr
-    view --json state,mergeable,statusCheckRollup``: ``{number, state, done,
+    view --json state,mergeable,statusCheckRollup,headRefOid``: ``{number, state, done,
     total}`` with state ``ci`` (checks still running; ``done`` of ``total``
     finished), ``failed``, ``ready`` (every check passed, no conflicts) or
     ``unknown`` (no payload, no checks yet, conflicts: never a guess at
@@ -367,7 +367,10 @@ def pr_state_of(url: str, payload: dict | None) -> dict[str, Any] | None:
         return out
     if payload.get("state") not in (None, "OPEN"):
         return None
-    if payload.get("mergeable") == "CONFLICTING":
+    if head := payload.get("headRefOid"):
+        out["head_sha"] = head
+    mergeable = payload.get("mergeable")
+    if mergeable == "CONFLICTING" or (mergeable == "UNKNOWN" and previous and previous.get("conflicting")):
         out["conflicting"] = True
     marks = []      # per check: "pass", "fail" or "wait" (a check run not completed, a status still pending)
     for check in payload.get("statusCheckRollup") or []:
@@ -384,35 +387,35 @@ def pr_state_of(url: str, payload: dict | None) -> dict[str, Any] | None:
         out["state"] = "failed"
     elif "wait" in marks:
         out["state"] = "ci"
-    elif marks and payload.get("mergeable") == "MERGEABLE":
+    elif marks and mergeable == "MERGEABLE":
         out["state"] = "ready"
     return out
 
 
 def _read_pr_state(url: str, cwd: str) -> None:
-    payload = None
     try:
         # The pool's threads copy no context: bound the read with its own slot.
         with spawn.deadline(workspaces.PR_CHECKS_SECONDS):
             payload = workspaces.pull_request_checks(url, cwd)
-            state = pr_state_of(url, payload)
+        _set_pr_state(url, payload)
     except Exception:  # noqa: BLE001 - an unreadable PR is just unknown
         log.exception("brindle: couldn't read a session PR's checks")
-        state = pr_state_of(url, None)
-    _set_pr_state(url, state, closed=bool(payload and payload.get("state") == "CLOSED"))
+        _set_pr_state(url, None)
 
 
-def _set_pr_state(url: str, state: dict[str, Any] | None, *, closed: bool = False) -> None:
+def _set_pr_state(url: str, payload: dict | None) -> dict[str, Any] | None:
     with _pr_lock:
-        if closed:
+        if payload and payload.get("state") == "CLOSED":
             _pr_closed.add(url)
         else:
             _pr_closed.discard(url)
         before = _pr_cache[url][1] if url in _pr_cache else pr_state_of(url, None)
+        state = pr_state_of(url, payload, previous=before)
         _pr_cache[url] = (time.monotonic(), state)
         _pr_flights.pop(url, None)
         if state != before:
             _pr_changed.add(url)
+        return state
 
 
 def _ask_pr_state(url: str, cwd: str) -> None:
@@ -572,7 +575,7 @@ def _reconcile_pr_merge(db: DB, row, ws: Workspace) -> bool:
                                " AND state = 'merging' AND owner IS ?", (owner, url, attempt["owner"])).rowcount:
             return True
         payload = workspaces.pull_request_checks(url, ws.repo_root)
-        _set_pr_state(url, pr_state_of(url, payload))
+        _set_pr_state(url, payload)
         finished = payload and payload.get("state") in ("MERGED", "CLOSED")
         error = None if finished else "The automatic PR merge was interrupted. Check the PR on GitHub before merging it."
         db.conn.execute("UPDATE session_pr_merges SET state = ?, error = ? WHERE url = ? AND owner = ?",
@@ -641,8 +644,7 @@ def _auto_merge_session_pr(db: DB, row, ws: Workspace) -> None:
         acting = False
         try:
             payload = workspaces.pull_request_checks(url, ws.repo_root)
-            fresh = pr_state_of(url, payload)
-            _set_pr_state(url, fresh)
+            fresh = _set_pr_state(url, payload)
             if not payload or payload.get("state") != "OPEN" or not fresh or fresh["state"] != "ready":
                 return
             head = payload.get("headRefOid")
@@ -662,8 +664,8 @@ def _auto_merge_session_pr(db: DB, row, ws: Workspace) -> None:
                 db.conn.execute("DELETE FROM session_pr_merges WHERE url = ? AND state = 'merging'", (url,))
 
 
-def pr_problem(db: DB, root_id: str, url: str) -> str | None:
-    """A failed merge, or failed/conflicting PR nobody in the session is working on."""
+def pr_problem(db: DB, root_id: str, url: str) -> tuple[str, str | None] | None:
+    """A failed merge, or failed/conflicting PR nobody is working on, with its forge head."""
     with _pr_lock:
         cached = _pr_cache.get(url)
     if cached is not None and cached[1] is None:  # the forge knows the PR closed or merged
@@ -671,17 +673,18 @@ def pr_problem(db: DB, root_id: str, url: str) -> str | None:
     if db.conn.execute("SELECT 1 FROM session_prs WHERE root_id = ? AND url = ? AND merged_at IS NOT NULL",
                        (root_id, url)).fetchone():
         return None
+    state = cached[1] if cached else None
+    head = state.get("head_sha") if state else None
     attempt = db.conn.execute("SELECT error FROM session_pr_merges WHERE url = ? AND state = 'failed'", (url,)).fetchone()
     if attempt:
-        return attempt["error"]
-    state = cached[1] if cached else None
+        return (attempt["error"], head) if attempt["error"] else None
     if not state or any(a.status in ("processing", "starting") and a.dismissed_at is None
                         for a in agents.tree(db, root_id)):
         return None
     if state.get("conflicting"):
-        return "The PR conflicts with its base branch."
+        return "The PR conflicts with its base branch.", head
     if state["state"] == "failed":
-        return "The PR's CI checks failed."
+        return "The PR's CI checks failed.", head
     return None
 
 

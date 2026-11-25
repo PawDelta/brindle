@@ -1,7 +1,9 @@
-import { expect, it, vi } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import type { InboxItemDTO } from "../../api/schema";
 import { createAppStore } from "../../store/store";
 import { watchInbox } from "./notify";
+
+beforeEach(() => localStorage.clear());
 
 it("announces each PR once per kind across push gaps and CI reruns", () => {
   const store = createAppStore();
@@ -37,4 +39,32 @@ it("announces each PR once per kind across push gaps and CI reruns", () => {
   snapshot({ ...failed, detail: "lint failed" });
   expect(notify).toHaveBeenCalledTimes(3);
   stop();
+});
+
+it("remembers a PR failure across relaunches when a worker hides the card", () => {
+  const failed = {
+    kind: "pr_failed", reason: "PR needs attention", url: "https://github.com/o/r/pull/549",
+    detail: "conflicts", pr_head_sha: "abc",
+  };
+  const notify = vi.fn();
+  const launch = () => {
+    const store = createAppStore();
+    return {
+      stop: watchInbox(store, { notify, count: () => {} }),
+      snapshot: (...inbox: InboxItemDTO[]) => store.dispatch({ type: "snapshot", workspaces: [], inbox }),
+    };
+  };
+  const first = launch();
+  first.snapshot();
+  first.snapshot(failed);
+  expect(notify).toHaveBeenCalledTimes(1);
+  first.stop();
+
+  const relaunched = launch();
+  relaunched.snapshot();
+  relaunched.snapshot(failed);
+  expect(notify).toHaveBeenCalledTimes(1);
+  relaunched.snapshot({ ...failed, pr_head_sha: "def" });
+  expect(notify).toHaveBeenCalledTimes(2);
+  relaunched.stop();
 });
