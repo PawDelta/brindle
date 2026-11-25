@@ -78,6 +78,7 @@ import { clipboardAttachments, listenForDrops, type Attachment } from "../api/at
 import { startupStep } from "../api/startup";
 import { openExternal, type OpenUrl } from "../api/open";
 import type { Crop, PtyViewOpener, PtyViewTarget } from "../api/ptyView";
+import { escapeOwned } from "../escape";
 import { visualLink } from "../screens/Session/Visuals/client";
 import { VISUAL_LINK, VisualLinkContext } from "../screens/Session/Visuals/link";
 import { message } from "../screens/Session/Visuals/chrome";
@@ -372,7 +373,11 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
     setRenderer(loadRenderer(term, setRenderer));
     // A resume or reconnect replaces the view (its key), and the keyboard goes with the textarea it had, to nothing:
     // the next ⌘V and keys would reach no pane. Nothing is taken from a field or dialog in use.
-    const noteFocus = () => void (lastFocused = el);
+    let terminalEscapeDown = false;
+    const noteFocus = () => {
+      terminalEscapeDown = false;
+      lastFocused = el;
+    };
     term.textarea?.addEventListener("focus", noteFocus);
     if ((!document.activeElement || document.activeElement === document.body) && !document.querySelector(DIALOG)) term.textarea?.focus({ preventScroll: true });
     let crop: Crop = { cols: 0, left: 0 };
@@ -748,6 +753,19 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
         return false;
       }
       if (e.type === "keyup") capsLetter = false;
+      if (e.key === "Escape") {
+        // Let the reader handle Escape if the hidden terminal still has focus.
+        if (e.defaultPrevented || escapeOwned()) return false;
+        // Returning from a reader can focus xterm while its Escape is still held.
+        // Only continue a press that began in this terminal.
+        if (!terminalEscapeDown && (e.type !== "keydown" || e.repeat)) {
+          e.preventDefault();
+          e.stopPropagation();
+          return false;
+        }
+        if (e.type === "keydown") terminalEscapeDown = true;
+        else if (e.type === "keyup") terminalEscapeDown = false;
+      }
       if (e.type !== "keydown") return true;
       capsLetter = false;
       if (e.key === "Dead") deadKey = true;

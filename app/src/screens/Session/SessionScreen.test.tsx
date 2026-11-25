@@ -68,7 +68,21 @@ const fake = vi.hoisted(() => {
       this.cols = cols;
       this.rows = rows;
     }
-    open() {}
+    textarea: HTMLTextAreaElement | undefined;
+    open(host: HTMLElement) {
+      const input = host.ownerDocument.createElement("textarea");
+      input.className = "xterm-helper-textarea";
+      // Like xterm, translate Escape in capture after consulting the custom key handler.
+      input.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape" || this.keys?.(event) === false) return;
+        event.preventDefault();
+        event.stopPropagation();
+        this.type("\x1b");
+      }, true);
+      input.addEventListener("keyup", (event) => this.keys?.(event), true);
+      host.append(input);
+      this.textarea = input;
+    }
     loadAddon(addon: { activate(term: unknown): void }) {
       addon.activate(this);
     }
@@ -465,6 +479,47 @@ describe("SessionScreen", () => {
     expect(within(screen.getByTestId("visuals-panel")).getByTestId("visual-row-v_plan")).toBeTruthy();
     await flush();
     expect(chat.className).toBe(shownClass);
+  });
+
+  it.each(["reader", "inline iframe"])("keeps Escape from the PTY when closing a visual from the %s", async (origin) => {
+    const { daemon, term } = mount({ sup1: live });
+    await waitFor(() => expect(term().written).toBe(drawnLive));
+    const [view] = daemon.viewers("sup1");
+    daemon.visualRows.push({
+      id: "v_escape", session: "sup1", title: "Release choices", by: "supervisor", kind: "visual",
+      rev: 1, answer: null, kept: false, unread: true, created_at: 1,
+      ...(origin === "inline iframe" ? {
+        inline_html: "<p>Release choices</p>",
+        choices: [{ id: "release", question: "When?", options: [{ id: "today", label: "Today" }] }],
+      } : {}),
+    });
+    act(() => daemon.publish("visual.published", { repo_root: REPO, root_id: "sup1", payload: { visual: "v_escape" } }));
+    fireEvent.click(await screen.findByTestId("visuals-button"));
+    fireEvent.click(screen.getByTestId("visual-row-v_escape"));
+    const reader = await screen.findByTestId("visual-reader");
+    let from = within(reader).getByTestId("visual-back");
+    if (origin === "inline iframe") {
+      const frame = await within(reader).findByTitle<HTMLIFrameElement>("Release choices");
+      fireEvent.load(frame);
+      from = frame.contentDocument!.body;
+      from.tabIndex = -1;
+    }
+    from.focus();
+    const escaped = fireEvent.keyDown(from, { key: "Escape" });
+    expect(screen.queryByTestId("visual-reader")).toBeNull();
+
+    // The session restores terminal focus before the held key finishes.
+    const input = term().textarea!;
+    expect(document.activeElement).toBe(input);
+    fireEvent.keyDown(input, { key: "Escape", repeat: true });
+    fireEvent.keyUp(input, { key: "Escape" });
+    expect(view.written).toEqual([]);
+    expect(escaped).toBe(false);
+
+    fireEvent.keyDown(input, { key: "Escape" });
+    fireEvent.keyDown(input, { key: "Escape", repeat: true });
+    fireEvent.keyUp(input, { key: "Escape" });
+    expect(view.written).toEqual(["\x1b", "\x1b"]);
   });
 
   it.each([true, false])("observes Codex input only with visuals available (%s), excluding output and permission replies", async (enabled) => {
