@@ -2884,30 +2884,46 @@ def disconnect_tracker(db: DB, params: dict, body: Body) -> Any:
     return _work_call(params, body, lambda org, api, who: wi.disconnect(org, params["tracker"], api=api))
 
 
-def delete_doc(db: DB, params: dict, body: Body) -> Any:
-    """Delete a doc; one kept on this Mac goes from here, and its server copy
-    (while shared) first.
+def _doc_has_shares(doc: dict) -> bool:
+    """A scope other than the owner's means the Library document is shared."""
+    owner = doc.get("scope")
+    owner_key = (owner.get("kind"), owner.get("id")) if isinstance(owner, dict) else None
+    return any(isinstance(scope, dict) and (scope.get("kind"), scope.get("id")) != owner_key
+               for scope in doc.get("scopes") or [])
 
-    A doc an open plan is shared for review through is refused (409
-    ``shared_plan``, with the ``plans``) unless ``confirm`` is true; on
-    confirm, those plans are unshared here (shared_docs.release_deleted) and
-    become personal docs again, so no sync is left pointing at a deleted doc."""
+
+def delete_doc(db: DB, params: dict, body: Body) -> Any:
+    """Delete a Library doc and its server copy if kept on this Mac.
+
+    Shared docs require ``confirm`` (409 ``shared_plan``). Once deleted,
+    release open plans shared through the doc so their reviews can continue
+    locally."""
     from brindle.pro import local_library
     from brindle.pro import shared_docs as sd
 
+    repo = params.get("repo")
     kept = local_library.get(params["id"])
-    ids = [params["id"], *([kept["server_id"]] if kept and kept.get("server_id") else [])]
+    server_id = params["id"] if kept is None else kept.get("server_id")
+    ids = [params["id"]]
+    if server_id and server_id != params["id"]:
+        ids.append(server_id)
     stranded = sd.open_shares_of(db, ids)
-    if stranded and not _get(body, "confirm", bool, default=False):
-        names = ", ".join(f"“{s['title']}”" for s in stranded)
-        raise ServiceError("shared_plan", f"This plan is being reviewed ({names}). Deleting it from the Library "
-                           "stops sharing that plan: it becomes a personal plan again.", 409, plans=stranded)
+    if not _get(body, "confirm", bool, default=False):
+        if stranded:
+            names = ", ".join(f"“{s['title']}”" for s in stranded)
+            raise ServiceError("shared_plan", f"This plan is being reviewed ({names}). Deleting it from the Library "
+                               "stops sharing that plan: it becomes a personal plan again.", 409, plans=stranded)
+        shared = bool(kept and kept.get("shared"))
+        if not shared and server_id:
+            shared = _doc_has_shares(docs_api("GET", _doc_path({"id": server_id}), repo=repo))
+        if shared:
+            raise ServiceError("shared_plan", "Deleting this document from the Library stops sharing it.", 409)
     if kept is None:
-        got = docs_api("DELETE", _doc_path(params), repo=params.get("repo"))
+        got = docs_api("DELETE", _doc_path(params), repo=repo)
     else:
-        _docs_entitlement(params.get("repo"))
-        if kept.get("server_id"):
-            docs_api("DELETE", _doc_path({"id": kept["server_id"]}), repo=params.get("repo"))
+        _docs_entitlement(repo)
+        if server_id:
+            docs_api("DELETE", _doc_path({"id": server_id}), repo=repo)
         local_library.remove(params["id"])
         got = {"deleted": params["id"]}
     if stranded:
@@ -2915,25 +2931,48 @@ def delete_doc(db: DB, params: dict, body: Body) -> Any:
     return got
 
 
-def export_doc(db: DB, params: dict, body: Body) -> Any:
-    """The doc as ``format`` (md, docx or zip; the server renders it and
-    checks scope and the org's export policy). Markdown arrives as text; a
-    Word or zip file as bytes once the Pro transport carries them (until
-    then, a 502 saying it can't read the answer). With ``dir`` (a folder the
-    person picked) the file is written there and its path answered;
-    without, its ``filename`` and ``content_b64`` go back to the app and
-    nothing is written."""
-    import base64
-    import re
+def _library_doc_ids(body: Body) -> list[str]:
+    ids = _get(body, "ids", list, required=True)
+    if len(ids) > 500 or any(not isinstance(doc_id, str) or not doc_id.strip() or doc_id in (".", "..")
+                             for doc_id in ids):
+        raise ServiceError("invalid", "ids must contain at most 500 valid document IDs")
+    return ids
 
-    from brindle.pro import auth
 
-    fmt = _get(body, "format", default="md")
-    if fmt not in EXPORT_FORMATS:
-        raise ServiceError("invalid", "format is md, docx or zip")
+def bulk_docs(db: DB, params: dict, body: Body) -> Any:
+    """Apply a Library action independently to each requested doc, in input order."""
+    ids = _library_doc_ids(body)
+    action = _get(body, "action", required=True)
+    run = {"delete": delete_doc, "move": move_doc_to_folder, "share": share_doc, "unshare": unshare_doc}.get(action)
+    if run is None:
+        raise ServiceError("invalid", "action is delete, move, share or unshare")
+    _get(body, "confirm", bool)
+
+    results = []
+    for doc_id in ids:
+        try:
+            run(db, {**params, "id": doc_id}, body)
+        except Exception as e:  # noqa: BLE001 - a failed document must not stop the batch
+            err = from_exception(e)
+            if err.code == "internal":
+                log.exception("bulk Library action %s failed", action)
+            code = "confirm_shared" if action == "delete" and err.code == "shared_plan" else err.code
+            results.append({"id": doc_id, "ok": False, "code": code, "error": err.message})
+        else:
+            results.append({"id": doc_id, "ok": True})
+    return {"results": results}
+
+
+def _export_destination(body: Body) -> str:
     destination = _get(body, "destination", default="download")
     if destination not in EXPORT_DESTINATIONS:
         raise ServiceError("invalid", "destination is download, google_docs or sharepoint")
+    return destination
+
+
+def _doc_export_bytes(params: dict, fmt: str, destination: str) -> bytes:
+    from brindle.pro import auth
+
     got = docs_api("GET", _doc_path(params, "export"), repo=params.get("repo"),
                    query={"format": fmt, "destination": destination})
     text = got.get(auth.TEXT_KEY)
@@ -2941,8 +2980,12 @@ def export_doc(db: DB, params: dict, body: Body) -> Any:
         (v for v in got.values() if isinstance(v, (bytes, bytearray))), b"")
     if not data:
         raise ServiceError("upstream", "the export came back empty", 502)
-    name = f"{re.sub(r'[^A-Za-z0-9_-]+', '-', params['id']).strip('-') or 'doc'}.{fmt}"
-    folder = _get(body, "dir")
+    return bytes(data)
+
+
+def _doc_export_result(name: str, data: bytes, folder: str | None = None) -> dict:
+    import base64
+
     if folder is None:
         return {"filename": name, "content_b64": base64.b64encode(data).decode()}
     folder = Path(folder).expanduser()
@@ -2950,6 +2993,55 @@ def export_doc(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("invalid", f"not a folder: {folder}")
     (folder / name).write_bytes(data)
     return {"filename": name, "path": str(folder / name)}
+
+
+def export_doc(db: DB, params: dict, body: Body) -> Any:
+    """Export one doc through the Library's rendering and destination policy.
+    With ``dir``, write the file there and return its path. Otherwise return
+    its filename and base64 content."""
+    fmt = _get(body, "format", default="md")
+    if fmt not in EXPORT_FORMATS:
+        raise ServiceError("invalid", "format is md, docx or zip")
+    data = _doc_export_bytes(params, fmt, _export_destination(body))
+    name = f"{re.sub(r'[^A-Za-z0-9_-]+', '-', params['id']).strip('-') or 'doc'}.{fmt}"
+    return _doc_export_result(name, data, _get(body, "dir"))
+
+
+def export_docs(db: DB, params: dict, body: Body) -> Any:
+    """Bundle each permitted Library export as a separately named archive entry."""
+    from zipfile import ZIP_DEFLATED, ZipFile
+
+    ids = _library_doc_ids(body)
+    fmt = _get(body, "format", required=True)
+    if fmt not in ("md", "zip"):
+        raise ServiceError("invalid", "format is md or zip")
+    destination = _export_destination(body)
+    skipped = []
+    used = set()
+    buf = io.BytesIO()
+    with ZipFile(buf, "w", compression=ZIP_DEFLATED) as archive:
+        for doc_id in ids:
+            doc_params = {**params, "id": doc_id}
+            try:
+                doc = docs_api("GET", _doc_path(doc_params), repo=params.get("repo"))
+                data = _doc_export_bytes(doc_params, fmt, destination)
+            except Exception as e:  # noqa: BLE001 - a failed document must not stop the batch
+                err = from_exception(e)
+                if err.code == "internal":
+                    log.exception("bulk Library export failed")
+                skipped.append({"id": doc_id, "code": err.code})
+                continue
+            title = doc.get("title")
+            label = title if isinstance(title, str) and title.strip() else doc_id
+            stem = re.sub(r"[^\w -]+", "-", label).strip(" -") or "doc"
+            name = f"{stem}.{fmt}"
+            number = 2
+            while name.casefold() in used:
+                name = f"{stem} ({number}).{fmt}"
+                number += 1
+            used.add(name.casefold())
+            archive.writestr(name, data)
+    return {**_doc_export_result("library.zip", buf.getvalue()), "skipped": skipped}
 
 
 # -- terminals: the real command in a terminal the app shows -------------------------
@@ -3638,6 +3730,8 @@ ROUTES = [
     Route("/v1/analysis-docs/switches", _endpoint(put_doc_switch), methods=["PUT"]),
     Route("/v1/org-settings", _endpoint(put_org_settings), methods=["PUT"]),
     _post("/library/folders", create_library_folder),
+    _post("/library/docs/bulk", bulk_docs),
+    _post("/library/docs/export", export_docs),
     Route("/v1/library/designs/{id}/work-items", _endpoint(design_work_items), methods=["GET"]),
     Route("/v1/library/designs/{id}/work-items", _endpoint(create_design_work_items), methods=["POST"]),
     Route("/v1/library/designs/{id}/work-items/links", _endpoint(link_design_work_item), methods=["POST"]),

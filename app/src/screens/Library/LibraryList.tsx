@@ -5,7 +5,7 @@
    stage, or none), newest first. A row opens the design. */
 
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import type { AnalysisDoc, BulkDocsRequest, BulkDocsResult, DaemonClient, DocScope } from "../../api/client";
+import type { AnalysisDoc, BulkDocResult, BulkDocsRequest, DaemonClient, DocScope } from "../../api/client";
 import type { RepoDTO } from "../../api/schema";
 import { plain } from "../../api/wording";
 import { FolderIcon, LockIcon } from "../../components/icons";
@@ -26,7 +26,7 @@ function openLine(doc: AnalysisDoc, record?: DesignRecord | null): string {
   return parts.length ? parts.join(" · ") : "—";
 }
 
-function Row({ doc, record, queue, scopes, match, check, onOpen }: { doc: AnalysisDoc; record?: DesignRecord | null; queue: Queue; scopes: DocScope[]; match?: string | null; check: ReactNode; onOpen(): void }) {
+function Row({ doc, record, queue, scopes, match, check, failure, onOpen }: { doc: AnalysisDoc; record?: DesignRecord | null; queue: Queue; scopes: DocScope[]; match?: string | null; check: ReactNode; failure?: BulkDocResult; onOpen(): void }) {
   const stage = stageOf(doc.id, queue, record);
   const need = needsYou(doc.id, queue);
   const work = record?.work_item ?? doc.work_item;
@@ -35,22 +35,29 @@ function Row({ doc, record, queue, scopes, match, check, onOpen }: { doc: Analys
   const access = grants?.can_edit ? "you can edit" : grants?.can_comment ? "you can comment"
     : grants?.can_edit === false && grants.can_comment === false ? "you can view" : null;
   return (
-    <li className="group relative" data-doc={doc.id} data-stage={stage} data-needs-you={need ?? undefined} data-to-decide={openItems(doc, record).decide}>
-      {check}
-      <button type="button" className={`${COLUMNS} w-full border-b border-line py-[9px] text-left hover:bg-surface-2`} onClick={onOpen}>
-        <span className="min-w-0">
-          <span className="block truncate text-[13.5px] font-semibold text-ink">{doc.title || doc.id}</span>
-          {(match || doc.summary) && <span className="block truncate text-[12.5px] text-ink-3">{match || doc.summary}</span>}
-        </span>
-        <span className="grid justify-items-start gap-1">
-          <StagePill stage={stage} need={need} record={record} />
-          <WorkItem item={work} />
-        </span>
-        <SignOffs record={record} />
-        <span className="truncate text-xs text-ink-3">{openLine(doc, record)}</span>
-        <span className="text-xs text-ink-2">{scopeLabel(doc.scope, scopes)}{access && <span className="block text-ink-3">{access}</span>}</span>
-        <span className="text-right text-xs text-ink-3">{changedAgo(doc.updated_at ?? doc.created_at)}</span>
-      </button>
+    <li className="group border-b border-line" data-doc={doc.id} data-stage={stage} data-needs-you={need ?? undefined} data-to-decide={openItems(doc, record).decide}>
+      <div className="relative">
+        {check}
+        <button type="button" className={`${COLUMNS} w-full py-[9px] text-left hover:bg-surface-2`} onClick={onOpen}>
+          <span className="min-w-0">
+            <span className="block truncate text-[13.5px] font-semibold text-ink">{doc.title || doc.id}</span>
+            {(match || doc.summary) && <span className="block truncate text-[12.5px] text-ink-3">{match || doc.summary}</span>}
+          </span>
+          <span className="grid justify-items-start gap-1">
+            <StagePill stage={stage} need={need} record={record} />
+            <WorkItem item={work} />
+          </span>
+          <SignOffs record={record} />
+          <span className="truncate text-xs text-ink-3">{openLine(doc, record)}</span>
+          <span className="text-xs text-ink-2">{scopeLabel(doc.scope, scopes)}{access && <span className="block text-ink-3">{access}</span>}</span>
+          <span className="text-right text-xs text-ink-3">{changedAgo(doc.updated_at ?? doc.created_at)}</span>
+        </button>
+      </div>
+      {failure && (
+        <p role="alert" data-code={failure.code} className="px-8 pb-2 text-xs text-sap">
+          {(failure.error && plain(failure.error)) || "The action failed for this plan."}
+        </p>
+      )}
     </li>
   );
 }
@@ -111,7 +118,7 @@ export function LibraryList({ client, groups, queue, records, scopes, folders, r
   const [menu, setMenu] = useState<Menu | null>(null);
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
-  const [sharedPlans, setSharedPlans] = useState<Set<string>>(() => new Set());
+  const [failures, setFailures] = useState<Map<string, BulkDocResult>>(() => new Map());
   const deleteDescription = useId();
   const anchor = useRef<string | null>(null);
   const running = useRef(false);
@@ -130,7 +137,7 @@ export function LibraryList({ client, groups, queue, records, scopes, folders, r
   useEffect(() => {
     if (!hasSelection) return;
     const escape = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !event.defaultPrevented) {
+      if (event.key === "Escape" && !event.defaultPrevented && !running.current) {
         event.preventDefault();
         clear();
       }
@@ -171,7 +178,7 @@ export function LibraryList({ client, groups, queue, records, scopes, folders, r
     );
   }
 
-  async function run(action: Action, task: () => Promise<BulkDocsResult["results"]>) {
+  async function run(action: Action, task: () => Promise<BulkDocResult[]>) {
     if (running.current) return;
     running.current = true;
     setBusy(true);
@@ -183,15 +190,23 @@ export function LibraryList({ client, groups, queue, records, scopes, folders, r
       const done = ids.filter((id) => succeeded.has(id)).length;
       const failed = ids.length - done;
       setSelected((previous) => new Set([...previous].filter((id) => !succeeded.has(id))));
-      if (action === "delete") {
-        setSharedPlans(new Set(results.filter((result) => !result.ok && result.code === "shared_plan").map((result) => result.id)));
+      setFailures((previous) => {
+        const next = new Map(previous);
+        for (const result of results) {
+          if (result.ok) next.delete(result.id);
+          else next.set(result.id, result);
+        }
+        return next;
+      });
+      if (action === "delete" && results.some((result) => !result.ok && result.code === "confirm_shared")) {
+        setMenu("delete");
       }
       const [verb, past] = outcome[action];
       setSaid(`${verb} ${done}${failed ? ` · ${failed} couldn't be ${past}` : ""}`);
     } catch (error) {
       setSaid(plain(error instanceof Error ? error.message : String(error)));
     } finally {
-      libraryChanged();
+      if (action !== "download") libraryChanged();
       setBusy(false);
       running.current = false;
     }
@@ -207,9 +222,9 @@ export function LibraryList({ client, groups, queue, records, scopes, folders, r
     if (!client.exportDocs) return;
     const exportDocs = client.exportDocs.bind(client);
     void run("download", async () => {
-      const got = await exportDocs({ ids, format: "zip" });
-      const skipped = new Set(got.skipped.map(({ id }) => id));
-      if (got.content_b64) {
+      const got = await exportDocs(ids, "zip");
+      const skipped = new Map(got.skipped.map(({ id, code }) => [id, code]));
+      if (ids.some((id) => !skipped.has(id))) {
         const bytes = Uint8Array.from(atob(got.content_b64), (c) => c.charCodeAt(0));
         const url = URL.createObjectURL(new Blob([bytes], { type: "application/zip" }));
         const link = document.createElement("a");
@@ -217,15 +232,13 @@ export function LibraryList({ client, groups, queue, records, scopes, folders, r
         link.download = got.filename;
         link.click();
         URL.revokeObjectURL(url);
-      } else if (!got.path && ids.some((id) => !skipped.has(id))) {
-        throw new Error("The download came back empty.");
       }
-      return ids.map((id) => ({ id, ok: !skipped.has(id) }));
+      return ids.map((id) => ({ id, ok: !skipped.has(id), code: skipped.get(id) }));
     });
   }
 
   const sharedWith = (id: string) => records.get(id)?.shared_with ?? [];
-  const hasShared = picked.some((doc) => sharedPlans.has(doc.id) || (doc.scope && doc.scope.kind !== "user") || sharedWith(doc.id).length > 0);
+  const hasShared = picked.some((doc) => failures.get(doc.id)?.code === "confirm_shared" || (doc.scope && doc.scope.kind !== "user") || sharedWith(doc.id).length > 0);
   const shareTargets = menu === "share" ? withScopes(scopes, picked.flatMap(({ id }) => sharedWith(id))).filter((scope) => scope.kind !== "user") : [];
   const shareButtons = shareTargets.flatMap((scope) => {
     const spec = scopeSpec(scope);
@@ -250,7 +263,7 @@ export function LibraryList({ client, groups, queue, records, scopes, folders, r
               <button type="button" className={button} disabled={busy || !client.bulkDocs} aria-expanded={menu === "share"} onClick={() => setMenu(menu === "share" ? null : "share")}>Share / Stop sharing</button>
               <button type="button" className={button} disabled={busy || !client.exportDocs} onClick={download}>Download</button>
               <button type="button" className={`${quiet} text-sap`} disabled={busy || !client.bulkDocs} aria-haspopup="dialog" aria-expanded={menu === "delete"} onClick={() => setMenu(menu === "delete" ? null : "delete")}>Delete</button>
-              <button type="button" className={quiet} onClick={clear}>Clear</button>
+              <button type="button" className={quiet} disabled={busy} onClick={clear}>Clear</button>
             </div>
             {menu === "move" && (
               <div className={`${card} flex flex-col gap-1 px-s2 py-s1 text-sm`} role="group" aria-label="Move to folder">
@@ -297,7 +310,7 @@ export function LibraryList({ client, groups, queue, records, scopes, folders, r
           <GroupHead group={group} queue={queue} check={groupCheck(group)} />
           <ul className="flex flex-col">
             {group.docs.map((d) => (
-              <Row key={d.id} doc={d} record={records.get(d.id)} queue={queue} scopes={scopes} match={matches?.get(d.id)} onOpen={() => onOpen(d.id)}
+              <Row key={d.id} doc={d} record={records.get(d.id)} queue={queue} scopes={scopes} match={matches?.get(d.id)} failure={failures.get(d.id)} onOpen={() => onOpen(d.id)}
                 check={<input type="checkbox" aria-label={`Select ${d.title || d.id}`} checked={selected.has(d.id)} disabled={busy}
                   className={`${checkbox} ${hasSelection ? "" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"}`}
                   onChange={(event) => selectRow(d, event.currentTarget.checked, (event.nativeEvent as MouseEvent).shiftKey)} />} />

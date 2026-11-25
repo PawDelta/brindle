@@ -16020,6 +16020,14 @@
       "path": "/v1/library/designs/{id}/work-items/links/{link_id}"
     },
     {
+      "method": "POST",
+      "path": "/v1/library/docs/bulk"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/library/docs/export"
+    },
+    {
       "method": "GET",
       "path": "/v1/library/folders"
     },

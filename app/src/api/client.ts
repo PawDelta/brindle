@@ -1063,17 +1063,15 @@ export interface BulkDocsRequest {
   confirm?: boolean;
 }
 
-export interface BulkDocsResult {
-  results: { id: string; ok: boolean; code?: string; error?: string }[];
+export interface BulkDocResult {
+  id: string;
+  ok: boolean;
+  code?: string;
+  error?: string;
 }
 
-export interface ExportDocsRequest {
-  ids: string[];
-  format: "zip";
-  destination?: ExportDestination;
-}
-
-export interface ExportDocsResult extends DocExport {
+export interface BulkDocExport extends DocExport {
+  content_b64: string;
   skipped: { id: string; code: string }[];
 }
 
@@ -2784,14 +2782,6 @@ export class DaemonClient {
     return this.put<unknown>(`/analysis-docs/${encodeURIComponent(id)}/folder`, { scope, folder });
   }
 
-  bulkDocs(request: BulkDocsRequest) {
-    return this.post<BulkDocsResult>("/library/docs/bulk", request);
-  }
-
-  exportDocs(request: ExportDocsRequest) {
-    return this.post<ExportDocsResult>("/library/docs/export", request);
-  }
-
   async knowledgeMap(repo: string, scope: DocScope, paths: string[] = []): Promise<KnowledgeMap> {
     const got = await this.get<KnowledgeMap>("/analysis-docs/map", { repo, scope_kind: scope.kind, scope_id: scope.id, paths: JSON.stringify(paths), depth: 1 });
     return { ...got, nodes: got.nodes.map(({ category, ...node }) => ({ ...node, ...categoryOf(category) })) };
@@ -2824,14 +2814,22 @@ export class DaemonClient {
     return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}/share`, { scope });
   }
 
-  /* A doc an open plan is shared through is refused (409 shared_plan) unless `confirm`; on confirm the plan stops being shared. */
+  /* Shared docs require `confirm` (409 shared_plan). Deletion ends sharing. */
   deleteDoc(id: string, confirm = false) {
     return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}`, confirm ? { confirm } : {});
+  }
+
+  bulkDocs(request: BulkDocsRequest) {
+    return this.post<{ results: BulkDocResult[] }>("/library/docs/bulk", request);
   }
 
   /* With `dir` the daemon writes the file there; without, it comes back as base64. */
   exportDoc(id: string, format: "md" | "docx" | "zip", dir?: string, destination: ExportDestination = "download") {
     return this.post<DocExport>(`/analysis-docs/${encodeURIComponent(id)}/export`, { format, destination, ...(dir ? { dir } : {}) });
+  }
+
+  exportDocs(ids: string[], format: "md" | "zip", destination: ExportDestination = "download") {
+    return this.post<BulkDocExport>("/library/docs/export", { ids, format, destination });
   }
 
   /* The org's doc policy: which export destinations it allows. */
