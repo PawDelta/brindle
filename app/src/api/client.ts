@@ -803,6 +803,7 @@ interface WireMentions {
 
 interface WireListedDoc {
   doc_id: string;
+  local_only?: boolean;
   version?: number;
   title?: string;
   summary?: string;
@@ -830,6 +831,8 @@ interface WireDoc extends Omit<WireListedDoc, "doc_id"> {
 
 export interface AnalysisDoc {
   id: string;
+  /* The plan is kept on this device and has no server copy to put in a folder. */
+  local_only?: boolean;
   /* The caller's effective grants, computed by the Library. */
   can_edit?: boolean;
   can_comment?: boolean;
@@ -1054,6 +1057,34 @@ export interface DocExport {
 }
 
 export type ExportDestination = "download" | "google_docs" | "sharepoint";
+
+export interface BulkDocsRequest {
+  action: "delete" | "move" | "share" | "unshare";
+  ids: string[];
+  folder?: string;
+  scope?: string;
+  confirm?: boolean;
+  repo?: string;
+}
+
+export interface BulkDocResult {
+  id: string;
+  ok: boolean;
+  code?: string;
+  error?: string;
+}
+
+export interface BulkDocExport extends DocExport {
+  content_b64: string;
+  skipped: { id: string; code: string }[];
+}
+
+function* libraryDocBatches(ids: string[]) {
+  const batchSize = 500;
+  for (let start = 0; start < ids.length; start += batchSize) {
+    yield ids.slice(start, start + batchSize);
+  }
+}
 
 /* GET /analysis-docs/policy (the rest of the org's policy passes through untouched). */
 export interface DocPolicy {
@@ -2794,14 +2825,46 @@ export class DaemonClient {
     return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}/share`, { scope });
   }
 
-  /* A doc an open plan is shared through is refused (409 shared_plan) unless `confirm`; on confirm the plan stops being shared. */
+  /* Shared docs require `confirm` (409 shared_plan). Deletion ends sharing. */
   deleteDoc(id: string, confirm = false) {
     return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}`, confirm ? { confirm } : {});
+  }
+
+  async bulkDocs(request: BulkDocsRequest) {
+    const results: BulkDocResult[] = [];
+    for (const ids of libraryDocBatches(request.ids)) {
+      try {
+        const batch = await this.post<{ results: BulkDocResult[] }>("/library/docs/bulk", { ...request, ids });
+        results.push(...batch.results);
+      } catch (error) {
+        if (!(error instanceof DaemonError)) throw error;
+        results.push(...ids.map((id) => ({ id, ok: false, code: error.code, error: error.message })));
+      }
+    }
+    return { results };
   }
 
   /* With `dir` the daemon writes the file there; without, it comes back as base64. */
   exportDoc(id: string, format: "md" | "docx" | "zip", dir?: string, destination: ExportDestination = "download") {
     return this.post<DocExport>(`/analysis-docs/${encodeURIComponent(id)}/export`, { format, destination, ...(dir ? { dir } : {}) });
+  }
+
+  async exportDocs(ids: string[], format: "md" | "zip", destination: ExportDestination = "download", repo?: string) {
+    const downloads: Pick<BulkDocExport, "filename" | "content_b64">[] = [];
+    const skipped: Omit<BulkDocResult, "ok">[] = [];
+    for (const batch of libraryDocBatches(ids)) {
+      try {
+        const archive = await this.post<BulkDocExport>("/library/docs/export", { ids: batch, format, destination, repo });
+        skipped.push(...archive.skipped);
+        if (archive.skipped.length < batch.length) {
+          downloads.push({ filename: archive.filename, content_b64: archive.content_b64 });
+        }
+      } catch (error) {
+        if (!(error instanceof DaemonError)) throw error;
+        skipped.push(...batch.map((id) => ({ id, code: error.code, error: error.message })));
+      }
+    }
+    return { downloads, skipped };
   }
 
   /* The org's doc policy: which export destinations it allows. */

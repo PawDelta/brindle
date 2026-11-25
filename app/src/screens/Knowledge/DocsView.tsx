@@ -19,13 +19,13 @@ import { ExportMenu, type ExportClient } from "./ExportMenu";
 import { Markdown } from "./Markdown";
 import { docMatch, useLibrarySearch, type LibraryHit, type SearchClient } from "./librarySearch";
 import { ReaderChrome } from "../Session/Visuals/VisualReader";
-import { setReaderDoc, useLibraryChanges, useLibraryPicks } from "../../store/libraryReader";
+import { libraryChanged, setReaderDoc, useLibraryChanges, useLibraryPicks } from "../../store/libraryReader";
 import { LIBRARY_STAGES, type LibraryStage } from "../../routes";
-import { atStage, folderOf, groupDocs, loadRecords, placedFolders, repoName, signOffRows, type DesignRecord, type GroupBy, type Queue } from "../Library/libraryStages";
-import { LibraryList } from "../Library/LibraryList";
+import { atStage, folderOf, groupDocs, loadRecords, placedFolders, repoName, scopeName, scopeSpec, signOffRows, withScopes, type DesignRecord, type GroupBy, type Queue } from "../Library/libraryStages";
+import { LibraryList, type BulkDocsClient } from "../Library/LibraryList";
 import { LibraryBoard } from "../Library/LibraryBoard";
 
-export type DocsClient = Pick<DaemonClient, "docs" | "docScopes" | "doc" | "docResults" | "shareDoc" | "unshareDoc" | "deleteDoc"> & Partial<Pick<DaemonClient, "libraryFolders">> & ExportClient & SearchClient;
+export type DocsClient = Pick<DaemonClient, "docs" | "docScopes" | "doc" | "docResults" | "shareDoc" | "unshareDoc" | "deleteDoc"> & Partial<Pick<DaemonClient, "libraryFolders">> & ExportClient & SearchClient & BulkDocsClient;
 
 export interface DocsViewProps {
   client: DocsClient;
@@ -64,32 +64,6 @@ function readLayout(): Layout {
     return "list";
   }
 }
-
-/* A doc's scope as the daemon's filter takes it: user, team:<id> or org:<id>. */
-export function scopeSpec(s: DocScope): string {
-  if (s.kind === "user") return "user";
-  return `${s.kind === "org" ? "org" : "team"}:${s.id}`;
-}
-
-/* Its name from the scopes list; a scope known only from a doc is told apart by the start of its id. */
-export function scopeName(s: DocScope): string {
-  if (s.kind === "user") return "Mine";
-  return s.name || (s.kind === "org" ? "Enterprise" : `Team ${s.id.slice(0, 8)}`);
-}
-
-/* `had` with each scope of `more` it lacks, in order; a named one (from the scopes list) wins over a bare one. */
-const withScopes = (had: DocScope[], more: DocScope[]) => {
-  const seen = new Map(had.map((s) => [scopeSpec(s), s]));
-  let changed = false;
-  for (const s of more) {
-    const was = seen.get(scopeSpec(s));
-    if (!was || (s.name && !was.name)) {
-      seen.set(scopeSpec(s), was ? { ...s, ...was, name: s.name, can_share: s.can_share ?? was.can_share } : s);
-      changed = true;
-    }
-  }
-  return changed ? [...seen.values()] : had;
-};
 
 /* "Oct 12": a server time (seconds, milliseconds or an ISO string) as a short date. */
 export function shortDate(v: number | string | undefined): string | null {
@@ -499,7 +473,6 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
 
   const load = useCallback(() => {
     let live = true;
-    setListing({ state: "loading" });
     client.docs({ repo, scope: scope || undefined, session }).then(
       (got) => {
         if (!live) return;
@@ -512,11 +485,16 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
       live = false;
     };
   }, [client, repo, scope, session]);
-  useEffect(load, [load]);
 
   /* The folders, for the groups' names and the folder or repo the sidebar picked; read again with
      every design's record when the sidebar makes a folder or moves a design (libraryChanged). */
   const changes = useLibraryChanges();
+  useEffect(() => setListing({ state: "loading" }), [load]);
+  useEffect(load, [load, changes]);
+  const reload = () => {
+    setListing({ state: "loading" });
+    libraryChanged();
+  };
   const [folderGroups, setFolderGroups] = useState<FolderGroup[]>(NO_FOLDERS);
   useEffect(() => {
     let live = true;
@@ -623,7 +601,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
         onBack={() => setOpen(null)}
         onDeleted={() => {
           setOpen(null);
-          load();
+          reload();
         }}
       />,
     );
@@ -689,7 +667,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
       {listing.state === "failed" && (
         <div role="alert" className={`${alert} mx-8 flex items-center justify-between gap-s2`}>
           <span>Could not load the library: {listing.error}</span>
-          <button type="button" className={button} onClick={load}>
+          <button type="button" className={button} onClick={reload}>
             Try again
           </button>
         </div>
@@ -697,7 +675,21 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
       {listing.state === "loading" && <p className="px-8 text-sm text-ink-3">Loading…</p>}
       {listing.state === "loaded" && docs.length === 0 && sourceHits.length === 0 && !search.searching && !q && <div data-testid="library-empty" className={`${card} mx-8 flex flex-col gap-s1 py-s3`}><h2 className={h2}>No plans saved yet</h2><p className="text-sm text-ink-2">Plans you approve or share are saved here, with the record of what was agreed and why.</p><ol className="list-decimal pl-s2 text-sm text-ink-2"><li>Ask for a plan in a session.</li><li>Review it and approve the plan.</li><li>Find it here when you need it again.</li></ol></div>}
       {listing.state === "loaded" && (docs.length > 0 || q) && shown.length === 0 && sourceHits.length === 0 && !search.searching && <p className="px-8 text-sm text-ink-2">No plan matches.</p>}
-      {shown.length > 0 && layout === "list" && <LibraryList groups={groups} queue={queue} records={records} scopes={scopes} matches={q ? matches : undefined} onOpen={setOpen} />}
+      {layout === "list" && (
+        <LibraryList
+          key={JSON.stringify([repo, scope, session, picks, stage, folder, inRepo, q, author, reviewer, changed])}
+          client={client}
+          repo={repo}
+          groups={groups}
+          queue={queue}
+          records={records}
+          scopes={scopes}
+          folders={placed}
+          repos={repos}
+          matches={q ? matches : undefined}
+          onOpen={setOpen}
+        />
+      )}
       {shown.length > 0 && layout === "board" && (
         <LibraryBoard docs={shown} queue={queue} records={records} onOpen={setOpen} folderOf={(id) => {
           const f = placeOf(id);

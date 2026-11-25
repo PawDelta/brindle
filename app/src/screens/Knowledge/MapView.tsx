@@ -2,7 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import type { DaemonClient, DocScope, KbSource, KnowledgeMap } from "../../api/client";
 import type { DecisionDTO } from "../../api/schema";
 import { alert, button, card, field, h2 } from "../../components/ui";
-import { Reader, scopeName } from "./DocsView";
+import { Reader } from "./DocsView";
+import { scopeName } from "../Library/libraryStages";
 import { DecisionCard } from "./KnowledgeScreen";
 import { docGraph } from "./graphLayout";
 import { joinLocal, MapGraph, type GraphNode } from "./MapGraph";
