@@ -14,7 +14,8 @@ import type { LibraryStage } from "../../routes";
 
 export type DesignReview = NonNullable<AnalysisDocDetail["design"]>;
 /* What the Library reads from a design's detail. */
-export type DesignRecord = Pick<AnalysisDocDetail, "design" | "tasks" | "threads" | "decisions" | "verdict" | "work_item" | "can_edit" | "can_comment">;
+export type DesignRecord = Pick<AnalysisDocDetail, "design" | "tasks" | "threads" | "decisions" | "verdict" | "work_item" | "can_edit" | "can_comment">
+  & Partial<Pick<AnalysisDocDetail, "shared_with">>;
 /* The five stages a design reaches, in order: the board's columns. */
 export type DesignStage = Exclude<LibraryStage, "needs-you">;
 export const BOARD_STAGES: { id: DesignStage; label: string }[] = [
@@ -79,7 +80,7 @@ export function stageCounts(docs: AnalysisDoc[], queue: Queue, records: Map<stri
 /* Each listed design's record (from its detail). A failed read is skipped: the design shows as Drafting. */
 export async function loadRecords(client: Pick<DaemonClient, "doc"> & Partial<Pick<DaemonClient, "libraryWorkItems">>, docs: AnalysisDoc[], repo?: string): Promise<Map<string, DesignRecord>> {
   const [got, work] = await Promise.all([
-    Promise.all(docs.map((d) => client.doc(d.id, repo).then((x): DesignRecord => ({ design: x.design, tasks: x.tasks, threads: x.threads, decisions: x.decisions, verdict: x.verdict, work_item: x.work_item, can_edit: x.can_edit, can_comment: x.can_comment }), () => null))),
+    Promise.all(docs.map((d) => client.doc(d.id, repo).then((x): DesignRecord => ({ design: x.design, tasks: x.tasks, threads: x.threads, decisions: x.decisions, verdict: x.verdict, work_item: x.work_item, can_edit: x.can_edit, can_comment: x.can_comment, shared_with: x.shared_with }), () => null))),
     // The linked work item is a nicety: a failed or refused read leaves the column empty, never the list.
     client.libraryWorkItems ? loadWorkItems(client.libraryWorkItems.bind(client), docs.map((d) => d.id), repo) : Promise.resolve({}),
   ]);
@@ -172,7 +173,28 @@ export function openItems(doc: AnalysisDoc, record?: DesignRecord | null): { thr
 
 /* ---------- Folders ---------- */
 
-const scopeSpec = (s: DocScope) => (s.kind === "user" ? "user" : `${s.kind === "org" ? "org" : "team"}:${s.id}`);
+/* A scope as the daemon takes it: user, team:<id> or org:<id>. */
+export const scopeSpec = (s: DocScope) => (s.kind === "user" ? "user" : `${s.kind === "org" ? "org" : "team"}:${s.id}`);
+
+/* A scope known only from a doc is told apart by the start of its id. */
+export function scopeName(s: DocScope): string {
+  if (s.kind === "user") return "Mine";
+  return s.name || (s.kind === "org" ? "Enterprise" : `Team ${s.id.slice(0, 8)}`);
+}
+
+/* Add scopes in order, preferring names from the scopes list over bare IDs. */
+export function withScopes(had: DocScope[], more: DocScope[]): DocScope[] {
+  const seen = new Map(had.map((s) => [scopeSpec(s), s]));
+  let changed = false;
+  for (const s of more) {
+    const was = seen.get(scopeSpec(s));
+    if (!was || (s.name && !was.name)) {
+      seen.set(scopeSpec(s), was ? { ...s, ...was, name: s.name, can_share: s.can_share ?? was.can_share } : s);
+      changed = true;
+    }
+  }
+  return changed ? [...seen.values()] : had;
+}
 /* A folder's key, as the route and the filter name it: its scope and its id. */
 export const folderKey = (scope: DocScope, id: string) => `${scope.kind}:${scope.id}/${id}`;
 

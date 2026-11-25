@@ -2753,10 +2753,10 @@ def unshare_doc(db: DB, params: dict, body: Body) -> Any:
     return got
 
 
-def _folder_call(body: Body, run: Callable) -> Any:
+def _folder_call(body: Body, run: Callable, *, repo: str | None = None) -> Any:
     """Run a pro/library_folders write on the scope named by the body's ``scope``
     (user, team:<id> or org:<id>), through docs_api; bad input is a 400."""
-    repo = _get(body, "repo")
+    repo = repo or _get(body, "repo")
     kind, scope_id = doc_scope(_get(body, "scope", required=True), _docs_entitlement(repo).sub)
     try:
         return run(kind, scope_id, lambda m, p, b=None: docs_api(m, p, b, repo=repo))
@@ -2784,9 +2784,22 @@ def create_library_folder(db: DB, params: dict, body: Body) -> Any:
 def move_doc_to_folder(db: DB, params: dict, body: Body) -> Any:
     """Place the design in the ``folder`` (an id) of ``scope``."""
     from brindle.pro import library_folders as folders
+    from brindle.pro import local_library
 
-    return _folder_call(body, lambda kind, scope_id, api: folders.move_doc(
-        params["id"], kind, scope_id, _get(body, "folder", required=True), api=api))
+    doc_id = params["id"]
+    kept = local_library.get(doc_id)
+    server_id = doc_id if kept is None else kept.get("server_id")
+    if not server_id:
+        raise ServiceError("local_only", "A plan saved only on this device cannot be moved to a Library folder.", 409)
+    folder = _get(body, "folder", required=True)
+
+    def move(kind, scope_id, api):
+        got = folders.move_doc(server_id, kind, scope_id, folder, api=api)
+        if kept is not None:
+            local_library.remember_server_folder(doc_id, server_id, {"scope": {"kind": kind, "id": scope_id}, "id": folder})
+        return got
+
+    return _folder_call(body, move, repo=params.get("repo"))
 
 
 def _work_call(params: dict, body: Body, run: Callable) -> Any:
@@ -2884,30 +2897,49 @@ def disconnect_tracker(db: DB, params: dict, body: Body) -> Any:
     return _work_call(params, body, lambda org, api, who: wi.disconnect(org, params["tracker"], api=api))
 
 
-def delete_doc(db: DB, params: dict, body: Body) -> Any:
-    """Delete a doc; one kept on this Mac goes from here, and its server copy
-    (while shared) first.
+def _doc_has_shares(doc: dict) -> bool:
+    """A scope other than the owner's means the Library document is shared."""
+    owner = doc.get("scope")
+    owner_key = (owner.get("kind"), owner.get("id")) if isinstance(owner, dict) else None
+    return any(isinstance(scope, dict) and (scope.get("kind"), scope.get("id")) != owner_key
+               for scope in doc.get("scopes") or [])
 
-    A doc an open plan is shared for review through is refused (409
-    ``shared_plan``, with the ``plans``) unless ``confirm`` is true; on
-    confirm, those plans are unshared here (shared_docs.release_deleted) and
-    become personal docs again, so no sync is left pointing at a deleted doc."""
+
+def delete_doc(db: DB, params: dict, body: Body) -> Any:
+    """Delete a Library doc and its server copy if kept on this Mac.
+
+    Shared docs require ``confirm`` (409 ``shared_plan``). Once deleted,
+    release open plans shared through the doc so their reviews can continue
+    locally."""
     from brindle.pro import local_library
     from brindle.pro import shared_docs as sd
 
+    repo = params.get("repo")
     kept = local_library.get(params["id"])
-    ids = [params["id"], *([kept["server_id"]] if kept and kept.get("server_id") else [])]
+    server_id = params["id"] if kept is None else kept.get("server_id")
+    ids = [params["id"]]
+    if server_id and server_id != params["id"]:
+        ids.append(server_id)
     stranded = sd.open_shares_of(db, ids)
-    if stranded and not _get(body, "confirm", bool, default=False):
-        names = ", ".join(f"“{s['title']}”" for s in stranded)
-        raise ServiceError("shared_plan", f"This plan is being reviewed ({names}). Deleting it from the Library "
-                           "stops sharing that plan: it becomes a personal plan again.", 409, plans=stranded)
+    confirm = _get(body, "confirm", bool, default=False)
+    if not confirm:
+        if stranded:
+            names = ", ".join(f"“{s['title']}”" for s in stranded)
+            raise ServiceError("shared_plan", f"This plan is being reviewed ({names}). Deleting it from the Library "
+                               "stops sharing that plan: it becomes a personal plan again.", 409, plans=stranded)
+        shared = bool(kept and kept.get("shared"))
+        if not shared and server_id:
+            shared = _doc_has_shares(docs_api("GET", _doc_path({"id": server_id}), repo=repo))
+        if shared:
+            raise ServiceError("shared_plan", "Deleting this document from the Library stops sharing it.", 409)
+    # Guard unconfirmed deletes against shares added after the read above.
+    query = None if confirm else {"if_unshared": "true"}
     if kept is None:
-        got = docs_api("DELETE", _doc_path(params), repo=params.get("repo"))
+        got = docs_api("DELETE", _doc_path(params), repo=repo, query=query)
     else:
-        _docs_entitlement(params.get("repo"))
-        if kept.get("server_id"):
-            docs_api("DELETE", _doc_path({"id": kept["server_id"]}), repo=params.get("repo"))
+        _docs_entitlement(repo)
+        if server_id:
+            docs_api("DELETE", _doc_path({"id": server_id}), repo=repo, query=query)
         local_library.remove(params["id"])
         got = {"deleted": params["id"]}
     if stranded:
@@ -2915,25 +2947,49 @@ def delete_doc(db: DB, params: dict, body: Body) -> Any:
     return got
 
 
-def export_doc(db: DB, params: dict, body: Body) -> Any:
-    """The doc as ``format`` (md, docx or zip; the server renders it and
-    checks scope and the org's export policy). Markdown arrives as text; a
-    Word or zip file as bytes once the Pro transport carries them (until
-    then, a 502 saying it can't read the answer). With ``dir`` (a folder the
-    person picked) the file is written there and its path answered;
-    without, its ``filename`` and ``content_b64`` go back to the app and
-    nothing is written."""
-    import base64
-    import re
+def _library_doc_ids(body: Body) -> list[str]:
+    ids = _get(body, "ids", list, required=True)
+    if len(ids) > 500 or any(not isinstance(doc_id, str) or not doc_id.strip() or doc_id in (".", "..")
+                             for doc_id in ids):
+        raise ServiceError("invalid", "ids must contain at most 500 valid document IDs")
+    return ids
 
-    from brindle.pro import auth
 
-    fmt = _get(body, "format", default="md")
-    if fmt not in EXPORT_FORMATS:
-        raise ServiceError("invalid", "format is md, docx or zip")
+def bulk_docs(db: DB, params: dict, body: Body) -> Any:
+    """Apply a Library action independently to each requested doc, in input order."""
+    ids = _library_doc_ids(body)
+    action = _get(body, "action", required=True)
+    run = {"delete": delete_doc, "move": move_doc_to_folder, "share": share_doc, "unshare": unshare_doc}.get(action)
+    if run is None:
+        raise ServiceError("invalid", "action is delete, move, share or unshare")
+    _get(body, "confirm", bool)
+    repo = params.get("repo") or _get(body, "repo")
+
+    results = []
+    for doc_id in ids:
+        try:
+            run(db, {**params, "id": doc_id, "repo": repo}, body)
+        except Exception as e:  # noqa: BLE001 - a failed document must not stop the batch
+            err = from_exception(e)
+            if err.code == "internal":
+                log.exception("bulk Library action %s failed", action)
+            code = "confirm_shared" if action == "delete" and err.code == "shared_plan" else err.code
+            results.append({"id": doc_id, "ok": False, "code": code, "error": err.message})
+        else:
+            results.append({"id": doc_id, "ok": True})
+    return {"results": results}
+
+
+def _export_destination(body: Body) -> str:
     destination = _get(body, "destination", default="download")
     if destination not in EXPORT_DESTINATIONS:
         raise ServiceError("invalid", "destination is download, google_docs or sharepoint")
+    return destination
+
+
+def _doc_export_bytes(params: dict, fmt: str, destination: str) -> bytes:
+    from brindle.pro import auth
+
     got = docs_api("GET", _doc_path(params, "export"), repo=params.get("repo"),
                    query={"format": fmt, "destination": destination})
     text = got.get(auth.TEXT_KEY)
@@ -2941,8 +2997,12 @@ def export_doc(db: DB, params: dict, body: Body) -> Any:
         (v for v in got.values() if isinstance(v, (bytes, bytearray))), b"")
     if not data:
         raise ServiceError("upstream", "the export came back empty", 502)
-    name = f"{re.sub(r'[^A-Za-z0-9_-]+', '-', params['id']).strip('-') or 'doc'}.{fmt}"
-    folder = _get(body, "dir")
+    return bytes(data)
+
+
+def _doc_export_result(name: str, data: bytes, folder: str | None = None) -> dict:
+    import base64
+
     if folder is None:
         return {"filename": name, "content_b64": base64.b64encode(data).decode()}
     folder = Path(folder).expanduser()
@@ -2950,6 +3010,99 @@ def export_doc(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("invalid", f"not a folder: {folder}")
     (folder / name).write_bytes(data)
     return {"filename": name, "path": str(folder / name)}
+
+
+def export_doc(db: DB, params: dict, body: Body) -> Any:
+    """Export one doc through the Library's rendering and destination policy.
+    With ``dir``, write the file there and return its path. Otherwise return
+    its filename and base64 content."""
+    fmt = _get(body, "format", default="md")
+    if fmt not in EXPORT_FORMATS:
+        raise ServiceError("invalid", "format is md, docx or zip")
+    data = _doc_export_bytes(params, fmt, _export_destination(body))
+    name = f"{re.sub(r'[^A-Za-z0-9_-]+', '-', params['id']).strip('-') or 'doc'}.{fmt}"
+    return _doc_export_result(name, data, _get(body, "dir"))
+
+
+def _library_export_name(label: str, fmt: str, used: set[str]) -> str:
+    stem = re.sub(r"[^\w -]+", "-", label).strip(" -") or "doc"
+    name = f"{stem}.{fmt}"
+    number = 2
+    while name.casefold() in used:
+        name = f"{stem} ({number}).{fmt}"
+        number += 1
+    used.add(name.casefold())
+    return name
+
+
+def _local_doc_export(kept: dict, fmt: str) -> bytes:
+    from zipfile import ZIP_DEFLATED, ZipFile
+
+    files = [(f.get("name") or "doc.md", f["md"]) for f in kept.get("files") or []
+             if isinstance(f.get("md"), str) and f["md"]]
+    if not files:
+        raise ServiceError("invalid", "the plan has no saved text")
+    if fmt == "md":
+        return "\n\n".join(text for _, text in files).encode()
+    buf = io.BytesIO()
+    used = set()
+    with ZipFile(buf, "w", compression=ZIP_DEFLATED) as archive:
+        for name, text in files:
+            archive.writestr(_library_export_name(PurePosixPath(name.replace("\\", "/")).stem, "md", used), text)
+    return buf.getvalue()
+
+
+def export_docs(db: DB, params: dict, body: Body) -> Any:
+    """Bundle each permitted Library export as a separately named archive entry."""
+    from zipfile import ZIP_DEFLATED, ZipFile
+
+    from brindle.pro import local_library
+
+    ids = _library_doc_ids(body)
+    fmt = _get(body, "format", required=True)
+    if fmt not in ("md", "zip"):
+        raise ServiceError("invalid", "format is md or zip")
+    destination = _export_destination(body)
+    repo = params.get("repo") or _get(body, "repo")
+
+    @functools.cache
+    def local_export_denial() -> str | None:
+        try:
+            policy = docs_org_api("GET", "policy", repo=repo)
+        except ServiceError as e:
+            return e.code
+        if destination not in policy.get("export_destinations", ["download"]):
+            return "destination_not_allowed"
+        return None
+
+    skipped = []
+    used = set()
+    buf = io.BytesIO()
+    with ZipFile(buf, "w", compression=ZIP_DEFLATED) as archive:
+        for doc_id in ids:
+            try:
+                kept = local_library.get(doc_id)
+                server_id = doc_id if kept is None else kept.get("server_id")
+                if server_id:
+                    doc_params = {"id": server_id, "repo": repo}
+                    doc = docs_api("GET", _doc_path(doc_params), repo=repo)
+                    data = _doc_export_bytes(doc_params, fmt, destination)
+                else:
+                    if denied := local_export_denial():
+                        skipped.append({"id": doc_id, "code": denied})
+                        continue
+                    doc = kept
+                    data = _local_doc_export(kept, fmt)
+            except Exception as e:  # noqa: BLE001 - a failed document must not stop the batch
+                err = from_exception(e)
+                if err.code == "internal":
+                    log.exception("bulk Library export failed")
+                skipped.append({"id": doc_id, "code": err.code})
+                continue
+            title = doc.get("title")
+            label = title if isinstance(title, str) and title.strip() else doc_id
+            archive.writestr(_library_export_name(label, fmt, used), data)
+    return {**_doc_export_result("library.zip", buf.getvalue()), "skipped": skipped}
 
 
 # -- terminals: the real command in a terminal the app shows -------------------------
@@ -3638,6 +3791,8 @@ ROUTES = [
     Route("/v1/analysis-docs/switches", _endpoint(put_doc_switch), methods=["PUT"]),
     Route("/v1/org-settings", _endpoint(put_org_settings), methods=["PUT"]),
     _post("/library/folders", create_library_folder),
+    _post("/library/docs/bulk", bulk_docs),
+    _post("/library/docs/export", export_docs),
     Route("/v1/library/designs/{id}/work-items", _endpoint(design_work_items), methods=["GET"]),
     Route("/v1/library/designs/{id}/work-items", _endpoint(create_design_work_items), methods=["POST"]),
     Route("/v1/library/designs/{id}/work-items/links", _endpoint(link_design_work_item), methods=["POST"]),
