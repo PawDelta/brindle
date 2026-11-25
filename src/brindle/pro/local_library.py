@@ -30,6 +30,7 @@ the working directory. Moves are idempotent: one local record per server doc.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -132,6 +133,11 @@ def _path(doc_id: str, store=None, create: bool = False) -> Path | None:
         return None             # signed out: nothing kept here is read
     d = _dir(store, create)
     return d / f"{doc_id}.json" if d is not None else None
+
+
+def _folder_cache_path(plan_path: Path) -> Path:
+    # Hidden files are excluded from the local plan listing.
+    return plan_path.with_name(f".{plan_path.stem}.folder.json")
 
 
 # -- the person's choice and team ----------------------------------------------------------------
@@ -284,13 +290,15 @@ def update(doc_id: str, store=None, **fields) -> dict:
 
 def remove(doc_id: str, store=None) -> bool:
     path = _path(doc_id, store)
+    if path is None:
+        return False
     try:
-        if path is not None:
-            path.unlink()
-            return True
+        path.unlink()
     except FileNotFoundError:
-        pass
-    return False
+        return False
+    with contextlib.suppress(OSError):
+        _folder_cache_path(path).unlink(missing_ok=True)
+    return True
 
 
 def records(store=None) -> list[dict]:
@@ -318,6 +326,7 @@ def listed(query: dict | None = None, scope: dict | None = None, store=None) -> 
     """The docs kept here as the server lists docs (``topic``, ``kind`` and
     ``session`` filter them), each in the person's own ``scope``."""
     return [{**{k: r[k] for k in LISTED if k in r}, "doc_id": r["doc_id"], "local": True,
+             "local_only": not r.get("server_id"),
              **({"scope": scope} if scope else {})}
             for r in records(store) if _matches(r, query or {})]
 
@@ -325,9 +334,33 @@ def listed(query: dict | None = None, scope: dict | None = None, store=None) -> 
 def view(record: dict, scope: dict | None = None) -> dict:
     """One doc as the server shows it (``GET /analysis-docs/{id}``)."""
     shared = [s for s in record.get("shared") or [] if isinstance(s, dict)]
+    server_id = record.get("server_id")
+    folder = None
+    if server_id:
+        path = _path(record["doc_id"])
+        cached = _read(_folder_cache_path(path)) if path is not None else None
+        placement = cached or record.get("server_folder") or {}
+        if placement.get("server_id") == server_id:
+            folder = placement.get("folder")
     return {**{k: record[k] for k in LISTED if k in record}, "id": record["doc_id"], "local": True,
+            "local_only": not server_id,
             "files": record.get("files") or [], "scopes": [*([scope] if scope else []), *shared],
+            **({"design": {"folder": folder}} if folder else {}),
             **({"scope": scope} if scope else {})}
+
+
+def remember_server_folder(doc_id: str, server_id: str, folder: dict | None) -> None:
+    """Keep the last known placement without rewriting the plan itself."""
+    try:
+        path = _path(doc_id)
+        if path is None:
+            return
+        cache = _folder_cache_path(path)
+        _write(cache, {"server_id": server_id, "folder": folder})
+        if not path.is_file():
+            cache.unlink(missing_ok=True)
+    except OSError:
+        log.debug("Library folder placement could not be saved locally", exc_info=True)
 
 
 # -- moving between here and the servers ---------------------------------------------------------------

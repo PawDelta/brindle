@@ -1385,13 +1385,29 @@ def analysis_doc(db: DB, request: Request) -> Any:
     from brindle.pro import local_library
 
     doc_id = request.path_params["id"]
+    repo = _repo(request)
     kept = local_library.get(doc_id)
-    if kept is not None:                 # kept on this Mac: nothing is asked of the server
-        got = local_library.view(kept, own_scope(_repo(request)))
-        tasks = plans.doc_tasks(db, kept.get("server_id") or doc_id)
-        return dict(got, tasks=tasks) if tasks is not None else got
-    got = docs_api("GET", f"/analysis-docs/{quote(doc_id, safe='')}", repo=_repo(request))
-    tasks = plans.doc_tasks(db, doc_id)
+    task_doc_id = doc_id
+    if kept is None:
+        got = docs_api("GET", f"/analysis-docs/{quote(doc_id, safe='')}", repo=repo)
+    else:
+        got = local_library.view(kept, own_scope(repo))
+        if server_id := kept.get("server_id"):
+            task_doc_id = server_id
+            try:
+                remote = docs_api("GET", f"/analysis-docs/{quote(server_id, safe='')}", repo=repo)
+            except ServiceError:
+                pass  # The local text and last known folder are still readable.
+            else:
+                design = remote.get("design")
+                folder = design.get("folder") if isinstance(design, dict) else None
+                if folder != got.get("design", {}).get("folder"):
+                    local_library.remember_server_folder(doc_id, server_id, folder)
+                if folder:
+                    got["design"] = {"folder": folder}
+                else:
+                    got.pop("design", None)
+    tasks = plans.doc_tasks(db, task_doc_id)
     return dict(got, tasks=tasks) if isinstance(got, dict) and tasks is not None else got
 
 
