@@ -196,19 +196,17 @@ describe("a design opened in the Library", () => {
     const store = createAppStore();
     const client = daemon.client();
     const sync = startSync({ client, store, connect: daemon.connect });
-    render(
-      <StoreContext.Provider value={store}>
-        <SessionsProvider client={client}>
-          <KnowledgeScreen client={client} view="docs" />
-        </SessionsProvider>
-      </StoreContext.Provider>,
-    );
-    const row = await waitFor(() => {
-      const found = screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="lib-1"]');
-      expect(found).toBeTruthy();
-      return found!;
+    // Settle the initial repo lookup before interacting with its Library list.
+    await act(async () => {
+      render(
+        <StoreContext.Provider value={store}>
+          <SessionsProvider client={client}>
+            <KnowledgeScreen client={client} view="docs" />
+          </SessionsProvider>
+        </StoreContext.Provider>,
+      );
     });
-    fireEvent.click(within(row).getByRole("button"));
+    fireEvent.click(screen.getByRole("button", { name: /Workers/ }));
     await screen.findByTestId("plan-reader");
     expect(screen.getByTestId("visual-back").textContent).toContain("Library");
     await settle();
