@@ -2921,7 +2921,8 @@ def delete_doc(db: DB, params: dict, body: Body) -> Any:
     if server_id and server_id != params["id"]:
         ids.append(server_id)
     stranded = sd.open_shares_of(db, ids)
-    if not _get(body, "confirm", bool, default=False):
+    confirm = _get(body, "confirm", bool, default=False)
+    if not confirm:
         if stranded:
             names = ", ".join(f"“{s['title']}”" for s in stranded)
             raise ServiceError("shared_plan", f"This plan is being reviewed ({names}). Deleting it from the Library "
@@ -2931,12 +2932,14 @@ def delete_doc(db: DB, params: dict, body: Body) -> Any:
             shared = _doc_has_shares(docs_api("GET", _doc_path({"id": server_id}), repo=repo))
         if shared:
             raise ServiceError("shared_plan", "Deleting this document from the Library stops sharing it.", 409)
+    # The Library checks for shares again at deletion, including any added after the read above.
+    query = {"confirm": "true"} if confirm else None
     if kept is None:
-        got = docs_api("DELETE", _doc_path(params), repo=repo)
+        got = docs_api("DELETE", _doc_path(params), repo=repo, query=query)
     else:
         _docs_entitlement(repo)
         if server_id:
-            docs_api("DELETE", _doc_path({"id": server_id}), repo=repo)
+            docs_api("DELETE", _doc_path({"id": server_id}), repo=repo, query=query)
         local_library.remove(params["id"])
         got = {"deleted": params["id"]}
     if stranded:
