@@ -1817,6 +1817,36 @@ def test_auto_merge_session_pr_rechecks_forge_and_record(db, session_pr_forge):
     assert len(forge.merges) == 1
 
 
+def test_session_pr_unknown_mergeability_keeps_last_conflict(db, session_pr_forge):
+    from brindle.daemon import session_review
+
+    forge = session_pr_forge
+    forge.payload["statusCheckRollup"][0]["conclusion"] = "FAILURE"
+    forge.payload["mergeable"] = "CONFLICTING"
+    forge.payload["headRefOid"] = "remote-head"
+    session_review._read_pr_state(forge.url, forge.ws.repo_root)
+    conflict, = forge.items()
+
+    forge.payload["mergeable"] = "UNKNOWN"
+    session_review._read_pr_state(forge.url, forge.ws.repo_root)
+    unknown, = forge.items()
+    assert unknown.detail == conflict.detail
+    assert unknown.pr_head_sha == "remote-head"
+
+    forge.payload["mergeable"] = "MERGEABLE"
+    session_review._read_pr_state(forge.url, forge.ws.repo_root)
+    mergeable, = forge.items()
+    assert mergeable.detail != conflict.detail
+
+    forge.payload["mergeable"] = "CONFLICTING"
+    session_review._read_pr_state(forge.url, forge.ws.repo_root)
+    forge.payload.update(mergeable="UNKNOWN", headRefOid="new-head")
+    session_review._read_pr_state(forge.url, forge.ws.repo_root)
+    pushed, = forge.items()
+    assert pushed.pr_head_sha == "new-head"
+    assert pushed.detail == mergeable.detail
+
+
 def test_auto_merge_session_pr_failure_reaches_inbox_once(db, session_pr_forge):
     from brindle.daemon import session_review
     from brindle.db import DB
