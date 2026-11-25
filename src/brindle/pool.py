@@ -24,7 +24,9 @@ import hashlib
 import os
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
+from collections.abc import Iterator
 
 from brindle import disk, git, spawn, workspaces
 from brindle.config import RepoConfig, load_repo_config, worktree_root, worktrees_dir
@@ -152,6 +154,40 @@ def _lock_path(repo_root: str) -> Path:
     return pool_dir(repo_root).parent / ".pool.lock"
 
 
+def _claim_lock_path(repo_root: str) -> Path:
+    return pool_dir(repo_root).parent / ".claim.lock"
+
+
+@contextmanager
+def claim_lock(repo_root: str) -> Iterator[bool]:
+    """Protect a pool claim across pool-row deletion, rebind and workspace
+    registration. Separate open descriptors make contention observable across
+    threads and processes; crash or descriptor close releases the flock."""
+    path = _claim_lock_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        lock = open(path, "a+")
+    except OSError:
+        yield False
+        return
+    acquired = False
+    try:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except OSError:
+            yield False
+            return
+        yield True
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        lock.close()
+
+
 def fill_locked(db: DB, repo_root: str) -> int:
     """Sweep, trim, then ``fill``, skipping entirely if another fill for this
     repo is already running. Uses an flock rather than a stale-time heuristic,
@@ -201,7 +237,8 @@ def rebind(repo_root: str, entry: PoolEntry, branch: str, start_sha: str) -> Non
     git.run(["branch", "-m", entry.branch, branch], entry.path)
 
 
-def discard(repo_root: str, entry: PoolEntry, cfg: RepoConfig | None = None) -> None:
+def discard(repo_root: str, entry: PoolEntry, cfg: RepoConfig | None = None,
+            target_branch: str | None = None) -> None:
     """Best-effort cleanup of an entry that's being dropped. Runs the repo's
     teardown first, same as removing a real workspace, since setup may have
     left behind something (a container, a lockfile) that needs it undone.
@@ -223,6 +260,8 @@ def discard(repo_root: str, entry: PoolEntry, cfg: RepoConfig | None = None) -> 
     if os.path.exists(entry.path):
         git.remove_worktree(repo_root, entry.path, force=True)
     git.run(["branch", "-D", entry.branch], repo_root, check=False)
+    if target_branch:
+        git.run(["branch", "-D", target_branch], repo_root, check=False)
     git.run(["worktree", "prune"], repo_root, check=False)
 
 
@@ -258,51 +297,72 @@ def sweep(db: DB, repo_root: str, cfg: RepoConfig | None = None) -> None:
     row, and placeholder branches with no worktree."""
     cfg = cfg or load_repo_config(repo_root)
     current_base = cfg.base_branch or git.default_branch(repo_root)
+    with claim_lock(repo_root) as claim_acquired:
+        claims = db.pool_claims(repo_root)
+        if claim_acquired:
+            for claim in claims:
+                entry = PoolEntry(
+                    claim.path, claim.repo_root, claim.base_branch, claim.base_sha,
+                    claim.branch, claim.fingerprint, claim.port_base, 0,
+                    claim.claimed_at, claim.claim_token,
+                )
+                target_branch = None
+                if claim.target_branch is not None:
+                    target_is_checked_out_at_claim = any(
+                        wt.get("worktree") == claim.path
+                        and wt.get("branch", "").removeprefix("refs/heads/")
+                        == claim.target_branch
+                        for wt in git.list_worktrees(repo_root)
+                    )
+                    if target_is_checked_out_at_claim:
+                        target_branch = claim.target_branch
+                try:
+                    discard(repo_root, entry, cfg, target_branch)
+                except (git.GitError, OSError):
+                    db.mark_pool_claim_cleanup_pending(claim.claim_token)
+                    continue
+                db.delete_pool_claim(claim.claim_token)
 
-    for e in db.pool_entries(repo_root, ready_only=False):
-        if not e.ready or e.base_branch != current_base:
-            _discard_row(db, repo_root, e, cfg)
+        for e in db.pool_entries(repo_root, ready_only=False):
+            if not e.ready or e.base_branch != current_base:
+                _discard_row(db, repo_root, e, cfg)
 
-    # Everything currently claimed -- by a pool row or by a live workspace --
-    # is off limits, no matter what directory it happens to sit in. A claim
-    # renames the placeholder branch to the workspace's real one but never
-    # moves the path (see rebind), so a claimed entry's directory stays right
-    # here in the pool dir; only known_paths tells them apart.
-    known_paths = {e.path for e in db.pool_entries(repo_root, ready_only=False)}
-    known_paths |= {ws.path for ws in db.find_workspaces()}
-    pool_branches = set(git.list_branches(repo_root, "brindle-pool/*"))
-    branch_by_path = {
-        wt["worktree"]: wt["branch"].removeprefix("refs/heads/")
-        for wt in git.list_worktrees(repo_root) if "branch" in wt
-    }
-    cwds = False
-    for base_dir in (pool_dir(repo_root, cfg), legacy_pool_dir(repo_root, db)):
-        if not base_dir.is_dir():
-            continue
-        for child in base_dir.iterdir():
-            path = str(child)
-            if path in known_paths:
+        known_paths = {e.path for e in db.pool_entries(repo_root, ready_only=False)}
+        known_paths |= {ws.path for ws in db.find_workspaces()}
+        known_paths |= {claim.path for claim in db.pool_claims(repo_root)}
+        pool_branches = set(git.list_branches(repo_root, "brindle-pool/*"))
+        branch_by_path = {
+            wt["worktree"]: wt["branch"].removeprefix("refs/heads/")
+            for wt in git.list_worktrees(repo_root) if "branch" in wt
+        }
+        cwds = False
+        for base_dir in (pool_dir(repo_root, cfg), legacy_pool_dir(repo_root, db)):
+            if not base_dir.is_dir():
                 continue
-            branch = branch_by_path.get(path)
-            if branch is not None and branch not in pool_branches:
-                continue  # not a pool worktree (or claimed and renamed): not ours to touch
-            if cwds is False:
-                cwds = disk._cwds(disk.live_check_ignore(repo_root))   # read once for the whole sweep
-            if disk.live_in(db, path, cwds):
-                continue  # a forgotten row's folder something still runs in: kept
-            try:
-                git.remove_worktree(repo_root, path, force=True)
-            except git.GitError:
-                continue  # kept for a later sweep; the rest still gets cleaned
-    git.run(["worktree", "prune"], repo_root, check=False)
+            for child in base_dir.iterdir():
+                path = str(child)
+                if path in known_paths:
+                    continue
+                branch = branch_by_path.get(path)
+                if branch is not None and branch not in pool_branches:
+                    continue
+                if cwds is False:
+                    cwds = disk._cwds(disk.live_check_ignore(repo_root))
+                if disk.live_in(db, path, cwds):
+                    continue
+                try:
+                    git.remove_worktree(repo_root, path, force=True)
+                except git.GitError:
+                    continue
+        git.run(["worktree", "prune"], repo_root, check=False)
 
-    live_branches = {
-        wt["branch"].removeprefix("refs/heads/")
-        for wt in git.list_worktrees(repo_root) if "branch" in wt
-    }
-    for b in git.list_branches(repo_root, "brindle-pool/*"):
-        if b not in live_branches:
-            git.run(["branch", "-D", b], repo_root, check=False)
+        live_branches = {
+            wt["branch"].removeprefix("refs/heads/")
+            for wt in git.list_worktrees(repo_root) if "branch" in wt
+        }
+        for b in git.list_branches(repo_root, "brindle-pool/*"):
+            if b not in live_branches:
+                git.run(["branch", "-D", b], repo_root, check=False)
 
 
 def trim(db: DB, repo_root: str) -> int:
@@ -311,8 +371,10 @@ def trim(db: DB, repo_root: str) -> int:
     cfg = load_repo_config(repo_root)
     target = max(0, cfg.pool_size or 0)
     base = cfg.base_branch or git.default_branch(repo_root)
+    claimed_paths = {claim.path for claim in db.pool_claims(repo_root)}
     entries = db.pool_entries(repo_root, base)
-    excess = entries[: max(0, len(entries) - target)]
+    excess = [e for e in entries if e.path not in claimed_paths]
+    excess = excess[: max(0, len(entries) - target)]
     removed = 0
     for e in excess:
         # A concurrent claim (take_pool_entry) may have taken this exact

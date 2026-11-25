@@ -66,6 +66,52 @@ V0_5_12 = {
 }
 
 
+def test_migration_adds_pool_claims_table_and_preserves_pool_entries(tmp_path):
+    path = tmp_path / "pool-migration.db"
+    db = DB(str(path))
+    db.conn.execute("DROP TABLE pool_claims")
+    db.conn.execute(
+        """INSERT INTO pool_entries
+           (path, repo_root, base_branch, base_sha, branch, fingerprint, port_base, ready, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("/worktree/pool-a", "/repo", "main", "abc123", "brindle-pool/a",
+         "setup-fingerprint", 6100, 1, 1234.5),
+    )
+    db.conn.close()
+
+    db = DB(str(path))
+    assert "pool_claims" in _columns(db.conn)
+    assert set(_columns(db.conn)["pool_claims"]) == {
+        "path", "claim_token", "repo_root", "base_branch", "base_sha", "branch",
+        "fingerprint", "port_base", "target_branch", "state", "claimed_at",
+    }
+    assert tuple(db.conn.execute(
+        """SELECT path, repo_root, base_branch, base_sha, branch, fingerprint,
+                  port_base, ready, created_at
+           FROM pool_entries"""
+    ).fetchone()) == (
+        "/worktree/pool-a", "/repo", "main", "abc123", "brindle-pool/a",
+        "setup-fingerprint", 6100, 1, 1234.5,
+    )
+    db.conn.close()
+
+    db = DB(str(path))
+    assert "pool_claims" in _columns(db.conn)
+    assert set(_columns(db.conn)["pool_claims"]) == {
+        "path", "claim_token", "repo_root", "base_branch", "base_sha", "branch",
+        "fingerprint", "port_base", "target_branch", "state", "claimed_at",
+    }
+    assert tuple(db.conn.execute(
+        """SELECT path, repo_root, base_branch, base_sha, branch, fingerprint,
+                  port_base, ready, created_at
+           FROM pool_entries"""
+    ).fetchone()) == (
+        "/worktree/pool-a", "/repo", "main", "abc123", "brindle-pool/a",
+        "setup-fingerprint", 6100, 1, 1234.5,
+    )
+    db.conn.close()
+
+
 @pytest.mark.parametrize("interleaved", [True])
 def test_session_repo_branch_column_moves_out_and_no_released_table_gains_a_column(
         tmp_path, monkeypatch, interleaved):

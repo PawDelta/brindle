@@ -13,6 +13,7 @@ import re
 import signal
 import sqlite3
 import time
+import uuid
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, fields
 from typing import Callable, Iterator
@@ -655,6 +656,21 @@ CREATE TABLE IF NOT EXISTS pool_entries (
     port_base INTEGER,              -- reserved for this entry so setup's env matches claim
     ready INTEGER NOT NULL DEFAULT 0,  -- 0 while fill_one is still building it
     created_at REAL NOT NULL
+);
+-- A pool entry is owned by this claim from atomic pool-row removal through
+-- workspace registration. It is never left visible to sweep with no owner.
+CREATE TABLE IF NOT EXISTS pool_claims (
+    path TEXT PRIMARY KEY,
+    claim_token TEXT NOT NULL UNIQUE,
+    repo_root TEXT NOT NULL,
+    base_branch TEXT NOT NULL,
+    base_sha TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    port_base INTEGER,
+    target_branch TEXT,
+    state TEXT NOT NULL,
+    claimed_at REAL NOT NULL
 );
 -- A pool fill's most recent setup failure for a (repo, base), so fill()
 -- backs off instead of retrying (and failing) every time something triggers
@@ -1769,6 +1785,22 @@ class PoolEntry:
     port_base: int | None
     ready: int
     created_at: float
+    claim_token: str | None = None
+
+
+@dataclass
+class PoolClaim:
+    path: str
+    claim_token: str
+    repo_root: str
+    base_branch: str
+    base_sha: str
+    branch: str
+    fingerprint: str
+    port_base: int | None
+    state: str
+    claimed_at: float
+    target_branch: str | None = None
 
 
 @dataclass
@@ -2201,6 +2233,26 @@ class DB:
         for col, kind in (("port_base", "INTEGER"), ("ready", "INTEGER NOT NULL DEFAULT 1")):
             if col not in pool_cols:
                 self.conn.execute(f"ALTER TABLE pool_entries ADD COLUMN {col} {kind}")
+        if "pool_claims" not in tables:
+            self.conn.execute(
+                """CREATE TABLE pool_claims (
+                    path TEXT PRIMARY KEY,
+                    claim_token TEXT NOT NULL UNIQUE,
+                    repo_root TEXT NOT NULL,
+                    base_branch TEXT NOT NULL,
+                    base_sha TEXT NOT NULL,
+                    branch TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    port_base INTEGER,
+                    target_branch TEXT,
+                    state TEXT NOT NULL,
+                    claimed_at REAL NOT NULL
+                )"""
+            )
+        else:
+            claim_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(pool_claims)")}
+            if "target_branch" not in claim_cols:
+                self.conn.execute("ALTER TABLE pool_claims ADD COLUMN target_branch TEXT")
         routing_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(routing_decisions)")}
         if "prior" not in routing_cols:
             self.conn.execute("ALTER TABLE routing_decisions ADD COLUMN prior INTEGER NOT NULL DEFAULT 0")
@@ -2325,6 +2377,28 @@ class DB:
                 (ws.id, ws.repo_root, ws.name, ws.kind, ws.branch, ws.base_branch,
                  ws.path, ws.port_base, ws.tmux_session, ws.created_at, ws.session_root),
             )
+        bus.publish_ws(self, "workspace.created", ws, workspace_kind=ws.kind, branch=ws.branch)
+
+    def add_pool_claimed_workspace(self, ws: Workspace, claim_token: str) -> None:
+        """Register a claimed pool worktree and consume its claim atomically.
+        A mismatched or missing claim row rolls back without creating a workspace."""
+        with self.tx() as c:
+            claim = c.execute(
+                "SELECT claim_token, path, repo_root, base_branch FROM pool_claims "
+                "WHERE claim_token=?",
+                (claim_token,),
+            ).fetchone()
+            if (claim is None or claim["claim_token"] != claim_token
+                    or claim["path"] != ws.path or claim["repo_root"] != ws.repo_root
+                    or claim["base_branch"] != ws.base_branch):
+                raise ValueError("pool claim does not match the workspace being registered")
+            c.execute(
+                "INSERT INTO workspaces (id, repo_root, name, kind, branch, base_branch, path, port_base,"
+                " tmux_session, created_at, session_root) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (ws.id, ws.repo_root, ws.name, ws.kind, ws.branch, ws.base_branch,
+                 ws.path, ws.port_base, ws.tmux_session, ws.created_at, ws.session_root),
+            )
+            c.execute("DELETE FROM pool_claims WHERE claim_token=?", (claim_token,))
         bus.publish_ws(self, "workspace.created", ws, workspace_kind=ws.kind, branch=ws.branch)
 
     def set_workspace_session_root(self, workspace_id: str, session_root: str) -> None:
@@ -2490,8 +2564,52 @@ class DB:
             ).fetchone()
             if not row:
                 return None
+            token = uuid.uuid4().hex
             c.execute("DELETE FROM pool_entries WHERE path=?", (row["path"],))
-            return _load(PoolEntry, row)
+            c.execute(
+                "INSERT INTO pool_claims "
+                "(path, claim_token, repo_root, base_branch, base_sha, branch, "
+                "fingerprint, port_base, target_branch, state, claimed_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (row["path"], token, row["repo_root"], row["base_branch"], row["base_sha"],
+                 row["branch"], row["fingerprint"], row["port_base"], None, "active", time.time()),
+            )
+            entry = _load(PoolEntry, row)
+            entry.claim_token = token
+            return entry
+
+    def pool_claims(self, repo_root: str | None = None) -> list[PoolClaim]:
+        if repo_root:
+            rows = self.conn.execute(
+                "SELECT * FROM pool_claims WHERE repo_root=? ORDER BY claimed_at",
+                (repo_root,),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM pool_claims ORDER BY claimed_at",
+            ).fetchall()
+        return [_load(PoolClaim, row) for row in rows]
+
+    def mark_pool_claim_cleanup_pending(self, claim_token: str) -> None:
+        with self.tx() as c:
+            c.execute(
+                "UPDATE pool_claims SET state='cleanup_pending' WHERE claim_token=?",
+                (claim_token,),
+            )
+
+    def mark_pool_claim_target(self, claim_token: str, target_branch: str) -> None:
+        with self.tx() as c:
+            c.execute(
+                "UPDATE pool_claims SET target_branch=? WHERE claim_token=?",
+                (target_branch, claim_token),
+            )
+
+    def delete_pool_claim(self, claim_token: str) -> int:
+        with self.tx() as c:
+            return c.execute(
+                "DELETE FROM pool_claims WHERE claim_token=?",
+                (claim_token,),
+            ).rowcount
 
     def delete_pool_entry(self, path: str) -> int:
         """Returns the number of rows deleted (0 or 1). A caller trimming or

@@ -463,52 +463,86 @@ def create(
     # setup runs again only if the lockfiles differ). Not, e.g., create_from_pr,
     # where `start` is a fetched PR head unrelated to `base`.
     claimed = None
-    if (
+    pool_workspace = None
+    eligible_pool_claim = (
         run_setup
         and not git.branch_exists(repo_root, branch)
         and not git.remote_branch_exists(repo_root, branch)
         and (start is None or _is_base_tip(repo_root, base, start_sha))
-    ):
+    )
+    if eligible_pool_claim:
         from brindle import pool
 
-        candidate = pool.claim(db, repo_root, base)
-        if candidate is not None:
-            try:
-                pool.rebind(repo_root, candidate, branch, start_sha)
-                claimed = candidate
-            except (git.GitError, OSError):
-                pool.discard(repo_root, candidate)
-                claimed = None
+        with pool.claim_lock(repo_root) as acquired:
+            if acquired:
+                candidate = pool.claim(db, repo_root, base)
+                if candidate is not None:
+                    db.mark_pool_claim_target(candidate.claim_token, branch)
+                    try:
+                        pool.rebind(repo_root, candidate, branch, start_sha)
+                    except (git.GitError, OSError) as rebind_error:
+                        try:
+                            pool.discard(repo_root, candidate, target_branch=None)
+                        except (git.GitError, OSError, ValueError) as discard_error:
+                            db.mark_pool_claim_cleanup_pending(candidate.claim_token)
+                            raise discard_error from rebind_error
+                        db.delete_pool_claim(candidate.claim_token)
+                        candidate = None
+                    if candidate is not None:
+                        claimed = candidate
+                        path = claimed.path
+                        how = "pool"
+                        git.install_attribution_hook(path)
+                        git.set_base(repo_root, branch, base)
 
-    if claimed is not None:
-        path = claimed.path
-        how = "pool"
-    else:
+                        slug = _db_slug(db, repo_root)
+                        pool_workspace = Workspace(
+                            id=f"{slug}/{name}",
+                            repo_root=repo_root,
+                            name=name,
+                            kind="worktree",
+                            branch=branch,
+                            base_branch=base,
+                            path=path,
+                            port_base=(
+                                claimed.port_base
+                                if claimed.port_base is not None
+                                else _next_port_base(db)
+                            ),
+                            tmux_session=_session_name(repo_root, name, slug),
+                            created_at=time.time(),
+                            session_root=session_root,
+                        )
+                        db.add_pool_claimed_workspace(
+                            pool_workspace,
+                            claimed.claim_token,
+                        )
+
+    if pool_workspace is None:
         path = str(new_worktree_root(repo_root, cfg) / branch)
         if os.path.exists(path):
             raise WorkspaceError(f"{path} already exists; remove it or choose another branch")
         how = git.add_worktree(repo_root, path, branch, start_point)
-    git.install_attribution_hook(path)
-    git.set_base(repo_root, branch, base)
+        git.install_attribution_hook(path)
+        git.set_base(repo_root, branch, base)
 
-    slug = _db_slug(db, repo_root)
-    ws = Workspace(
-        id=f"{slug}/{name}",
-        repo_root=repo_root,
-        name=name,
-        kind="worktree",
-        branch=branch,
-        base_branch=base,
-        path=path,
-        port_base=(
-            claimed.port_base if claimed is not None and claimed.port_base is not None
-            else _next_port_base(db)
-        ),
-        tmux_session=_session_name(repo_root, name, slug),
-        created_at=time.time(),
-        session_root=session_root,
-    )
-    db.add_workspace(ws)
+        slug = _db_slug(db, repo_root)
+        ws = Workspace(
+            id=f"{slug}/{name}",
+            repo_root=repo_root,
+            name=name,
+            kind="worktree",
+            branch=branch,
+            base_branch=base,
+            path=path,
+            port_base=_next_port_base(db),
+            tmux_session=_session_name(repo_root, name, slug),
+            created_at=time.time(),
+            session_root=session_root,
+        )
+        db.add_workspace(ws)
+    else:
+        ws = pool_workspace
     copied = _copy_local_files(repo_root, path, cfg.copy, overwrite_changed=claimed is not None)
 
     def finish() -> SetupResult | None:
