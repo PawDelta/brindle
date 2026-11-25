@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Re-record assets/brindle-demo.gif: `brindle demo` from this checkout, captured
+# Re-record assets/brindle-demo.gif: `brindle demo` from a clean export of HEAD, captured
 # with asciinema, cut when both milestones are verified, rendered in the
 # Brindle palette by vhs (scripts/record_demo.tape, xterm.js in headless
 # Chrome) or, with DEMO_RENDERER=agg, by agg.
@@ -14,7 +14,7 @@
 #
 #   DEMO_COLS / DEMO_ROWS   terminal size recorded (default 150x45)
 #   DEMO_TIMEOUT            hard stop, seconds (default 1200)
-#   DEMO_PROJECT            brindle checkout to run the demo from (default: this one)
+#   DEMO_PROJECT            brindle checkout to run the demo from (default: an export of HEAD)
 #   DEMO_SECONDS            target GIF length in seconds (default 20); sets the speed
 #   DEMO_RENDERER           vhs (default) or agg; agg garbles Claude Code's redraws
 #   DEMO_SPEED              playback speed (default: whatever gives DEMO_SECONDS)
@@ -49,9 +49,10 @@ done
 
 # Brindle palette (see THEME in src/brindle/tmux.py and PALETTE_256 in
 # src/brindle/watch.py): bg, fg, then ANSI 0-7 and 8-15.
-THEME=17130f,ece4d9
-THEME+=,17130f,c75c4a,87af87,d7af87,8a9bb0,afafff,8fb5a8,c4b8aa
-THEME+=,8f8173,ff875f,a3c98a,e8c9a3,a3b4c8,c9bfff,a3c8bc,ece4d9
+# The background rounds exactly to and from the logo's sixel percentages (3/4/3).
+THEME=080a08,e8f0eb
+THEME+=,080a08,f08c88,34d399,e8875a,8fb0e8,a99be0,5fc9b8,afbfb6
+THEME+=,889a90,f5a9a6,6fe3b4,f0a07a,aec6f0,c4b8f0,86dccd,e8f0eb
 
 CAST="${OUT%.gif}.cast"
 mkdir -p "$(dirname "$OUT")"
@@ -126,6 +127,14 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# An export keeps the sidebar, hooks and MCP servers on the same build.
+# From a linked worktree, providers.brindle_invocation may use the installed brindle.
+if [[ -z ${DEMO_PROJECT:-} ]]; then
+    PROJECT="$BRINDLE_HOME/engine"
+    mkdir -p "$PROJECT"
+    git -C "$ROOT" archive HEAD | tar -x -C "$PROJECT"
+fi
+
 echo "record_demo: recording ${COLS}x${ROWS} to $CAST"
 # `brindle demo` creates the repo, starts the supervisor with the watch
 # sidebar and attaches tmux; the recording ends when that attach does.
@@ -157,15 +166,29 @@ progress() {
     (cd "$DEMO" && uv run --project "$PROJECT" brindle autopilot 2>/dev/null) || true
 }
 
+# The recording is unattended. Choose the one-time Yes in Claude Code's
+# permission menu on the private demo server.
+answer_prompts() {
+    local pane screen
+    for pane in $("${TMUX_CMD[@]}" list-panes -a -F '#{pane_id}' 2>/dev/null); do
+        if screen=$("${TMUX_CMD[@]}" capture-pane -p -t "$pane" 2>/dev/null) &&
+            grep -Fq 'Do you want to proceed?' <<< "$screen" &&
+            grep -Eq '^[[:blank:]]*(❯[[:blank:]]*)?1\. Yes(, proceed)?[[:blank:]]*$' <<< "$screen"; then
+            "${TMUX_CMD[@]}" send-keys -t "$pane" 1 2>/dev/null || true
+        fi
+    done
+}
+
 # Poll the goal until every milestone is verified, or the hard timeout hits.
 start=$(date +%s)
 done_at=""
 while kill -0 "$REC_PID" 2>/dev/null; do
     now=$(date +%s)
     if (( now - start > TIMEOUT )); then
-        echo "record_demo: timeout after ${TIMEOUT}s; closing the demo session" >&2
-        break
+        echo "record_demo: timeout after ${TIMEOUT}s; closing the demo session, keeping the old GIF" >&2
+        exit 1
     fi
+    answer_prompts
     p=$(progress)
     if [[ -z $done_at ]]; then
         total=$(printf '%s\n' "$p" | sed -n 's/^\([0-9]*\) of \([0-9]*\) milestones verified\./\1 \2/p')
@@ -197,13 +220,21 @@ fi  # DEMO_RENDER_ONLY
 # prints after the session closes: drop everything after tmux leaves the
 # alternate screen (its client detaching), and the checkout's path from the
 # header, which agg never draws but which has no place in a published file.
-python3 - "$CAST" <<'EOF'
+python3 - "$CAST" "$PROJECT/pyproject.toml" <<'EOF'
 import json, os, re, sys
+from pathlib import Path
+
 path = sys.argv[1]
 lines = open(path, encoding="utf-8").read().splitlines()
 header = json.loads(lines[0])
 header.pop("command", None)
 events = [json.loads(l) for l in lines[1:] if l.strip()]
+# Blank the package version in the tmux bar and sidebar while preserving cell widths.
+version = re.search(r'(?m)^version = "([^"]+)"', Path(sys.argv[2]).read_text(encoding="utf-8")).group(1)
+version_token = re.compile(rf'(?<![\w.])v?{re.escape(version)}(?![\w.])')
+for e in events:
+    if e[1] == "o":
+        e[2] = version_token.sub(lambda m: " " * len(m.group()), e[2])
 last = max((i for i, e in enumerate(events) if e[1] == "o" and "\x1b[?1049l" in e[2]), default=None)
 if last is not None:
     events = events[:last]

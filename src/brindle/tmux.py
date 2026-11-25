@@ -603,21 +603,19 @@ def windows(session: str) -> list[str]:
     return proc.stdout.split() if proc.returncode == 0 else []
 
 
-# The brindle window as pawdelta.com/brindle draws it (Brindle palette, night):
-# a dark brown ground, brindle-brown and fawn accents, warm grey text.
+# The desktop app's dark palette (app/src/styles.css).
 THEME = {
-    # The website's shell colours (pawdelta.com/brindle): its terminal blocks stay dark in both themes.
-    # bg is the site's #0c0c0e nudged to a colour sixel percentages hit exactly (the logo image).
-    "bg": "#0d0d0f", "bg2": "#16161a", "line": "#242427",
-    "accent": "#8a5a2b", "accent_light": "#d7af87",
-    "text": "#eee6dc", "muted": "#8b7d6f", "muted2": "#b9ab9b",
+    "bg2": "#121a16", "line": "#1e3529",  # --surface-2; --shell-line over the dark background
+    "accent": "#34d399", "on_accent": "#070b09",  # --pass, --shell-bg
+    "warn": "#e8875a", "error": "#f08c88",  # --sap, --fail
+    "muted": "#889a90", "muted2": "#afbfb6",  # --ink-3, --ink-2
 }
 
 
 def set_alert(session: str, text: str, style: str = "warn") -> None:
     """Show ``text`` next to the version in ``session``'s status bar (empty: clear it)
     through the session option the status line reads. Called only when it changes."""
-    colour = "#e0b04a" if style == "warn" else "#e06c5a"
+    colour = THEME["warn" if style == "warn" else "error"]
     value = f"#[fg={colour},bold]{text.replace('#', '##')} #[default]" if text else ""
     _tmux("set-option", "-t", session, "@brindle_alert", value, check=False)
 
@@ -632,7 +630,7 @@ def apply_theme(session: str) -> None:
         "status-style": f"bg={t['bg2']},fg={t['muted2']}",
         # Which brindle runs this session: one started before an upgrade keeps
         # running the old code until it is restarted.
-        "status-left": (f"#[bg={t['accent']},fg={t['text']},bold] brindle "
+        "status-left": (f"#[bg={t['accent']},fg={t['on_accent']},bold] brindle "
                         f"#[bg={t['bg2']},fg={t['muted2']},nobold] {__version__} " +
                         (f"{update} " if update else "") +
                         "#{@brindle_alert}"),   # org warning/messages, set by pro.status
@@ -640,16 +638,16 @@ def apply_theme(session: str) -> None:
         "status-right": f"#[fg={t['muted']}]#{{session_name}}  %H:%M ",
         "status-right-length": "60",
         "window-status-format": f"#[fg={t['muted']}] #W ",
-        "window-status-current-format": f"#[fg={t['accent_light']},bold] #W ",
+        "window-status-current-format": f"#[fg={t['accent']},bold] #W ",
         "pane-border-style": f"fg={t['line']}",
-        "pane-active-border-style": f"fg={t['accent_light']}",
+        "pane-active-border-style": f"fg={t['accent']}",
         "pane-border-lines": "single",
         # No fixed pane colour: the attached terminal's own background (light or
         # dark) shows, so light-mode text isn't painted onto a black pane.
         "window-style": "bg=default",
         "window-active-style": "bg=default",
-        "message-style": f"bg={t['accent']},fg={t['text']}",
-        "mode-style": f"bg={t['accent']},fg={t['text']}",
+        "message-style": f"bg={t['accent']},fg={t['on_accent']}",
+        "mode-style": f"bg={t['accent']},fg={t['on_accent']}",
         # Wheel scrolling and click-to-focus between the sidebar and the chat.
         "mouse": "on",
     }
