@@ -4,8 +4,8 @@
 
    The inbox reaches the store as snapshots, fetched whenever the event stream
    says something changed; an item whose key wasn't in the previous one is new.
-   Open PRs are remembered by URL and kind for this watch's lifetime: pushes
-   and CI reruns can temporarily remove their cards or change their kind.
+   Open PR announcements are remembered by URL for this watch's lifetime.
+   PR failures are remembered across launches by URL, head commit and problem.
    The first snapshot only records what is already waiting: nothing is
    announced for items that were there before the app opened. A session's
    readiness is the bus's session.pr_ready row (daemon/session_review.py
@@ -27,10 +27,37 @@ export interface InboxSink {
 }
 
 export const READY_TITLE = "Ready for a pull request";
+const PR_FAILURE_HISTORY_KEY = "brindle.inbox.pr-failure-history";
+const PR_FAILURE_HISTORY_LIMIT = 500;
+
+function loadPrFailures(): Set<string> {
+  try {
+    const saved: unknown = JSON.parse(localStorage.getItem(PR_FAILURE_HISTORY_KEY) ?? "[]");
+    if (Array.isArray(saved)) {
+      return new Set(saved.filter((key): key is string => typeof key === "string").slice(-PR_FAILURE_HISTORY_LIMIT));
+    }
+  } catch {
+    // The watcher can still remember failures for this launch.
+  }
+  return new Set();
+}
+
+function savePrFailures(failures: Set<string>): void {
+  for (const key of failures) {
+    if (failures.size <= PR_FAILURE_HISTORY_LIMIT) break;
+    failures.delete(key);
+  }
+  try {
+    localStorage.setItem(PR_FAILURE_HISTORY_KEY, JSON.stringify([...failures]));
+  } catch {
+    // Storage may be unavailable, but this launch still has its history.
+  }
+}
 
 export function watchInbox(store: AppStore, sink: InboxSink): () => void {
   let seen: Set<string> | null = null;
   const seenPrs = new Set<string>();
+  const seenFailures = loadPrFailures();
   let last: InboxItemDTO[] | null = null;
   let lastEvent = store.getState().lastEventId;
   let counted: number | null = null;
@@ -49,16 +76,23 @@ export function watchInbox(store: AppStore, sink: InboxSink): () => void {
     if (inbox !== last) {
       last = inbox;
       const keys = new Set(inbox.map(itemKey));
+      let failuresChanged = false;
       for (const item of inbox) {
-        // A failure is remembered with what failed, so a new failure still notifies.
-        const prKey = (item.kind === "pr_opened" || item.kind === "pr_failed") && item.url
-          ? JSON.stringify([item.kind, item.url, item.kind === "pr_failed" ? item.detail ?? "" : ""]) : null;
-        if (seen && (prKey ? !seenPrs.has(prKey) : !seen.has(itemKey(item)))) {
+        const failure = item.kind === "pr_failed" && item.url
+          ? JSON.stringify([item.url, item.pr_head_sha ?? null, item.detail ?? ""]) : null;
+        const opened = item.kind === "pr_opened" ? item.url : null;
+        const isNew = failure ? !seenFailures.has(failure) : opened ? !seenPrs.has(opened) : !seen?.has(itemKey(item));
+        if (seen && isNew) {
           sink.notify(kindLabel(item), describe(item), item.kind === "pr_opened" ? (item.url ?? undefined) : undefined);
         }
         // Seed this history on initial sync too, without announcing old items.
-        if (prKey) seenPrs.add(prKey);
+        if (opened) seenPrs.add(opened);
+        if (failure && isNew) {
+          seenFailures.add(failure);
+          failuresChanged = true;
+        }
       }
+      if (failuresChanged) savePrFailures(seenFailures);
       seen = keys;
     }
     // The badge counts the app's own update item too (store/appUpdates.ts).

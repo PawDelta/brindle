@@ -3685,6 +3685,18 @@
           ],
           "default": null
         },
+        "pr_head_sha": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pr Head Sha"
+        },
         "read": {
           "anyOf": [
             {
