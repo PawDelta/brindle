@@ -156,7 +156,8 @@ def test_bulk_delete_continues_after_a_doc_fails(db, library):
     assert got["results"][1]["error"] and not library
 
 
-@pytest.mark.parametrize("local", [False, pytest.param(True, marks=pytest.mark.variant(
+@pytest.mark.parametrize("local", [pytest.param(False, marks=pytest.mark.variant(
+    "a doc the server reports shared must be refused without confirm, not deleted")), pytest.param(True, marks=pytest.mark.variant(
     "sharing recorded on this Mac also requires confirmation before either copy is deleted"))])
 def test_bulk_delete_requires_confirmation_for_an_ordinary_shared_doc(db, library, monkeypatch, local):
     doc_id = "local-one" if local else "one"
@@ -202,6 +203,7 @@ def test_bulk_delete_preserves_a_doc_shared_after_the_check(db, library, monkeyp
     assert not library
 
 
+@pytest.mark.variant("a plan open for review must stay linked until confirm, then be released")
 def test_bulk_delete_requires_confirmation_before_releasing_shared_plan(db, parts, library):
     pid, _, net = parts
     sd.share(db, pid, TEAM, reviewers=[{"sub": "u_a", "required": True}], **net)
@@ -220,7 +222,8 @@ def test_bulk_delete_requires_confirmation_before_releasing_shared_plan(db, part
     assert DOC not in library and sd.link(db, pid) is None
 
 
-@pytest.mark.parametrize("fmt", ["md", pytest.param("zip", marks=pytest.mark.variant(
+@pytest.mark.parametrize("fmt", [pytest.param("md", marks=pytest.mark.variant(
+    "markdown export must keep duplicate titles distinct and list refused docs")), pytest.param("zip", marks=pytest.mark.variant(
     "binary exports keep each document's own archive intact"))])
 def test_bulk_export_deduplicates_titles_and_skips_refused_docs(db, monkeypatch, fmt):
     titles = {"one": "Release notes", "two": "Release notes", "refused": "Restricted"}
