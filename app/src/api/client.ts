@@ -1055,6 +1055,26 @@ export interface DocExport {
 
 export type ExportDestination = "download" | "google_docs" | "sharepoint";
 
+export interface BulkDocsRequest {
+  action: "delete" | "move" | "share" | "unshare";
+  ids: string[];
+  folder?: string;
+  scope?: string;
+  confirm?: boolean;
+}
+
+export interface BulkDocResult {
+  id: string;
+  ok: boolean;
+  code?: string;
+  error?: string;
+}
+
+export interface BulkDocExport extends DocExport {
+  content_b64: string;
+  skipped: { id: string; code: string }[];
+}
+
 /* GET /analysis-docs/policy (the rest of the org's policy passes through untouched). */
 export interface DocPolicy {
   export_destinations?: ExportDestination[];
@@ -2799,9 +2819,17 @@ export class DaemonClient {
     return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}`, confirm ? { confirm } : {});
   }
 
+  bulkDocs(request: BulkDocsRequest) {
+    return this.post<{ results: BulkDocResult[] }>("/library/docs/bulk", request);
+  }
+
   /* With `dir` the daemon writes the file there; without, it comes back as base64. */
   exportDoc(id: string, format: "md" | "docx" | "zip", dir?: string, destination: ExportDestination = "download") {
     return this.post<DocExport>(`/analysis-docs/${encodeURIComponent(id)}/export`, { format, destination, ...(dir ? { dir } : {}) });
+  }
+
+  exportDocs(ids: string[], format: "md" | "zip", destination: ExportDestination = "download") {
+    return this.post<BulkDocExport>("/library/docs/export", { ids, format, destination });
   }
 
   /* The org's doc policy: which export destinations it allows. */
