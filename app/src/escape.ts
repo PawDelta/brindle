@@ -1,5 +1,5 @@
-/* Who owns Escape right now. A reader that goes back on Escape (a visual, a plan) says so while it is
-   open; the profile rail's own Esc-back (App) then leaves it alone, whichever listener runs first. */
+/* A reader that goes back on Escape (a visual or plan) claims it while open. The profile rail
+   and xterm defer to the reader even if their listeners run first. */
 
 import { useEffect } from "react";
 

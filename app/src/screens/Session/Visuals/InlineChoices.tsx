@@ -132,7 +132,12 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
         }
       };
       doc.onsubmit = event => event.preventDefault();
-      doc.onkeydown = event => { if (event.key === "Escape") onBack(); };
+      doc.onkeydown = event => {
+        if (event.key !== "Escape" || event.defaultPrevented) return;
+        event.preventDefault();
+        event.stopPropagation();
+        onBack();
+      };
       syncChoiceColors(doc);
       refresh(true);
     }} />;
