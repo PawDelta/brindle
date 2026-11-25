@@ -1055,6 +1055,28 @@ export interface DocExport {
 
 export type ExportDestination = "download" | "google_docs" | "sharepoint";
 
+export interface BulkDocsRequest {
+  action: "delete" | "move" | "share" | "unshare";
+  ids: string[];
+  folder?: string;
+  scope?: string;
+  confirm?: boolean;
+}
+
+export interface BulkDocsResult {
+  results: { id: string; ok: boolean; code?: string; error?: string }[];
+}
+
+export interface ExportDocsRequest {
+  ids: string[];
+  format: "zip";
+  destination?: ExportDestination;
+}
+
+export interface ExportDocsResult extends DocExport {
+  skipped: { id: string; code: string }[];
+}
+
 /* GET /analysis-docs/policy (the rest of the org's policy passes through untouched). */
 export interface DocPolicy {
   export_destinations?: ExportDestination[];
@@ -2760,6 +2782,14 @@ export class DaemonClient {
 
   moveDocToFolder(id: string, scope: string, folder: string) {
     return this.put<unknown>(`/analysis-docs/${encodeURIComponent(id)}/folder`, { scope, folder });
+  }
+
+  bulkDocs(request: BulkDocsRequest) {
+    return this.post<BulkDocsResult>("/library/docs/bulk", request);
+  }
+
+  exportDocs(request: ExportDocsRequest) {
+    return this.post<ExportDocsResult>("/library/docs/export", request);
   }
 
   async knowledgeMap(repo: string, scope: DocScope, paths: string[] = []): Promise<KnowledgeMap> {
