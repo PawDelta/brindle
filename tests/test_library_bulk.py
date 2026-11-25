@@ -36,7 +36,7 @@ def library(monkeypatch, tmp_path):
             folder = {"id": doc["folder"], "scope": owner} if doc.get("folder") else None
             return {"scope": owner, "scopes": [dict(owner, name="Owner"), *scopes], "design": {"folder": folder}}
         if method == "DELETE" and not tail:
-            if doc["shared"] and (kwargs.get("query") or {}).get("confirm") != "true":
+            if doc["shared"] and (kwargs.get("query") or {}).get("if_unshared") == "true":
                 raise ServiceError("doc_shared", "Document is shared", 409)
             del docs[doc_id]
         elif method == "PUT" and tail == ["design", "folder"]:
@@ -184,13 +184,12 @@ def test_bulk_delete_preserves_a_doc_shared_after_the_check(db, library, monkeyp
         doc["shared"].clear()
     api = actions.docs_api
 
-    def share_after_read(method, path, *args, **kwargs):
-        result = api(method, path, *args, **kwargs)
-        if method == "GET" and path == "/analysis-docs/one":
+    def share_before_delete(method, path, *args, **kwargs):
+        if method == "DELETE" and path == "/analysis-docs/one":
             library["one"]["shared"].add(("group", "new-team"))
-        return result
+        return api(method, path, *args, **kwargs)
 
-    monkeypatch.setattr(actions, "docs_api", share_after_read)
+    monkeypatch.setattr(actions, "docs_api", share_before_delete)
     refused, deleted = actions.bulk_docs(db, {}, {"action": "delete", "ids": ["one", "two"]})["results"]
 
     assert (refused["id"], refused["ok"], refused.get("code")) == ("one", False, "doc_shared")
