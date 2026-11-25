@@ -2796,9 +2796,7 @@ def move_doc_to_folder(db: DB, params: dict, body: Body) -> Any:
     def move(kind, scope_id, api):
         got = folders.move_doc(server_id, kind, scope_id, folder, api=api)
         if kept is not None:
-            local_library.update(doc_id, server_folder={"server_id": server_id, "folder": {
-                "scope": {"kind": kind, "id": scope_id}, "id": folder,
-            }})
+            local_library.remember_server_folder(doc_id, server_id, {"scope": {"kind": kind, "id": scope_id}, "id": folder})
         return got
 
     return _folder_call(body, move, repo=params.get("repo"))

@@ -336,6 +336,14 @@ def view(record: dict, scope: dict | None = None) -> dict:
             **({"scope": scope} if scope else {})}
 
 
+def remember_server_folder(doc_id: str, server_id: str, folder: dict | None) -> None:
+    """Keep the last known placement for reads when the Library is unavailable."""
+    try:
+        update(doc_id, server_folder={"server_id": server_id, "folder": folder})
+    except (KeyError, OSError):
+        log.debug("Library folder placement could not be saved locally", exc_info=True)
+
+
 # -- moving between here and the servers ---------------------------------------------------------------
 
 

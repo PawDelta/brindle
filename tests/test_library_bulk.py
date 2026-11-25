@@ -3,11 +3,14 @@
 import base64
 import io
 from types import SimpleNamespace
+from urllib.parse import urlencode
 from zipfile import ZipFile
 
 import pytest
+from starlette.requests import Request
 
 from brindle.daemon import routes_actions as actions
+from brindle.daemon import routes_read as reads
 from brindle.pro import auth, local_library
 from brindle.pro import shared_docs as sd
 from brindle.service.errors import ServiceError
@@ -30,7 +33,8 @@ def library(monkeypatch):
         if method == "GET" and not tail:
             owner = {"kind": "user", "id": "owner"}
             scopes = [{"kind": kind, "id": scope_id} for kind, scope_id in doc["shared"]]
-            return {"scope": owner, "scopes": [dict(owner, name="Owner"), *scopes]}
+            folder = {"id": doc["folder"], "scope": owner} if doc.get("folder") else None
+            return {"scope": owner, "scopes": [dict(owner, name="Owner"), *scopes], "design": {"folder": folder}}
         if method == "DELETE" and not tail:
             del docs[doc_id]
         elif method == "PUT" and tail == ["design", "folder"]:
@@ -79,7 +83,42 @@ def test_bulk_action_updates_each_doc(db, library, monkeypatch, action, options,
     assert got == {"results": [{"id": "one", "ok": True}, {"id": second, "ok": True}]}
     assert library == {"one": expected, "two": expected}
     if action == "move":
-        assert local_library.view(kept)["design"]["folder"]["id"] == "new"
+        monkeypatch.setattr(reads, "docs_api", repo_api)
+        request = Request({"type": "http", "path_params": {"id": second},
+                           "query_string": urlencode({"repo": REPO}).encode()})
+
+        def folder():
+            return reads.analysis_doc.__wrapped__(db, request).get("design", {}).get("folder")
+
+        assert folder()["id"] == "new"
+        library["two"]["folder"] = "moved-from-another-device"
+        assert folder()["id"] == "moved-from-another-device"
+
+        def unavailable(*args, **kwargs):
+            raise ServiceError("upstream", "Library is offline", 503)
+
+        with monkeypatch.context() as offline:
+            offline.setattr(reads, "docs_api", unavailable)
+            assert folder()["id"] == "moved-from-another-device"
+
+        library["two"]["folder"] = None
+        assert folder() is None
+        monkeypatch.setattr(reads, "docs_api", unavailable)
+        assert folder() is None
+
+
+def test_bulk_move_succeeds_when_writing_the_local_placement_fails(db, library, monkeypatch):
+    kept = {"doc_id": "local-two", "server_id": "two"}
+    monkeypatch.setattr(local_library, "get", {"local-two": kept}.get)
+
+    def unwritable(*args, **kwargs):
+        raise OSError("Library cache is read-only")
+
+    monkeypatch.setattr(local_library, "update", unwritable)
+    body = {"action": "move", "ids": ["local-two"], "folder": "new", "scope": "user", "repo": REPO}
+
+    assert actions.bulk_docs(db, {}, body) == {"results": [{"id": "local-two", "ok": True}]}
+    assert library["two"]["folder"] == "new"
 
 
 @pytest.mark.variant("a missing document must preserve its own error code and allow later deletes")
