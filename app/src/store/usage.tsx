@@ -25,24 +25,25 @@ export function weeklyReading(provider: ProviderUsage): WeeklyReading | undefine
   if (window) return { provider: provider.provider, used: window.used, resetsAt: window.resets_at };
 }
 
-function readWeekly(key: string | null): WeeklyReading[] {
-  if (!key) return [];
+const weeklyKey = (accountKey: string | null, claudeScope: string | null) =>
+  accountKey && claudeScope ? `brindle.usage.claude.weekly.${JSON.stringify([accountKey, claudeScope])}` : null;
+
+function readWeekly(key: string | null): WeeklyReading | undefined {
+  if (!key) return;
   try {
-    const saved: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
-    if (Array.isArray(saved)) {
-      return saved.filter((reading) => reading && typeof reading.provider === "string" && Number.isFinite(reading.used)
-        && (reading.resetsAt === null || Number.isFinite(reading.resetsAt)));
-    }
+    const saved = JSON.parse(localStorage.getItem(key) ?? "null");
+    if (saved?.provider === "claude" && Number.isFinite(saved.used)
+      && (saved.resetsAt === null || Number.isFinite(saved.resetsAt))) return saved;
   } catch {
     // The feed still works when local storage is unavailable.
   }
-  return [];
 }
 
 export interface UsageFeed {
   /* null until the first load answers. */
   usage: Usage | null;
-  weekly: WeeklyReading[];
+  savedClaude?: WeeklyReading;
+  checkingClaude: boolean;
   /* The last failed load's message; the last usage stays, once loaded. */
   error: string | null;
   reload(): Promise<void>;
@@ -50,7 +51,7 @@ export interface UsageFeed {
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-const NONE: UsageFeed = { usage: null, weekly: [], error: null, reload: () => Promise.resolve() };
+const NONE: UsageFeed = { usage: null, checkingClaude: false, error: null, reload: () => Promise.resolve() };
 
 export const UsageContext = createContext<UsageFeed | null>(null);
 
@@ -62,47 +63,90 @@ export function useUsage(): UsageFeed {
 interface UsageScope {
   loading: Promise<void> | null;
   again: boolean;
+  verifyClaude: boolean;
+  generation: number;
+  claudeIdentity: string | null;
 }
 
-const scopedFeed = (scope: UsageScope, cacheKey: string | null): Omit<UsageFeed, "reload"> & { scope: UsageScope } => ({
-  scope, usage: null, weekly: readWeekly(cacheKey), error: null,
+type ScopedFeed = Omit<UsageFeed, "reload"> & { scope: UsageScope; claudeScope: string | null };
+
+const scopedFeed = (scope: UsageScope, accountKey: string | null, claudeScope: string | null): ScopedFeed => ({
+  scope, claudeScope, usage: null, savedClaude: readWeekly(weeklyKey(accountKey, claudeScope)), checkingClaude: false, error: null,
 });
+
+const withoutClaude = (usage: Usage | null): Usage | null => usage && {
+  ...usage,
+  providers: usage.providers.filter((p) => p.provider !== "claude"),
+  near: usage.near.filter((p) => p.provider !== "claude"),
+};
 
 /* `client` null: no engine to ask (a plain browser tab); the feed stays empty. */
 export function UsageProvider({ client, children, pollMs = USAGE_POLL_MS }: { client: DaemonClient | null; children: ReactNode; pollMs?: number }) {
   const subject = useAppState((s) => s.account?.signed_in ? s.account.subject : null);
-  const cacheKey = client && subject ? `brindle.usage.weekly.${JSON.stringify([client.baseUrl, subject])}` : null;
-  const scope = useMemo<UsageScope>(() => ({ loading: null, again: false }), [client, cacheKey]);
-  const [state, setState] = useState(() => scopedFeed(scope, cacheKey));
+  const initialClaudeScope = useAppState((s) => s.account?.signed_in ? s.account.claude_usage_scope ?? null : null);
+  const accountKey = client && subject ? JSON.stringify([client.baseUrl, subject]) : null;
+  const scope = useMemo<UsageScope>(() => ({
+    loading: null, again: false, verifyClaude: false, generation: 0, claudeIdentity: initialClaudeScope,
+  }), [client, accountKey, initialClaudeScope]);
+  const [state, setState] = useState(() => scopedFeed(scope, accountKey, initialClaudeScope));
   // A new account gets its own feed without remounting the active screen.
-  if (state.scope !== scope) setState(scopedFeed(scope, cacheKey));
-  const { usage, weekly, error } = state;
+  if (state.scope !== scope) setState(scopedFeed(scope, accountKey, initialClaudeScope));
+  const { usage, savedClaude, checkingClaude, claudeScope, error } = state;
+  const cacheKey = weeklyKey(accountKey, claudeScope);
   const started = useRef<UsageScope | null>(null);
 
   useEffect(() => {
-    if (!cacheKey || !weekly.length) return;
+    if (!cacheKey || !savedClaude) return;
     try {
-      localStorage.setItem(cacheKey, JSON.stringify(weekly));
+      localStorage.setItem(cacheKey, JSON.stringify(savedClaude));
     } catch {
       // This launch can still display the reading from memory.
     }
-  }, [cacheKey, weekly]);
+  }, [cacheKey, savedClaude]);
 
   const load = useCallback(async () => {
     if (!client) return;
-    try {
-      const next = await client.usage();
-      const readings = next.providers.flatMap((provider) => weeklyReading(provider) ?? []);
+    const generation = scope.generation;
+    const apply = (next: Usage) => {
+      if (generation !== scope.generation) return false;
+      const identity = next.claude_usage_scope ?? null;
+      scope.claudeIdentity = identity;
+      const provider = next.providers.find((p) => p.provider === "claude");
+      const reading = identity && provider ? weeklyReading(provider) : undefined;
+      const saved = readWeekly(weeklyKey(accountKey, identity));
       setState((previous) => {
-        if (previous.scope !== scope) return previous;
-        const byProvider = new Map(previous.weekly.map((reading) => [reading.provider, reading]));
-        for (const reading of readings) byProvider.set(reading.provider, reading);
-        return { ...previous, usage: next, weekly: [...byProvider.values()], error: null };
+        if (previous.scope !== scope || generation !== scope.generation) return previous;
+        const savedClaude = reading ?? (identity === previous.claudeScope ? previous.savedClaude : saved);
+        return { ...previous, usage: next, claudeScope: identity, savedClaude, checkingClaude: false, error: null };
       });
+      return true;
+    };
+    try {
+      if (scope.verifyClaude) {
+        const current = await client.usage(false);
+        if (generation !== scope.generation) return;
+        scope.verifyClaude = false;
+        apply(current);
+      }
+      const expectedIdentity = scope.claudeIdentity;
+      const next = await client.usage(true, expectedIdentity);
+      if (!apply(next)) return;
+      // A fresh request for an old identity returns current data without
+      // refreshing under the new login. Update the chip before asking again.
+      if (scope.claudeIdentity && scope.claudeIdentity !== expectedIdentity) {
+        apply(await client.usage(true, scope.claudeIdentity));
+      }
     } catch (e) {
-      setState((previous) => previous.scope === scope ? { ...previous, error: message(e) } : previous);
+      if (generation !== scope.generation) return;
+      if (scope.verifyClaude) scope.claudeIdentity = null;
+      scope.verifyClaude = false;
+      setState((previous) => previous.scope === scope && generation === scope.generation ? {
+        ...previous,
+        ...(previous.checkingClaude && { claudeScope: null, savedClaude: undefined, checkingClaude: false }),
+        error: message(e),
+      } : previous);
     }
-  }, [client, scope]);
+  }, [accountKey, client, scope]);
 
   const reload = useCallback((): Promise<void> => {
     if (scope.loading) {
@@ -132,12 +176,22 @@ export function UsageProvider({ client, children, pollMs = USAGE_POLL_MS }: { cl
 
   useEffect(() => () => {
     scope.again = false;
+    scope.generation++;
+    started.current = null;
   }, [scope]);
 
   useEffect(() => {
     if (!client) return;
     const wake = () => {
-      if (!document.hidden) void reload();
+      if (document.hidden || scope.verifyClaude) return;
+      // A login may have changed while the window was away. Confirm the
+      // subscription with a fast read before starting the slow CLI refresh.
+      scope.verifyClaude = true;
+      scope.generation++;
+      setState((previous) => previous.scope === scope ? {
+        ...previous, usage: withoutClaude(previous.usage), checkingClaude: true,
+      } : previous);
+      void reload();
     };
     window.addEventListener("focus", wake);
     document.addEventListener("visibilitychange", wake);
@@ -145,7 +199,7 @@ export function UsageProvider({ client, children, pollMs = USAGE_POLL_MS }: { cl
       window.removeEventListener("focus", wake);
       document.removeEventListener("visibilitychange", wake);
     };
-  }, [client, reload]);
+  }, [client, reload, scope]);
 
   useEffect(() => {
     if (!client) return;
@@ -153,6 +207,8 @@ export function UsageProvider({ client, children, pollMs = USAGE_POLL_MS }: { cl
     return () => clearInterval(timer);
   }, [client, reload, pollMs]);
 
-  const feed = useMemo<UsageFeed>(() => ({ usage, weekly, error, reload }), [usage, weekly, error, reload]);
+  const feed = useMemo<UsageFeed>(() => ({
+    usage, savedClaude: checkingClaude ? undefined : savedClaude, checkingClaude, error, reload,
+  }), [usage, savedClaude, checkingClaude, error, reload]);
   return <UsageContext.Provider value={feed}>{children}</UsageContext.Provider>;
 }

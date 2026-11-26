@@ -464,6 +464,14 @@ def _non_subscription_route(provider: str, *, repo_root: str | None = None,
     return _route_scope(provider, repo_root=repo_root, env=env) is not None
 
 
+def claude_usage_scope() -> str | None:
+    """The opaque cache identity for the active Claude subscription."""
+    key = subscription_usage.cache_key("claude")
+    if key is None or _non_subscription_route("claude"):
+        return None
+    return key
+
+
 def effective_windows(q: Quota, *, now: float | None = None) -> tuple[list[Window], float | None, bool]:
     """Evaluate plan availability keeping included allowance and optional paid
     overage separate. Returns ``(serving_windows, limited_until, has_overage_buffer)``.
@@ -948,7 +956,7 @@ def _claim_usage_refresh(force: bool, key: str, *, stamp_name: str = CLAUDE_USAG
     return None
 
 
-def refresh_claude_usage(*, force: bool = False) -> bool:
+def refresh_claude_usage(*, force: bool = False, expected_identity: str | None = None) -> bool:
     """Ask ``claude -p /usage`` (Claude Code reads the plan's usage itself;
     brindle never touches its credentials) at most every
     ``CLAUDE_USAGE_REFRESH_SECONDS``. True when it recorded windows."""
@@ -958,10 +966,8 @@ def refresh_claude_usage(*, force: bool = False) -> bool:
     from brindle import provider_homes, spawn
     from brindle.providers import claude_binary
 
-    if _non_subscription_route("claude"):
-        return False
-    key = subscription_usage.cache_key("claude")
-    if key is None:
+    key = claude_usage_scope()
+    if key is None or (expected_identity is not None and key != expected_identity):
         return False
     if not force:
         current = get("claude", identity_key=key)

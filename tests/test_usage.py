@@ -1,6 +1,7 @@
 import json
 import shlex
 import subprocess
+from urllib.parse import urlencode
 
 from starlette.requests import Request
 
@@ -33,21 +34,30 @@ def test_served_claude_usage_follows_subscription_switch_and_back(tmp_path, monk
 
     monkeypatch.setattr(spawn, "read", fetch)
 
-    def served(*, fresh=False):
-        request = Request({"type": "http", "query_string": b"fresh=1" if fresh else b""})
-        result = routes_read.get_usage.__wrapped__(None, request)
-        return next(p for p in result["providers"] if p["provider"] == "claude")
+    def snapshot(*, fresh=False, scope=None):
+        query = {"fresh": "1"} if fresh else {}
+        if scope is not None:
+            query["claude_scope"] = scope
+        request = Request({"type": "http", "query_string": urlencode(query).encode()})
+        return routes_read.get_usage.__wrapped__(None, request)
+
+    def served(*, fresh=False, scope=None):
+        return next(p for p in snapshot(fresh=fresh, scope=scope)["providers"] if p["provider"] == "claude")
 
     login("A")
     # A pre-upgrade provider-only cache has no safe subscription attribution.
     quota._save({"claude": {"windows": [{"used": 99}], "updated_at": quota.time.time()}})
     assert not served()["known"]
     assert served(fresh=True)["windows"][0]["used"] == 21
+    scope_a = snapshot()["claude_usage_scope"]
+    assert scope_a
     login("B")  # Same organization, different subscription owner.
     assert not served()["known"]
+    scope_b = snapshot()["claude_usage_scope"]
+    assert scope_b not in (None, scope_a)
     used = 78
-    assert quota.refresh_claude_usage()  # A's refresh clock must not suppress B's.
-    assert served()["windows"][0]["used"] == 78
+    assert not served(fresh=True, scope=scope_a)["known"]
+    assert served(fresh=True, scope=scope_b)["windows"][0]["used"] == 78
     # Capture the real launch command's binding, rather than assigning the
     # current config identity to a status line after its parent has switched.
     argv = providers.ClaudeCode().command(providers.LaunchContext(
@@ -61,6 +71,7 @@ def test_served_claude_usage_follows_subscription_switch_and_back(tmp_path, monk
     assert served()["windows"][0]["used"] == 79
     login("A")
     assert served()["windows"][0]["used"] == 21
+    assert snapshot()["claude_usage_scope"] == scope_a
     used = 25
     assert quota.refresh_claude_usage(force=True)
 

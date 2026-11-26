@@ -57,7 +57,7 @@ describe("account screen", () => {
       ],
     });
     render(
-      <UsageContext.Provider value={{ usage, weekly: [], error: null, reload: async () => {} }}>
+      <UsageContext.Provider value={{ usage, checkingClaude: false, error: null, reload: async () => {} }}>
         <UsageSection />
       </UsageContext.Provider>,
     );

@@ -1225,6 +1225,8 @@ export interface ProfileDetail extends ProfileDTO {
 export interface AccountInfo extends AccountDTO {
   /* The signed entitlement's account ID, available offline. */
   subject?: string;
+  /* Opaque identity of the local Claude subscription, when confirmed. */
+  claude_usage_scope?: string | null;
   org_id?: string;
   status?: string;
   features?: string[];
@@ -1527,6 +1529,7 @@ export interface UsageNear {
 export interface Usage {
   providers: ProviderUsage[];
   near: UsageNear[];
+  claude_usage_scope?: string | null;
 }
 
 /* POST /sessions (routes_actions.start_session → service.sessions.start). */
@@ -3288,8 +3291,8 @@ export class DaemonClient {
   }
 
   /* Each provider's subscription windows as its own CLI reports them, and the near ones. */
-  usage() {
-    return this.get<Usage>("/usage", { fresh: 1 });
+  usage(fresh = true, claudeScope?: string | null) {
+    return this.get<Usage>("/usage", fresh ? { fresh: 1, claude_scope: claudeScope === null ? "none" : claudeScope } : undefined);
   }
 
   /* The URL of WS /v1/events. The token is never in it: the stream sends it

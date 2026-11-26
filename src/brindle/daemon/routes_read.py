@@ -1118,6 +1118,7 @@ def account(db: DB, request: Request) -> Any:
     note = learning.kept_note(cfg, repo) if on and repo else None
     return {**details.to_json(),
             "subject": ent.sub, "org_id": ent.org_id, "status": ent.status, "features": sorted(ent.features),
+            "claude_usage_scope": quota.claude_usage_scope(),
             "seats": ent.seats, "role": ent.role, "expires_at": ent.exp,
             "in_grace": ent.in_grace, "grace_until": ent.grace_until,
             "learning_available": available, "learning": on, "learning_note": note}
@@ -1425,11 +1426,16 @@ def get_usage(db: DB, request: Request) -> Any:
     # Codex reads its rollouts in quota.get. Claude's desktop reading needs
     # the same throttled CLI refresh the terminal sidebar uses.
     if request.query_params.get("fresh") == "1":
-        quota.refresh_claude_usage()
+        expected = request.query_params.get("claude_scope")
+        if expected is None:
+            quota.refresh_claude_usage()
+        else:
+            quota.refresh_claude_usage(expected_identity=expected)
+    claude_scope = quota.claude_usage_scope()
     now = time.time()
     providers, near = [], []
     for name in quota.PROVIDERS:
-        q = quota.get(name)
+        q = quota.get(name, identity_key=claude_scope) if name == "claude" and claude_scope else quota.get(name)
         if q is None:
             providers.append({"provider": name, "known": False, "limited": False, "windows": [],
                               "limited_until": None, "updated_at": None})
@@ -1455,7 +1461,7 @@ def get_usage(db: DB, request: Request) -> Any:
             near.append({"provider": name, "reason": "resets_soon", "used": soon.used,
                          "resets_at": soon.resets_at})
     near.sort(key=lambda n: (n["reason"] != "limited", -(n["used"] or 0)))
-    return {"providers": providers, "near": near}
+    return {"providers": providers, "near": near, "claude_usage_scope": claude_scope}
 
 
 ROUTES = [
