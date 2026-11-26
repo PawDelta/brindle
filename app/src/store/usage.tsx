@@ -25,25 +25,39 @@ export function weeklyReading(provider: ProviderUsage): WeeklyReading | undefine
   if (window) return { provider: provider.provider, used: window.used, resetsAt: window.resets_at };
 }
 
-const weeklyKey = (accountKey: string | null, claudeScope: string | null) =>
-  accountKey && claudeScope ? `brindle.usage.claude.weekly.${JSON.stringify([accountKey, claudeScope])}` : null;
+const scopedProviders = ["claude", "codex"] as const;
+type ScopedProvider = typeof scopedProviders[number];
+type UsageIdentities = Record<ScopedProvider, string | null>;
+type UsageScopeFields = Pick<Usage, "claude_usage_scope" | "codex_usage_scope">;
 
-function readWeekly(key: string | null): WeeklyReading | undefined {
+const identitiesOf = (data?: UsageScopeFields | null): UsageIdentities => ({
+  claude: data?.claude_usage_scope || null, codex: data?.codex_usage_scope || null,
+});
+const sameIdentities = (a: UsageIdentities, b: UsageIdentities) =>
+  scopedProviders.every((provider) => a[provider] === b[provider]);
+
+const weeklyKey = (accountKey: string | null, provider: ScopedProvider, identity: string | null) =>
+  accountKey && identity ? `brindle.usage.${provider}.weekly.${JSON.stringify([accountKey, identity])}` : null;
+
+function readWeekly(key: string | null, provider: ScopedProvider): WeeklyReading | undefined {
   if (!key) return;
   try {
     const saved = JSON.parse(localStorage.getItem(key) ?? "null");
-    if (saved?.provider === "claude" && Number.isFinite(saved.used)
+    if (saved?.provider === provider && Number.isFinite(saved.used)
       && (saved.resetsAt === null || Number.isFinite(saved.resetsAt))) return saved;
   } catch {
     // The feed still works when local storage is unavailable.
   }
 }
 
+const readSaved = (accountKey: string | null, identities: UsageIdentities) =>
+  scopedProviders.flatMap((provider) => readWeekly(weeklyKey(accountKey, provider, identities[provider]), provider) ?? []);
+
 export interface UsageFeed {
   /* null until the first load answers. */
   usage: Usage | null;
-  savedClaude?: WeeklyReading;
-  checkingClaude: boolean;
+  saved: WeeklyReading[];
+  checking: boolean;
   /* The last failed load's message; the last usage stays, once loaded. */
   error: string | null;
   reload(): Promise<void>;
@@ -51,7 +65,7 @@ export interface UsageFeed {
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-const NONE: UsageFeed = { usage: null, checkingClaude: false, error: null, reload: () => Promise.resolve() };
+const NONE: UsageFeed = { usage: null, saved: [], checking: false, error: null, reload: () => Promise.resolve() };
 
 export const UsageContext = createContext<UsageFeed | null>(null);
 
@@ -63,90 +77,107 @@ export function useUsage(): UsageFeed {
 interface UsageScope {
   loading: Promise<void> | null;
   again: boolean;
-  verifyClaude: boolean;
+  checking: Promise<void> | null;
   generation: number;
-  claudeIdentity: string | null;
+  identities: UsageIdentities;
 }
 
-type ScopedFeed = Omit<UsageFeed, "reload"> & { scope: UsageScope; claudeScope: string | null };
+type ScopedFeed = Omit<UsageFeed, "reload"> & { scope: UsageScope; identities: UsageIdentities };
 
-const scopedFeed = (scope: UsageScope, accountKey: string | null, claudeScope: string | null): ScopedFeed => ({
-  scope, claudeScope, usage: null, savedClaude: readWeekly(weeklyKey(accountKey, claudeScope)), checkingClaude: false, error: null,
+const scopedFeed = (scope: UsageScope, accountKey: string | null): ScopedFeed => ({
+  scope, identities: scope.identities, usage: null, saved: readSaved(accountKey, scope.identities), checking: false, error: null,
 });
 
-const withoutClaude = (usage: Usage | null): Usage | null => usage && {
+const filterUsage = (usage: Usage | null, show: (provider: string) => boolean): Usage | null => usage && {
   ...usage,
-  providers: usage.providers.filter((p) => p.provider !== "claude"),
-  near: usage.near.filter((p) => p.provider !== "claude"),
+  providers: usage.providers.filter((p) => show(p.provider)),
+  near: usage.near.filter((p) => show(p.provider)),
 };
+const isScoped = (provider: string): provider is ScopedProvider => provider === "claude" || provider === "codex";
 
 /* `client` null: no engine to ask (a plain browser tab); the feed stays empty. */
 export function UsageProvider({ client, children, pollMs = USAGE_POLL_MS }: { client: DaemonClient | null; children: ReactNode; pollMs?: number }) {
   const subject = useAppState((s) => s.account?.signed_in ? s.account.subject : null);
-  const initialClaudeScope = useAppState((s) => s.account?.signed_in ? s.account.claude_usage_scope ?? null : null);
+  const claude = useAppState((s) => s.account?.signed_in ? s.account.claude_usage_scope ?? null : null);
+  const codex = useAppState((s) => s.account?.signed_in ? s.account.codex_usage_scope ?? null : null);
   const accountKey = client && subject ? JSON.stringify([client.baseUrl, subject]) : null;
   const scope = useMemo<UsageScope>(() => ({
-    loading: null, again: false, verifyClaude: false, generation: 0, claudeIdentity: initialClaudeScope,
-  }), [client, accountKey, initialClaudeScope]);
-  const [state, setState] = useState(() => scopedFeed(scope, accountKey, initialClaudeScope));
+    loading: null, again: false, checking: null, generation: 0, identities: { claude, codex },
+  }), [client, accountKey, claude, codex]);
+  const [state, setState] = useState(() => scopedFeed(scope, accountKey));
   // A new account gets its own feed without remounting the active screen.
-  if (state.scope !== scope) setState(scopedFeed(scope, accountKey, initialClaudeScope));
-  const { usage, savedClaude, checkingClaude, claudeScope, error } = state;
-  const cacheKey = weeklyKey(accountKey, claudeScope);
+  if (state.scope !== scope) setState(scopedFeed(scope, accountKey));
+  const { usage, saved, checking, identities, error } = state;
   const started = useRef<UsageScope | null>(null);
 
   useEffect(() => {
-    if (!cacheKey || !savedClaude) return;
     try {
-      localStorage.setItem(cacheKey, JSON.stringify(savedClaude));
+      for (const reading of saved) {
+        if (!isScoped(reading.provider)) continue;
+        const key = weeklyKey(accountKey, reading.provider, identities[reading.provider]);
+        if (key) localStorage.setItem(key, JSON.stringify(reading));
+      }
     } catch {
       // This launch can still display the reading from memory.
     }
-  }, [cacheKey, savedClaude]);
+  }, [accountKey, identities, saved]);
+
+  const update = useCallback((generation: number, identities: UsageIdentities, next?: Usage, error: string | null = null) => {
+    if (generation !== scope.generation) return;
+    scope.identities = identities;
+    const stored = readSaved(accountKey, identities);
+    setState((previous) => {
+      if (previous.scope !== scope || generation !== scope.generation) return previous;
+      const saved = scopedProviders.flatMap((provider) => {
+        if (!identities[provider]) return [];
+        const current = next?.providers.find((p) => p.provider === provider);
+        return (current && weeklyReading(current)) ??
+          (previous.identities[provider] === identities[provider] ? previous.saved.find((p) => p.provider === provider) : undefined) ??
+          stored.find((p) => p.provider === provider) ?? [];
+      });
+      const usage = next ?? filterUsage(previous.usage, (provider) =>
+        !isScoped(provider) || previous.identities[provider] === identities[provider]);
+      return { ...previous, usage, identities, saved, checking: false, error };
+    });
+  }, [accountKey, scope]);
 
   const load = useCallback(async () => {
     if (!client) return;
     const generation = scope.generation;
-    const apply = (next: Usage) => {
+    const refresh = async (requested: UsageIdentities) => {
+      const next = await client.usage(true, requested.claude);
+      while (scope.checking) await scope.checking;
       if (generation !== scope.generation) return false;
-      const identity = next.claude_usage_scope ?? null;
-      scope.claudeIdentity = identity;
-      const provider = next.providers.find((p) => p.provider === "claude");
-      const reading = identity && provider ? weeklyReading(provider) : undefined;
-      const saved = readWeekly(weeklyKey(accountKey, identity));
-      setState((previous) => {
-        if (previous.scope !== scope || generation !== scope.generation) return previous;
-        const savedClaude = reading ?? (identity === previous.claudeScope ? previous.savedClaude : saved);
-        return { ...previous, usage: next, claudeScope: identity, savedClaude, checkingClaude: false, error: null };
-      });
+      const received = identitiesOf(next);
+      if (requested !== scope.identities && !sameIdentities(received, scope.identities)) {
+        scope.again = true;
+        return false;
+      }
+      update(generation, received, next);
       return true;
     };
+    let requested = scope.identities;
     try {
-      if (scope.verifyClaude) {
-        const current = await client.usage(false);
-        if (generation !== scope.generation) return;
-        scope.verifyClaude = false;
-        apply(current);
-      }
-      const expectedIdentity = scope.claudeIdentity;
-      const next = await client.usage(true, expectedIdentity);
-      if (!apply(next)) return;
+      while (scope.checking) await scope.checking;
+      if (generation !== scope.generation) return;
+      requested = scope.identities;
+      if (!await refresh(requested)) return;
       // A fresh request for an old identity returns current data without
       // refreshing under the new login. Update the chip before asking again.
-      if (scope.claudeIdentity && scope.claudeIdentity !== expectedIdentity) {
-        apply(await client.usage(true, scope.claudeIdentity));
+      if (scope.identities.claude && scope.identities.claude !== requested.claude) {
+        requested = scope.identities;
+        await refresh(requested);
       }
     } catch (e) {
+      while (scope.checking) await scope.checking;
       if (generation !== scope.generation) return;
-      if (scope.verifyClaude) scope.claudeIdentity = null;
-      scope.verifyClaude = false;
-      setState((previous) => previous.scope === scope && generation === scope.generation ? {
-        ...previous,
-        ...(previous.checkingClaude && { claudeScope: null, savedClaude: undefined, checkingClaude: false }),
-        error: message(e),
-      } : previous);
+      if (!sameIdentities(requested, scope.identities)) {
+        scope.again = true;
+        return;
+      }
+      setState((previous) => previous.scope === scope ? { ...previous, error: message(e) } : previous);
     }
-  }, [accountKey, client, scope]);
+  }, [client, scope, update]);
 
   const reload = useCallback((): Promise<void> => {
     if (scope.loading) {
@@ -183,15 +214,15 @@ export function UsageProvider({ client, children, pollMs = USAGE_POLL_MS }: { cl
   useEffect(() => {
     if (!client) return;
     const wake = () => {
-      if (document.hidden || scope.verifyClaude) return;
-      // A login may have changed while the window was away. Confirm the
-      // subscription with a fast read before starting the slow CLI refresh.
-      scope.verifyClaude = true;
-      scope.generation++;
-      setState((previous) => previous.scope === scope ? {
-        ...previous, usage: withoutClaude(previous.usage), checkingClaude: true,
-      } : previous);
-      void reload();
+      if (document.hidden || scope.checking) return;
+      const generation = scope.generation;
+      setState((previous) => previous.scope === scope ? { ...previous, checking: true } : previous);
+      // Identity is a cheap read that can finish independently of the CLI.
+      scope.checking = client.usage(false).then(
+        (current) => update(generation, identitiesOf(current)),
+        (error: unknown) => update(generation, identitiesOf(), undefined, message(error)),
+      ).finally(() => { scope.checking = null; });
+      if (!scope.loading) void reload();
     };
     window.addEventListener("focus", wake);
     document.addEventListener("visibilitychange", wake);
@@ -199,7 +230,7 @@ export function UsageProvider({ client, children, pollMs = USAGE_POLL_MS }: { cl
       window.removeEventListener("focus", wake);
       document.removeEventListener("visibilitychange", wake);
     };
-  }, [client, reload, scope]);
+  }, [client, reload, scope, update]);
 
   useEffect(() => {
     if (!client) return;
@@ -208,7 +239,8 @@ export function UsageProvider({ client, children, pollMs = USAGE_POLL_MS }: { cl
   }, [client, reload, pollMs]);
 
   const feed = useMemo<UsageFeed>(() => ({
-    usage, savedClaude: checkingClaude ? undefined : savedClaude, checkingClaude, error, reload,
-  }), [usage, savedClaude, checkingClaude, error, reload]);
+    usage: checking ? filterUsage(usage, (provider) => !isScoped(provider)) : usage,
+    saved: checking ? [] : saved, checking, error, reload,
+  }), [usage, saved, checking, error, reload]);
   return <UsageContext.Provider value={feed}>{children}</UsageContext.Provider>;
 }

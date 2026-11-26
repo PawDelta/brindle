@@ -216,18 +216,34 @@ describe("the usage feed", () => {
 
     let finishWake!: (usage: Usage) => void;
     const wake = new Promise<Usage>((resolve) => { finishWake = resolve; });
-    refresh.mockImplementation((fresh = true) => fresh ? wake : Promise.resolve(empty));
+    let freshRequests = 0;
+    const freshWake = () => { freshRequests++; return wake; };
+    refresh.mockImplementation((fresh = true) => fresh ? freshWake() : Promise.resolve(empty));
     await act(async () => { fireEvent.focus(window); });
     expect(screen.getByTestId("profile-usage").dataset.provider).toBe("claude");
+    let finishCheck!: (usage: Usage) => void;
+    const check = new Promise<Usage>((resolve) => { finishCheck = resolve; });
+    refresh.mockImplementation((fresh = true) => fresh ? freshWake() : check);
+    fireEvent.focus(window);
+    expect(screen.getByTestId("profile-usage").dataset.state).toBe("checking");
+    await act(async () => finishCheck(empty));
+    expect(screen.getByTestId("profile-usage").dataset.state).toBe("reading");
     await act(async () => finishWake(claudeUsage("near")));
     expect(screen.getByTestId("profile-usage").textContent).toContain("63%");
+    expect(freshRequests).toBe(1);
 
     const switched = { ...account, claude_usage_scope: "subscription-b" };
     const switchedUsage = { ...empty, claude_usage_scope: switched.claude_usage_scope };
+    let finishOld!: (usage: Usage) => void;
+    const oldRefresh = new Promise<Usage>((resolve) => { finishOld = resolve; });
+    refresh.mockImplementation((fresh = true) => fresh ? oldRefresh : Promise.resolve(empty));
+    await act(async () => { fireEvent.focus(window); });
     let finishSwitch!: (usage: Usage) => void;
     const switchRefresh = new Promise<Usage>((resolve) => { finishSwitch = resolve; });
     refresh.mockImplementation((fresh = true) => fresh ? switchRefresh : Promise.resolve(switchedUsage));
     await act(async () => { fireEvent.focus(window); });
+    expect(screen.getByTestId("profile-usage").dataset.state).toBe("none");
+    await act(async () => finishOld(claudeUsage("near")));
     expect(screen.getByTestId("profile-usage").dataset.state).toBe("none");
     await act(async () => finishSwitch(switchedUsage));
     expect(screen.getByTestId("profile-usage").dataset.state).toBe("none");
@@ -238,6 +254,29 @@ describe("the usage feed", () => {
     refresh.mockReturnValue(new Promise(() => {}));
     sidebar(daemon, 60_000, client);
     expect(screen.getByTestId("profile-usage").dataset.state).toBe("none");
+  });
+
+  it("restores Codex weekly usage before launch refresh and after an empty response", async () => {
+    const account = { signed_in: true, subject: "sam", codex_usage_scope: "codex-login" };
+    const daemon = new FakeDaemon({
+      account,
+      repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root],
+      usage: { ...usageScenario("normal"), ...account },
+    });
+    const first = sidebar(daemon, 60_000);
+    expect((await loadedReading()).dataset.provider).toBe("codex");
+    first.stop();
+    cleanup();
+
+    const client = daemon.client();
+    let finish!: (usage: Usage) => void;
+    const pending = new Promise<Usage>((resolve) => { finish = resolve; });
+    vi.spyOn(client, "usage").mockReturnValue(pending);
+    sidebar(daemon, 60_000, client);
+    expect(screen.getByTestId("profile-usage").dataset.state).toBe("reading");
+    expect(screen.getByTestId("profile-usage").dataset.provider).toBe("codex");
+    await act(async () => finish({ providers: [], near: [], ...account }));
+    expect(screen.getByTestId("profile-usage").dataset.provider).toBe("codex");
   });
 
   it("follows the engine on a gentle poll: the weekly reading changes provider and warning style as usage changes", async () => {

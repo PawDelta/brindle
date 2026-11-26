@@ -1,4 +1,5 @@
 import json
+import os
 import shlex
 import subprocess
 from urllib.parse import urlencode
@@ -8,6 +9,49 @@ from starlette.requests import Request
 from brindle import provider_homes, providers, quota, spawn
 from brindle.daemon import routes_read
 from brindle.profiles import Profile
+
+
+def test_desktop_codex_usage_only_serves_rollouts_from_current_login(tmp_path, monkeypatch):
+    monkeypatch.setattr(providers, "codex_home", lambda: str(tmp_path))
+    monkeypatch.setattr(quota, "claude_usage_scope", lambda: None)
+    now = quota.time.time()
+    auth = tmp_path / "auth.json"
+    auth.touch()
+    os.utime(auth, (now - 600, now - 600))
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+
+    def rollout(name, started, used):
+        path = sessions / f"rollout-{name}.jsonl"
+        lines = [
+            {"type": "session_meta", "payload": {"timestamp": started}},
+            {"timestamp": now - 1, "payload": {"rate_limits": {"secondary": {
+                "used_percent": used, "window_minutes": 10080, "resets_at": now + 600,
+            }}}},
+        ]
+        path.write_text("\n".join(map(json.dumps, lines)))
+        os.utime(path, (started, started))
+
+    def request(query):
+        return routes_read.get_usage.__wrapped__(None, Request({"type": "http", "query_string": query}))
+
+    def usage():
+        data = request(b"fresh=1&claude_scope=none")
+        return next(p for p in data["providers"] if p["provider"] == "codex")
+
+    rollout("old", now - 500, 42)
+    first_scope = request(b"scope_only=1")["codex_usage_scope"]
+    assert first_scope and usage()["windows"][0]["used"] == 42
+
+    os.utime(auth, (now - 100, now - 100))
+    scope = request(b"scope_only=1")
+    assert scope["codex_usage_scope"] not in (None, first_scope)
+    assert not scope["providers"]
+    assert not usage()["known"]  # Even a new quota event in the old session is excluded.
+
+    rollout("new", now - 50, 12)
+    os.utime(sessions / "rollout-old.jsonl", (now, now))
+    assert usage()["windows"][0]["used"] == 12
 
 
 def test_served_claude_usage_follows_subscription_switch_and_back(tmp_path, monkeypatch):

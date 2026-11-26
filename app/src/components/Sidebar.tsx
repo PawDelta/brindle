@@ -770,7 +770,7 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings,
   const [pausedOpen, setPausedOpen] = useState(readPausedOpen);
   const list = useRef<HTMLElement>(null);
   const noRefresh = useCallback(() => Promise.resolve(), []);
-  const { usage, savedClaude, checkingClaude, error: usageError } = useUsage();
+  const { usage, saved, checking, error: usageError } = useUsage();
 
   // The live sessions in reading order (⌘1-9), and the paused ones after them.
   // The practice repos last, each grouped as "Practice run" rather than by their folder's name.
@@ -798,11 +798,11 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings,
   // An open session follows its supervisor's provider, even before its model is known.
   const sessionProvider = route.screen === "session" ? usage?.providers.find((p) => p.provider === agent?.provider) : undefined;
   const reading = route.screen === "session"
-    ? (sessionProvider && weeklyReading(sessionProvider)) ?? (agent?.provider === "claude" ? savedClaude : undefined)
-    : mostUsed(usage?.providers.flatMap((provider) => weeklyReading(provider) ?? []) ?? []) ?? savedClaude;
+    ? (sessionProvider && weeklyReading(sessionProvider)) ?? saved.find((reading) => reading.provider === agent?.provider)
+    : mostUsed(usage?.providers.flatMap((provider) => weeklyReading(provider) ?? []) ?? []) ?? mostUsed(saved);
   const provider = route.screen === "session" ? agent?.provider : reading?.provider;
   const shown = usage?.providers.find((p) => p.provider === provider);
-  const checkingUsage = checkingClaude && (route.screen !== "session" || agent?.provider === "claude");
+  const checkingUsage = checking && (route.screen !== "session" || agent?.provider === "claude" || agent?.provider === "codex");
   const warning = !!shown && (shown.limited || planWindows(shown).some((window) => window.used >= WARN));
 
   // An open session's agents show, on each navigation to it; a sheet opening or closing over the

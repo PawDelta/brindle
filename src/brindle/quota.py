@@ -17,6 +17,7 @@ import json
 import math
 import os
 import re
+import stat
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -1098,7 +1099,36 @@ def codex_home() -> Path:
     return Path(providers.codex_home())
 
 
-def newest_rollout(home: Path | None = None) -> Path | None:
+@dataclass(frozen=True)
+class CodexUsageScope:
+    identity: str
+    since: float
+
+
+def codex_usage_scope() -> CodexUsageScope | None:
+    """A local login revision from file metadata, without reading credentials."""
+    from brindle import providers
+
+    if _non_subscription_route("codex") or os.environ.get("OPENAI_API_KEY") or os.environ.get("CODEX_API_KEY"):
+        return None
+    path = Path(providers.codex_auth_path())
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    parts = (str(path), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    return CodexUsageScope(hashlib.sha256(repr(parts).encode()).hexdigest(), info.st_mtime)
+
+
+def _codex_session_started(file) -> float | None:
+    meta = json.loads(file.readline(ROLLOUT_TAIL_BYTES))
+    payload = meta.get("payload") if isinstance(meta, dict) and meta.get("type") == "session_meta" else None
+    return _timestamp(payload.get("timestamp")) if isinstance(payload, dict) else None
+
+
+def newest_rollout(home: Path | None = None, *, login_since: float | None = None) -> Path | None:
     """The most recently written ``sessions/**/rollout-*.jsonl``. Only
     that directory: nothing else under ~/.codex (auth.json lives there) is opened."""
     sessions = (home or codex_home()) / "sessions"
@@ -1106,9 +1136,18 @@ def newest_rollout(home: Path | None = None) -> Path | None:
     for f in sessions.glob("**/rollout-*.jsonl"):
         try:
             mtime = f.stat().st_mtime
-        except OSError:
+            if mtime <= best_time:
+                continue
+            if login_since is not None:
+                if mtime < login_since:
+                    continue
+                with f.open("rb") as file:
+                    started = _codex_session_started(file)
+                if started is None or started < login_since:
+                    continue
+        except (OSError, ValueError):
             continue
-        if mtime > best_time:
+        else:
             best, best_time = f, mtime
     return best
 
@@ -1206,6 +1245,7 @@ def _windows_from_limits(limits: dict, *, now: float | None = None) -> list[Wind
 
 def _codex_rollout_state(
     rollout: Path, now: float, *, seen_at: dict[str, float] | None = None,
+    login_since: float | None = None,
 ) -> tuple[bool, list[Window], float | None, bool, dict[str, float]]:
     """Read the newest plan-level ``rate_limits`` (plus any newer per-model caps)
     from ``rollout``. Returns
@@ -1214,9 +1254,13 @@ def _codex_rollout_state(
         size = rollout.stat().st_size
         tail_start = max(0, size - ROLLOUT_TAIL_BYTES)
         with rollout.open("rb") as f:
+            if login_since is not None:
+                started = _codex_session_started(f)
+                if started is None or started < login_since:
+                    return False, [], None, False, {}
             f.seek(tail_start)
             raw_tail = f.read()
-    except OSError:
+    except (OSError, ValueError):
         return False, [], None, False, {}
     raw_lines: list[tuple[int, bytes]] = []
     pos = 0
@@ -1243,6 +1287,8 @@ def _codex_rollout_state(
             (_timestamp(event.get("timestamp")) if isinstance(event, dict) else None)
             or (_timestamp(payload.get("timestamp")) if isinstance(payload, dict) else None)
         )
+        if login_since is not None and (event_ts is None or event_ts < login_since):
+            continue
         for holder in (payload, event):
             if not isinstance(holder, dict) or "rate_limits" not in holder:
                 continue
@@ -1285,6 +1331,20 @@ def last_codex_limits(rollout: Path) -> list[Window]:
     """The windows of the last event in ``rollout`` carrying ``rate_limits``,
     reading from the end."""
     return _codex_rollout_state(rollout, time.time())[1]
+
+
+def scoped_codex_usage(scope: CodexUsageScope, now: float) -> Quota | None:
+    """Read desktop usage only from a session opened under this login revision."""
+    rollout = newest_rollout(login_since=scope.since)
+    if rollout is None:
+        return None
+    _, windows, limited_until, overage_unlimited, _ = _codex_rollout_state(rollout, now, login_since=scope.since)
+    windows = [w for w in windows if w.resets_at is None or w.resets_at > now]
+    if limited_until is not None and limited_until <= now:
+        limited_until = None
+    if windows or limited_until:
+        return Quota("codex", windows, limited_until, now, "codex rollout", overage_unlimited)
+    return None
 
 
 def refresh_codex(home: Path | None = None) -> bool:
