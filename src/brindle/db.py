@@ -2233,26 +2233,6 @@ class DB:
         for col, kind in (("port_base", "INTEGER"), ("ready", "INTEGER NOT NULL DEFAULT 1")):
             if col not in pool_cols:
                 self.conn.execute(f"ALTER TABLE pool_entries ADD COLUMN {col} {kind}")
-        if "pool_claims" not in tables:
-            self.conn.execute(
-                """CREATE TABLE pool_claims (
-                    path TEXT PRIMARY KEY,
-                    claim_token TEXT NOT NULL UNIQUE,
-                    repo_root TEXT NOT NULL,
-                    base_branch TEXT NOT NULL,
-                    base_sha TEXT NOT NULL,
-                    branch TEXT NOT NULL,
-                    fingerprint TEXT NOT NULL,
-                    port_base INTEGER,
-                    target_branch TEXT,
-                    state TEXT NOT NULL,
-                    claimed_at REAL NOT NULL
-                )"""
-            )
-        else:
-            claim_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(pool_claims)")}
-            if "target_branch" not in claim_cols:
-                self.conn.execute("ALTER TABLE pool_claims ADD COLUMN target_branch TEXT")
         routing_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(routing_decisions)")}
         if "prior" not in routing_cols:
             self.conn.execute("ALTER TABLE routing_decisions ADD COLUMN prior INTEGER NOT NULL DEFAULT 0")
@@ -2369,14 +2349,17 @@ class DB:
 
     # -- workspaces --------------------------------------------------------
 
+    def _insert_workspace(self, c: sqlite3.Connection, ws: Workspace) -> None:
+        c.execute(
+            "INSERT INTO workspaces (id, repo_root, name, kind, branch, base_branch, path, port_base,"
+            " tmux_session, created_at, session_root) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (ws.id, ws.repo_root, ws.name, ws.kind, ws.branch, ws.base_branch,
+             ws.path, ws.port_base, ws.tmux_session, ws.created_at, ws.session_root),
+        )
+
     def add_workspace(self, ws: Workspace) -> None:
         with self.tx() as c:
-            c.execute(
-                "INSERT INTO workspaces (id, repo_root, name, kind, branch, base_branch, path, port_base,"
-                " tmux_session, created_at, session_root) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (ws.id, ws.repo_root, ws.name, ws.kind, ws.branch, ws.base_branch,
-                 ws.path, ws.port_base, ws.tmux_session, ws.created_at, ws.session_root),
-            )
+            self._insert_workspace(c, ws)
         bus.publish_ws(self, "workspace.created", ws, workspace_kind=ws.kind, branch=ws.branch)
 
     def add_pool_claimed_workspace(self, ws: Workspace, claim_token: str) -> None:
@@ -2388,16 +2371,10 @@ class DB:
                 "WHERE claim_token=?",
                 (claim_token,),
             ).fetchone()
-            if (claim is None or claim["claim_token"] != claim_token
-                    or claim["path"] != ws.path or claim["repo_root"] != ws.repo_root
+            if (claim is None or claim["path"] != ws.path or claim["repo_root"] != ws.repo_root
                     or claim["base_branch"] != ws.base_branch):
                 raise ValueError("pool claim does not match the workspace being registered")
-            c.execute(
-                "INSERT INTO workspaces (id, repo_root, name, kind, branch, base_branch, path, port_base,"
-                " tmux_session, created_at, session_root) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (ws.id, ws.repo_root, ws.name, ws.kind, ws.branch, ws.base_branch,
-                 ws.path, ws.port_base, ws.tmux_session, ws.created_at, ws.session_root),
-            )
+            self._insert_workspace(c, ws)
             c.execute("DELETE FROM pool_claims WHERE claim_token=?", (claim_token,))
         bus.publish_ws(self, "workspace.created", ws, workspace_kind=ws.kind, branch=ws.branch)
 
@@ -2577,6 +2554,96 @@ class DB:
             entry = _load(PoolEntry, row)
             entry.claim_token = token
             return entry
+
+    def reserve_pool_entry_cleanup(self, repo_root: str, path: str) -> PoolClaim | None:
+        """Atomically move a pool entry into a durable cleanup reservation."""
+        with self.tx() as c:
+            row = c.execute(
+                "SELECT * FROM pool_entries WHERE repo_root=? AND path=?",
+                (repo_root, path),
+            ).fetchone()
+            if row is None:
+                return None
+            if c.execute(
+                "SELECT 1 FROM pool_claims WHERE path=? UNION ALL "
+                "SELECT 1 FROM workspaces WHERE path=? LIMIT 1",
+                (path, path),
+            ).fetchone():
+                return None
+            deleted = c.execute(
+                "DELETE FROM pool_entries WHERE repo_root=? AND path=?",
+                (repo_root, path),
+            )
+            if deleted.rowcount != 1:
+                return None
+
+            claim_token = uuid.uuid4().hex
+            claimed_at = time.time()
+            inserted = c.execute(
+                "INSERT INTO pool_claims "
+                "(path, claim_token, repo_root, base_branch, base_sha, branch, "
+                "fingerprint, port_base, target_branch, state, claimed_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    row["path"], claim_token, row["repo_root"], row["base_branch"],
+                    row["base_sha"], row["branch"], row["fingerprint"], row["port_base"],
+                    None, "cleanup_pending", claimed_at,
+                ),
+            )
+            if inserted.rowcount != 1:
+                raise RuntimeError("could not insert pool cleanup reservation")
+            return PoolClaim(
+                path=row["path"],
+                claim_token=claim_token,
+                repo_root=row["repo_root"],
+                base_branch=row["base_branch"],
+                base_sha=row["base_sha"],
+                branch=row["branch"],
+                fingerprint=row["fingerprint"],
+                port_base=row["port_base"],
+                state="cleanup_pending",
+                claimed_at=claimed_at,
+            )
+
+    def reserve_abandoned_pool_claim_cleanup(self, claim_token: str) -> bool:
+        """Move an active, unregistered claim into durable cleanup ownership."""
+        with self.tx() as c:
+            updated = c.execute(
+                "UPDATE pool_claims SET state='cleanup_pending' "
+                "WHERE claim_token=? AND state='active' "
+                "AND NOT EXISTS (SELECT 1 FROM workspaces WHERE workspaces.path=pool_claims.path)",
+                (claim_token,),
+            )
+            return updated.rowcount == 1
+
+    def mark_pool_cleanup_remove_pending(self, claim_token: str) -> bool:
+        """Record that teardown finished and only worktree removal remains."""
+        with self.tx() as c:
+            updated = c.execute(
+                "UPDATE pool_claims SET state='remove_pending' "
+                "WHERE claim_token=? AND state='cleanup_pending'",
+                (claim_token,),
+            )
+            return updated.rowcount == 1
+
+    def pool_cleanup_reservation(self, repo_root: str, path: str) -> PoolClaim | None:
+        row = self.conn.execute(
+            "SELECT * FROM pool_claims WHERE repo_root=? AND path=? "
+            "AND state IN ('cleanup_pending', 'remove_pending')",
+            (repo_root, path),
+        ).fetchone()
+        return _load(PoolClaim, row) if row else None
+
+    def delete_pool_cleanup_reservation(self, claim_token: str, expected_state: str) -> bool:
+        """Delete a cleanup reservation only if its token and state still match."""
+        if expected_state not in ("cleanup_pending", "remove_pending"):
+            return False
+        with self.tx() as c:
+            deleted = c.execute(
+                "DELETE FROM pool_claims WHERE claim_token=? AND state=?",
+                (claim_token, expected_state),
+            )
+            return deleted.rowcount == 1
 
     def pool_claims(self, repo_root: str | None = None) -> list[PoolClaim]:
         if repo_root:

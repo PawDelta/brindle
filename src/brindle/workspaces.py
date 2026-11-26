@@ -473,50 +473,56 @@ def create(
     if eligible_pool_claim:
         from brindle import pool
 
-        with pool.claim_lock(repo_root) as acquired:
-            if acquired:
-                candidate = pool.claim(db, repo_root, base)
+        rebind_failure: tuple[str, git.GitError | OSError] | None = None
+        with pool.claim_lock(repo_root):
+            candidate = pool.claim(db, repo_root, base)
+            if candidate is not None:
+                db.mark_pool_claim_target(candidate.claim_token, branch)
+                try:
+                    pool.rebind(repo_root, candidate, branch, start_sha)
+                except (git.GitError, OSError) as error:
+                    db.mark_pool_claim_cleanup_pending(candidate.claim_token)
+                    rebind_failure = (candidate.claim_token, error)
+                    candidate = None
                 if candidate is not None:
-                    db.mark_pool_claim_target(candidate.claim_token, branch)
-                    try:
-                        pool.rebind(repo_root, candidate, branch, start_sha)
-                    except (git.GitError, OSError) as rebind_error:
-                        try:
-                            pool.discard(repo_root, candidate, target_branch=None)
-                        except (git.GitError, OSError, ValueError) as discard_error:
-                            db.mark_pool_claim_cleanup_pending(candidate.claim_token)
-                            raise discard_error from rebind_error
-                        db.delete_pool_claim(candidate.claim_token)
-                        candidate = None
-                    if candidate is not None:
-                        claimed = candidate
-                        path = claimed.path
-                        how = "pool"
-                        git.install_attribution_hook(path)
-                        git.set_base(repo_root, branch, base)
+                    claimed = candidate
+                    path = claimed.path
+                    how = "pool"
+                    git.install_attribution_hook(path)
+                    git.set_base(repo_root, branch, base)
 
-                        slug = _db_slug(db, repo_root)
-                        pool_workspace = Workspace(
-                            id=f"{slug}/{name}",
-                            repo_root=repo_root,
-                            name=name,
-                            kind="worktree",
-                            branch=branch,
-                            base_branch=base,
-                            path=path,
-                            port_base=(
-                                claimed.port_base
-                                if claimed.port_base is not None
-                                else _next_port_base(db)
-                            ),
-                            tmux_session=_session_name(repo_root, name, slug),
-                            created_at=time.time(),
-                            session_root=session_root,
-                        )
-                        db.add_pool_claimed_workspace(
-                            pool_workspace,
-                            claimed.claim_token,
-                        )
+                    slug = _db_slug(db, repo_root)
+                    pool_workspace = Workspace(
+                        id=f"{slug}/{name}",
+                        repo_root=repo_root,
+                        name=name,
+                        kind="worktree",
+                        branch=branch,
+                        base_branch=base,
+                        path=path,
+                        port_base=(
+                            claimed.port_base
+                            if claimed.port_base is not None
+                            else _next_port_base(db)
+                        ),
+                        tmux_session=_session_name(repo_root, name, slug),
+                        created_at=time.time(),
+                        session_root=session_root,
+                    )
+                    db.add_pool_claimed_workspace(
+                        pool_workspace,
+                        claimed.claim_token,
+                    )
+
+        if rebind_failure is not None:
+            claim_token, rebind_error = rebind_failure
+            try:
+                pool.sweep(db, repo_root, cfg)
+            except (git.GitError, OSError) as cleanup_error:
+                if any(claim.claim_token == claim_token for claim in db.pool_claims(repo_root)):
+                    raise rebind_error from cleanup_error
+            if any(claim.claim_token == claim_token for claim in db.pool_claims(repo_root)):
+                raise rebind_error
 
     if pool_workspace is None:
         path = str(new_worktree_root(repo_root, cfg) / branch)
