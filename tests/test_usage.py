@@ -21,12 +21,20 @@ def test_desktop_codex_usage_only_serves_rollouts_from_current_login(tmp_path, m
     sessions = tmp_path / "sessions"
     sessions.mkdir()
     workspace = "workspace-a"
+    limits_workspace = None
+    account_used = 31
 
     class AppServer:
         def __init__(self, *args, **kwargs):
             pass
 
         def call(self, method, params):
+            if method == "account/rateLimits/read":
+                return {"accountId": limits_workspace, "rateLimits": {
+                    "limitId": "codex", "secondary": {
+                        "usedPercent": account_used, "windowDurationMins": 10080, "resetsAt": now + 600,
+                    },
+                }}
             return {"activeSessionId": "saved-login", "sessions": [{
                 "sessionId": "saved-login", "isActive": True, "userId": "user", "selectedWorkspaceAccountId": workspace,
             }]}
@@ -44,10 +52,9 @@ def test_desktop_codex_usage_only_serves_rollouts_from_current_login(tmp_path, m
 
     def rollout(name, started, used, owner):
         path = sessions / f"rollout-{name}.jsonl"
+        identity = {"creator_user_id": "user", "creator_account_id": owner} if owner else {}
         lines = [
-            {"type": "session_meta", "payload": {
-                "timestamp": started, "creator_user_id": "user", "creator_account_id": owner,
-            }},
+            {"type": "session_meta", "payload": {"timestamp": started, **identity}},
             rate_event(used),
         ]
         path.write_text("\n".join(map(json.dumps, lines)) + "\n")
@@ -61,8 +68,11 @@ def test_desktop_codex_usage_only_serves_rollouts_from_current_login(tmp_path, m
         data = request(b"fresh=1&claude_scope=none")
         return next(p for p in data["providers"] if p["provider"] == "codex")
 
-    active_rollout = rollout("old", now - 500, 42, workspace)
     first_scope = request(b"scope_only=1")["codex_usage_scope"]
+    legacy = rollout("legacy", now - 550, 99, None)
+    assert usage()["windows"][0]["used"] == 31
+
+    active_rollout = rollout("old", now - 500, 42, workspace)
     assert first_scope and usage()["windows"][0]["used"] == 42
 
     auth.write_text("{}")
@@ -72,12 +82,17 @@ def test_desktop_codex_usage_only_serves_rollouts_from_current_login(tmp_path, m
     assert request(b"scope_only=1")["codex_usage_scope"] == first_scope
     assert usage()["windows"][0]["used"] == 47
 
+    limits_workspace = workspace
     workspace = "workspace-b"
     os.utime(auth, (now - 100, now - 100))
     scope = request(b"scope_only=1")
     assert scope["codex_usage_scope"] not in (None, first_scope)
     assert not scope["providers"]
-    assert not usage()["known"]  # Even a new quota event in the old session is excluded.
+    with legacy.open("a") as out:
+        out.write(json.dumps(rate_event(95)) + "\n")
+    assert not usage()["known"]  # Neither the unowned rollout nor A's live response belongs to B.
+    limits_workspace, account_used = workspace, 23
+    assert usage()["windows"][0]["used"] == 23
 
     rollout("new", now - 50, 12, workspace)
     os.utime(active_rollout, (now, now))

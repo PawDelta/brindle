@@ -2,8 +2,9 @@
 
 Everything here comes from what the CLIs themselves report: the status line
 data Claude Code hands brindle and its ``/usage`` command, Codex's session
-rollouts, and Antigravity's ``/usage`` command and limit errors. brindle never
-reads a CLI's OAuth token or auth files and never calls a provider's backend.
+rollouts and account usage RPC, and Antigravity's ``/usage`` command and limit
+errors. brindle never reads a CLI's OAuth token or auth files and never calls
+a provider's backend directly.
 
 State lives in ``~/.brindle/quota.json``, scoped to Claude's subscription
 identity and otherwise one entry per provider.
@@ -1362,8 +1363,7 @@ def last_codex_limits(rollout: Path) -> list[Window]:
     return _codex_rollout_state(rollout, time.time())[1]
 
 
-def scoped_codex_usage(scope: CodexUsageScope, now: float) -> Quota | None:
-    """Read desktop usage only from a session opened by this subscription."""
+def _codex_rollout_usage(scope: CodexUsageScope, now: float) -> Quota | None:
     rollout = newest_rollout(scope=scope)
     if rollout is None:
         return None
@@ -1374,6 +1374,52 @@ def scoped_codex_usage(scope: CodexUsageScope, now: float) -> Quota | None:
     if windows or limited_until:
         return Quota("codex", windows, limited_until, now, "codex rollout", overage_unlimited)
     return None
+
+
+def _codex_account_usage(scope: CodexUsageScope, now: float) -> Quota | None:
+    from brindle import codex_hook, providers, spawn
+
+    path = Path(providers.codex_auth_path())
+    revision = _codex_auth_revision(path)
+    if revision is None:
+        return None
+    try:
+        limits = providers.codex_subscription_limits(scope.owner)
+    except (codex_hook.CodexHookError, OSError, spawn.Busy):
+        return None
+    if limits is None or _codex_auth_revision(path) != revision:
+        return None
+    buckets = limits.get("rateLimitsByLimitId")
+    plan = buckets.get("codex") if isinstance(buckets, dict) else None
+    if not isinstance(plan, dict):
+        plan = limits.get("rateLimits")
+        if not isinstance(plan, dict) or plan.get("limitId") not in (None, "codex"):
+            return None
+    windows = []
+    for slot in ("primary", "secondary"):
+        entry = plan.get(slot)
+        if isinstance(entry, dict):
+            window = _codex_window({
+                "used_percent": entry.get("usedPercent"),
+                "window_minutes": entry.get("windowDurationMins"),
+                "resets_at": entry.get("resetsAt"),
+            }, now)
+            if window and (window.resets_at is None or window.resets_at > now):
+                windows.append(window)
+    return Quota("codex", windows, updated_at=now, source="codex account") if windows else None
+
+
+def scoped_codex_usage(scope: CodexUsageScope, now: float) -> Quota | None:
+    """Use owned rollouts when they have a weekly reading, or ask the active account."""
+    rollout = _codex_rollout_usage(scope, now)
+    if rollout and any(w.name is None and w.minutes == 10080 for w in rollout.windows):
+        return rollout
+    account = _codex_account_usage(scope, now)
+    if rollout is None or account is None:
+        return rollout or account
+    existing = {(w.name, w.minutes) for w in rollout.windows}
+    rollout.windows.extend(w for w in account.windows if (w.name, w.minutes) not in existing)
+    return rollout
 
 
 def refresh_codex(home: Path | None = None) -> bool:
