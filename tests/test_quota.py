@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 import pytest
+from starlette.requests import Request
 
 from brindle import providers, quota, spawn, subscription_usage
 
@@ -36,7 +37,7 @@ def test_antigravity_usage_reaches_settings(monkeypatch):
     monkeypatch.setattr(spawn, "read", lambda argv, **kw: runs.append(argv) or
                         subprocess.CompletedProcess(argv, 0, answer, ""))
     watch_costs.collect(None)
-    result = routes_read.get_usage.__wrapped__(None, None)
+    result = routes_read.get_usage.__wrapped__(None, Request({"type": "http", "query_string": b""}))
     agy = next(p for p in result["providers"] if p["provider"] == "antigravity")
     assert agy["known"]
     assert [(w["used"], w["minutes"], w["resets_at"]) for w in agy["windows"]] == [
