@@ -1430,29 +1430,34 @@ def get_usage(db: DB, request: Request) -> Any:
         return {"providers": [], "near": [], "claude_usage_scope": quota.claude_usage_scope(),
                 "codex_usage_scope": codex_scope.identity if codex_scope else None}
 
-    # Claude's desktop reading uses the terminal sidebar's throttled refresh.
-    fresh = request.query_params.get("fresh") == "1"
+    # The Codex account RPC can wait on the provider. Only an explicit
+    # Codex-only request may invoke it.
+    codex_account = request.query_params.get("codex_account_scope")
+    fresh = codex_account is None and request.query_params.get("fresh") == "1"
     if fresh:
         expected = request.query_params.get("claude_scope")
         if expected is None:
             quota.refresh_claude_usage()
         else:
             quota.refresh_claude_usage(expected_identity=expected)
-    claude_scope = quota.claude_usage_scope()
-    codex_scope = quota.codex_usage_scope() if fresh else None
+    claude_scope = quota.claude_usage_scope() if codex_account is None else None
+    codex_scope = quota.codex_usage_scope() if fresh or codex_account is not None else None
     now = time.time()
     providers, near = [], []
-    for name in quota.PROVIDERS:
-        if name == "claude" and claude_scope:
+    names = ("codex",) if codex_account is not None else quota.PROVIDERS
+    for name in names:
+        if codex_account is not None:
+            q = quota.codex_account_usage(codex_scope, now) if codex_scope and codex_scope.identity == codex_account else None
+        elif name == "claude" and claude_scope:
             q = quota.get(name, identity_key=claude_scope)
         elif name == "codex" and fresh:
             q = quota.scoped_codex_usage(codex_scope, now) if codex_scope else None
-            if codex_scope:
-                active_scope = quota.codex_usage_scope()
-                if active_scope != codex_scope:
-                    codex_scope, q = active_scope, None
         else:
             q = quota.get(name)
+        if name == "codex" and codex_scope:
+            active_scope = quota.codex_usage_scope()
+            if active_scope != codex_scope:
+                codex_scope, q = active_scope, None
         if q is None:
             providers.append({"provider": name, "known": False, "limited": False, "windows": [],
                               "limited_until": None, "updated_at": None})

@@ -79,13 +79,16 @@ interface UsageScope {
   again: boolean;
   checking: Promise<void> | null;
   generation: number;
+  codexRevision: number;
+  codexRequests: Set<number>;
   identities: UsageIdentities;
 }
 
-type ScopedFeed = Omit<UsageFeed, "reload"> & { scope: UsageScope; identities: UsageIdentities };
+type ScopedFeed = Omit<UsageFeed, "reload"> & { scope: UsageScope; identities: UsageIdentities; codexAccount: Usage | null };
 
 const scopedFeed = (scope: UsageScope, accountKey: string | null): ScopedFeed => ({
   scope, identities: scope.identities, usage: null, saved: readSaved(accountKey, scope.identities), checking: false, error: null,
+  codexAccount: null,
 });
 
 const filterUsage = (usage: Usage | null, show: (provider: string) => boolean): Usage | null => usage && {
@@ -94,6 +97,28 @@ const filterUsage = (usage: Usage | null, show: (provider: string) => boolean): 
   near: usage.near.filter((p) => show(p.provider)),
 };
 const isScoped = (provider: string): provider is ScopedProvider => provider === "claude" || provider === "codex";
+const codexProvider = (usage?: Usage | null) => usage?.providers.find((p) => p.provider === "codex");
+const hasCodexWeekly = (usage?: Usage | null) => {
+  const provider = codexProvider(usage);
+  return provider && Boolean(weeklyReading(provider));
+};
+
+function withCodexAccount(usage: Usage | null, account: Usage | null): Usage | null {
+  const codex = codexProvider(account);
+  if (!usage || !codex?.known) return usage;
+  const rollout = codexProvider(usage);
+  const combined = rollout?.known ? {
+    ...rollout,
+    windows: [...rollout.windows, ...codex.windows.filter((w) =>
+      !rollout.windows.some((existing) => existing.minutes === w.minutes && existing.name === w.name))],
+  } : codex;
+  return {
+    ...usage,
+    providers: rollout ? usage.providers.map((p) => p === rollout ? combined : p) : [...usage.providers, combined],
+    near: usage.near.some((p) => p.provider === "codex") ? usage.near :
+      [...usage.near, ...(account?.near.filter((p) => p.provider === "codex") ?? [])],
+  };
+}
 
 /* `client` null: no engine to ask (a plain browser tab); the feed stays empty. */
 export function UsageProvider({ client, children, pollMs = USAGE_POLL_MS }: { client: DaemonClient | null; children: ReactNode; pollMs?: number }) {
@@ -103,11 +128,12 @@ export function UsageProvider({ client, children, pollMs = USAGE_POLL_MS }: { cl
   const accountKey = client && subject ? JSON.stringify([client.baseUrl, subject]) : null;
   const scope = useMemo<UsageScope>(() => ({
     loading: null, again: false, checking: null, generation: 0, identities: { claude, codex },
+    codexRevision: 0, codexRequests: new Set(),
   }), [client, accountKey, claude, codex]);
   const [state, setState] = useState(() => scopedFeed(scope, accountKey));
   // A new account gets its own feed without remounting the active screen.
   if (state.scope !== scope) setState(scopedFeed(scope, accountKey));
-  const { usage, saved, checking, identities, error } = state;
+  const { usage, codexAccount, saved, checking, identities, error } = state;
   const started = useRef<UsageScope | null>(null);
 
   useEffect(() => {
@@ -124,6 +150,7 @@ export function UsageProvider({ client, children, pollMs = USAGE_POLL_MS }: { cl
 
   const update = useCallback((generation: number, identities: UsageIdentities, next?: Usage, error: string | null = null) => {
     if (generation !== scope.generation) return;
+    if (scope.identities.codex !== identities.codex) scope.codexRevision++;
     scope.identities = identities;
     const stored = readSaved(accountKey, identities);
     setState((previous) => {
@@ -137,9 +164,34 @@ export function UsageProvider({ client, children, pollMs = USAGE_POLL_MS }: { cl
       });
       const usage = next ?? filterUsage(previous.usage, (provider) =>
         !isScoped(provider) || previous.identities[provider] === identities[provider]);
-      return { ...previous, usage, identities, saved, checking: false, error };
+      const codexAccount = previous.identities.codex === identities.codex && !hasCodexWeekly(next) ? previous.codexAccount : null;
+      return { ...previous, usage, codexAccount, identities, saved, checking: false, error };
     });
   }, [accountKey, scope]);
+
+  const readCodexAccount = useCallback(async (generation: number, next: Usage) => {
+    const identity = next.codex_usage_scope;
+    const revision = scope.codexRevision;
+    if (!client || !identity || hasCodexWeekly(next) || scope.codexRequests.has(revision)) return;
+    scope.codexRequests.add(revision);
+    try {
+      const account = await client.codexAccountUsage(identity);
+      while (scope.checking) await scope.checking;
+      if (account.codex_usage_scope !== identity || generation !== scope.generation || revision !== scope.codexRevision) return;
+      const provider = codexProvider(account);
+      const reading = provider && weeklyReading(provider);
+      setState((previous) => {
+        if (previous.scope !== scope || generation !== scope.generation || revision !== scope.codexRevision ||
+            previous.identities.codex !== identity || hasCodexWeekly(previous.usage)) return previous;
+        const saved = reading ? [...previous.saved.filter((p) => p.provider !== "codex"), reading] : previous.saved;
+        return { ...previous, codexAccount: account, saved };
+      });
+    } catch {
+      // A failed Codex account read leaves the last reading and other providers visible.
+    } finally {
+      scope.codexRequests.delete(revision);
+    }
+  }, [client, scope]);
 
   const load = useCallback(async () => {
     if (!client) return;
@@ -154,6 +206,7 @@ export function UsageProvider({ client, children, pollMs = USAGE_POLL_MS }: { cl
         return false;
       }
       update(generation, received, next);
+      void readCodexAccount(generation, next);
       return true;
     };
     let requested = scope.identities;
@@ -177,7 +230,7 @@ export function UsageProvider({ client, children, pollMs = USAGE_POLL_MS }: { cl
       }
       setState((previous) => previous.scope === scope ? { ...previous, error: message(e) } : previous);
     }
-  }, [client, scope, update]);
+  }, [client, readCodexAccount, scope, update]);
 
   const reload = useCallback((): Promise<void> => {
     if (scope.loading) {
@@ -208,6 +261,7 @@ export function UsageProvider({ client, children, pollMs = USAGE_POLL_MS }: { cl
   useEffect(() => () => {
     scope.again = false;
     scope.generation++;
+    scope.codexRevision++;
     started.current = null;
   }, [scope]);
 
@@ -239,8 +293,8 @@ export function UsageProvider({ client, children, pollMs = USAGE_POLL_MS }: { cl
   }, [client, reload, pollMs]);
 
   const feed = useMemo<UsageFeed>(() => ({
-    usage: checking ? filterUsage(usage, (provider) => !isScoped(provider)) : usage,
+    usage: checking ? filterUsage(usage, (provider) => !isScoped(provider)) : withCodexAccount(usage, codexAccount),
     saved: checking ? [] : saved, checking, error, reload,
-  }), [usage, saved, checking, error, reload]);
+  }), [usage, codexAccount, saved, checking, error, reload]);
   return <UsageContext.Provider value={feed}>{children}</UsageContext.Provider>;
 }

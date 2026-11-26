@@ -13,8 +13,16 @@ from brindle.profiles import Profile
 
 def test_desktop_codex_usage_only_serves_rollouts_from_current_login(tmp_path, monkeypatch):
     monkeypatch.setattr(providers, "codex_home", lambda: str(tmp_path))
-    monkeypatch.setattr(quota, "claude_usage_scope", lambda: None)
     now = quota.time.time()
+    monkeypatch.setattr(quota, "claude_usage_scope", lambda: "claude-login")
+    read_quota = quota.get
+
+    def get_quota(provider, **options):
+        if provider == "claude":
+            return quota.Quota("claude", [quota.Window(27, now + 600, 10080)], updated_at=now)
+        return read_quota(provider, **options)
+
+    monkeypatch.setattr(quota, "get", get_quota)
     auth = tmp_path / "auth.json"
     auth.touch()
     os.utime(auth, (now - 600, now - 600))
@@ -23,6 +31,7 @@ def test_desktop_codex_usage_only_serves_rollouts_from_current_login(tmp_path, m
     workspace = "workspace-a"
     limits_workspace = None
     account_used = 31
+    account_read_allowed = False
 
     class AppServer:
         def __init__(self, *args, **kwargs):
@@ -30,6 +39,7 @@ def test_desktop_codex_usage_only_serves_rollouts_from_current_login(tmp_path, m
 
         def call(self, method, params):
             if method == "account/rateLimits/read":
+                assert account_read_allowed, "the shared usage response must not read Codex account limits"
                 return {"accountId": limits_workspace, "rateLimits": {
                     "limitId": "codex", "secondary": {
                         "usedPercent": account_used, "windowDurationMins": 10080, "resetsAt": now + 600,
@@ -64,13 +74,20 @@ def test_desktop_codex_usage_only_serves_rollouts_from_current_login(tmp_path, m
     def request(query):
         return routes_read.get_usage.__wrapped__(None, Request({"type": "http", "query_string": query}))
 
-    def usage():
-        data = request(b"fresh=1&claude_scope=none")
+    def usage(account_scope=None):
+        query = (urlencode({"codex_account_scope": account_scope}).encode() if account_scope
+                 else b"fresh=1&claude_scope=none")
+        data = request(query)
         return next(p for p in data["providers"] if p["provider"] == "codex")
 
     first_scope = request(b"scope_only=1")["codex_usage_scope"]
     legacy = rollout("legacy", now - 550, 99, None)
-    assert usage()["windows"][0]["used"] == 31
+    shared = request(b"fresh=1&claude_scope=none")
+    claude = next(p for p in shared["providers"] if p["provider"] == "claude")
+    assert claude["windows"][0]["used"] == 27
+    assert not usage()["known"]
+    account_read_allowed = True
+    assert usage(first_scope)["windows"][0]["used"] == 31
 
     active_rollout = rollout("old", now - 500, 42, workspace)
     assert first_scope and usage()["windows"][0]["used"] == 42
@@ -90,9 +107,13 @@ def test_desktop_codex_usage_only_serves_rollouts_from_current_login(tmp_path, m
     assert not scope["providers"]
     with legacy.open("a") as out:
         out.write(json.dumps(rate_event(95)) + "\n")
-    assert not usage()["known"]  # Neither the unowned rollout nor A's live response belongs to B.
+    assert not usage()["known"]  # The unowned rollout is excluded.
+    account_read_allowed = False
+    assert not usage(first_scope)["known"]
+    account_read_allowed = True
+    assert not usage(scope["codex_usage_scope"])["known"]  # A's live response is also excluded.
     limits_workspace, account_used = workspace, 23
-    assert usage()["windows"][0]["used"] == 23
+    assert usage(scope["codex_usage_scope"])["windows"][0]["used"] == 23
 
     rollout("new", now - 50, 12, workspace)
     os.utime(active_rollout, (now, now))

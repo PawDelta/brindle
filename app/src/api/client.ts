@@ -3298,6 +3298,10 @@ export class DaemonClient {
     return this.get<Usage>("/usage", fresh ? { fresh: 1, claude_scope: claudeScope === null ? "none" : claudeScope } : { scope_only: 1 });
   }
 
+  codexAccountUsage(scope: string) {
+    return this.get<Usage>("/usage", { codex_account_scope: scope });
+  }
+
   /* The URL of WS /v1/events. The token is never in it: the stream sends it
      as its first frame (see events.ts). */
   eventsUrl(since: number, repo?: string): string {

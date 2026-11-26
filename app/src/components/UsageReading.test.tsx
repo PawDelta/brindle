@@ -3,7 +3,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { ONBOARDED_KEY } from "../api/providers";
-import type { Usage } from "../api/client";
+import { DaemonClient, type Usage } from "../api/client";
 import type { SessionDTO } from "../api/schema";
 import type { Route } from "../routes";
 import { UsageProvider } from "../store/usage";
@@ -277,6 +277,38 @@ describe("the usage feed", () => {
     expect(screen.getByTestId("profile-usage").dataset.provider).toBe("codex");
     await act(async () => finish({ providers: [], near: [], ...account }));
     expect(screen.getByTestId("profile-usage").dataset.provider).toBe("codex");
+  });
+
+  it("renders Claude usage while the independent Codex account request is pending", async () => {
+    const scopes = { claude_usage_scope: "claude-login", codex_usage_scope: "codex-login" };
+    const { providers, near } = usageScenario("normal");
+    const daemon = new FakeDaemon({
+      account: { signed_in: true, subject: "sam", ...scopes },
+      repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root],
+      usage: { providers: providers.filter((p) => p.provider === "claude"), near, ...scopes },
+    });
+    const { baseUrl, token } = daemon.client();
+    let finishCodex!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => { finishCodex = resolve; });
+    let codexRequests = 0;
+    const client = new DaemonClient({ baseUrl, token, fetch: (input, init) => {
+      const url = new URL(String(input));
+      if (url.searchParams.has("codex_account_scope")) {
+        codexRequests++;
+        return pending;
+      }
+      return daemon.fetch(input, init);
+    } });
+    sidebar(daemon, 60_000, client);
+    const reading = await loadedReading();
+    expect(reading.dataset.provider).toBe("claude");
+    await act(async () => { fireEvent.focus(window); });
+    expect(reading.dataset.provider).toBe("claude");
+    expect(codexRequests).toBe(1);
+    await act(async () => finishCodex(new Response(JSON.stringify({
+      providers: providers.filter((p) => p.provider === "codex"), near: [], codex_usage_scope: scopes.codex_usage_scope,
+    }))));
+    expect(reading.dataset.provider).toBe("codex");
   });
 
   it("follows the engine on a gentle poll: the weekly reading changes provider and warning style as usage changes", async () => {

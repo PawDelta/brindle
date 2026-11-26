@@ -1363,7 +1363,8 @@ def last_codex_limits(rollout: Path) -> list[Window]:
     return _codex_rollout_state(rollout, time.time())[1]
 
 
-def _codex_rollout_usage(scope: CodexUsageScope, now: float) -> Quota | None:
+def scoped_codex_usage(scope: CodexUsageScope, now: float) -> Quota | None:
+    """Read desktop usage from rollouts owned by this subscription."""
     rollout = newest_rollout(scope=scope)
     if rollout is None:
         return None
@@ -1376,7 +1377,8 @@ def _codex_rollout_usage(scope: CodexUsageScope, now: float) -> Quota | None:
     return None
 
 
-def _codex_account_usage(scope: CodexUsageScope, now: float) -> Quota | None:
+def codex_account_usage(scope: CodexUsageScope, now: float) -> Quota | None:
+    """Read limits for the verified subscription when rollouts lack a reading."""
     from brindle import codex_hook, providers, spawn
 
     path = Path(providers.codex_auth_path())
@@ -1407,19 +1409,6 @@ def _codex_account_usage(scope: CodexUsageScope, now: float) -> Quota | None:
             if window and (window.resets_at is None or window.resets_at > now):
                 windows.append(window)
     return Quota("codex", windows, updated_at=now, source="codex account") if windows else None
-
-
-def scoped_codex_usage(scope: CodexUsageScope, now: float) -> Quota | None:
-    """Use owned rollouts when they have a weekly reading, or ask the active account."""
-    rollout = _codex_rollout_usage(scope, now)
-    if rollout and any(w.name is None and w.minutes == 10080 for w in rollout.windows):
-        return rollout
-    account = _codex_account_usage(scope, now)
-    if rollout is None or account is None:
-        return rollout or account
-    existing = {(w.name, w.minutes) for w in rollout.windows}
-    rollout.windows.extend(w for w in account.windows if (w.name, w.minutes) not in existing)
-    return rollout
 
 
 def refresh_codex(home: Path | None = None) -> bool:
