@@ -1227,7 +1227,7 @@ export interface AccountInfo extends AccountDTO {
   subject?: string;
   /* Opaque identity of the local Claude subscription, when confirmed. */
   claude_usage_scope?: string | null;
-  /* Opaque revision of the local Codex login. */
+  /* Opaque identity of the local Codex subscription, when confirmed. */
   codex_usage_scope?: string | null;
   org_id?: string;
   status?: string;

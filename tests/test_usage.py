@@ -6,7 +6,7 @@ from urllib.parse import urlencode
 
 from starlette.requests import Request
 
-from brindle import provider_homes, providers, quota, spawn
+from brindle import codex_hook, provider_homes, providers, quota, spawn
 from brindle.daemon import routes_read
 from brindle.profiles import Profile
 
@@ -20,17 +20,39 @@ def test_desktop_codex_usage_only_serves_rollouts_from_current_login(tmp_path, m
     os.utime(auth, (now - 600, now - 600))
     sessions = tmp_path / "sessions"
     sessions.mkdir()
+    workspace = "workspace-a"
 
-    def rollout(name, started, used):
+    class AppServer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def call(self, method, params):
+            return {"activeSessionId": "saved-login", "sessions": [{
+                "sessionId": "saved-login", "isActive": True, "userId": "user", "selectedWorkspaceAccountId": workspace,
+            }]}
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(codex_hook, "_AppServer", AppServer)
+    monkeypatch.setattr(providers, "codex_binary", lambda: "codex")
+
+    def rate_event(used):
+        return {"timestamp": now - 1, "payload": {"rate_limits": {"secondary": {
+            "used_percent": used, "window_minutes": 10080, "resets_at": now + 600,
+        }}}}
+
+    def rollout(name, started, used, owner):
         path = sessions / f"rollout-{name}.jsonl"
         lines = [
-            {"type": "session_meta", "payload": {"timestamp": started}},
-            {"timestamp": now - 1, "payload": {"rate_limits": {"secondary": {
-                "used_percent": used, "window_minutes": 10080, "resets_at": now + 600,
-            }}}},
+            {"type": "session_meta", "payload": {
+                "timestamp": started, "creator_user_id": "user", "creator_account_id": owner,
+            }},
+            rate_event(used),
         ]
-        path.write_text("\n".join(map(json.dumps, lines)))
+        path.write_text("\n".join(map(json.dumps, lines)) + "\n")
         os.utime(path, (started, started))
+        return path
 
     def request(query):
         return routes_read.get_usage.__wrapped__(None, Request({"type": "http", "query_string": query}))
@@ -39,18 +61,26 @@ def test_desktop_codex_usage_only_serves_rollouts_from_current_login(tmp_path, m
         data = request(b"fresh=1&claude_scope=none")
         return next(p for p in data["providers"] if p["provider"] == "codex")
 
-    rollout("old", now - 500, 42)
+    active_rollout = rollout("old", now - 500, 42, workspace)
     first_scope = request(b"scope_only=1")["codex_usage_scope"]
     assert first_scope and usage()["windows"][0]["used"] == 42
 
+    auth.write_text("{}")
+    os.utime(auth, (now - 200, now - 200))
+    with active_rollout.open("a") as out:
+        out.write(json.dumps(rate_event(47)) + "\n")
+    assert request(b"scope_only=1")["codex_usage_scope"] == first_scope
+    assert usage()["windows"][0]["used"] == 47
+
+    workspace = "workspace-b"
     os.utime(auth, (now - 100, now - 100))
     scope = request(b"scope_only=1")
     assert scope["codex_usage_scope"] not in (None, first_scope)
     assert not scope["providers"]
     assert not usage()["known"]  # Even a new quota event in the old session is excluded.
 
-    rollout("new", now - 50, 12)
-    os.utime(sessions / "rollout-old.jsonl", (now, now))
+    rollout("new", now - 50, 12, workspace)
+    os.utime(active_rollout, (now, now))
     assert usage()["windows"][0]["used"] == 12
 
 

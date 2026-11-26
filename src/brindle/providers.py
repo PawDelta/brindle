@@ -1868,6 +1868,27 @@ def codex_auth_path() -> str:
     return os.path.join(codex_home(), "auth.json")
 
 
+def codex_subscription_identity() -> tuple[str, str] | None:
+    """Ask Codex which ChatGPT user and workspace own the local subscription."""
+    from brindle import codex_hook
+
+    server = codex_hook._AppServer(codex_binary(), [], experimental_api=True)
+    try:
+        result = server.call("accountSession/list", {"refreshWorkspaceMetadata": False})
+    finally:
+        server.close()
+    active_id, sessions = result.get("activeSessionId"), result.get("sessions")
+    if not isinstance(active_id, str) or not active_id or not isinstance(sessions, list):
+        return None
+    for session in sessions:
+        if isinstance(session, dict) and session.get("sessionId") == active_id and session.get("isActive") is True:
+            user, workspace = session.get("userId"), session.get("selectedWorkspaceAccountId")
+            if isinstance(user, str) and user and isinstance(workspace, str) and workspace:
+                return user, workspace
+            break
+    return None
+
+
 def codex_chatgpt_login() -> bool:
     """Whether Codex is signed in with ChatGPT (``auth_mode: "chatgpt"`` in its
     auth.json). Only that one field is kept; the tokens beside it are never

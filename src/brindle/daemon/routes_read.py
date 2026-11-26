@@ -1447,9 +1447,10 @@ def get_usage(db: DB, request: Request) -> Any:
             q = quota.get(name, identity_key=claude_scope)
         elif name == "codex" and fresh:
             q = quota.scoped_codex_usage(codex_scope, now) if codex_scope else None
-            active_scope = quota.codex_usage_scope()
-            if active_scope != codex_scope:
-                codex_scope, q = active_scope, None
+            if codex_scope:
+                active_scope = quota.codex_usage_scope()
+                if active_scope != codex_scope:
+                    codex_scope, q = active_scope, None
         else:
             q = quota.get(name)
         if q is None:

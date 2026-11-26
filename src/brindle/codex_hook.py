@@ -559,7 +559,7 @@ class _AppServer:
     pane environment and cwd instead, including any profile home override."""
 
     def __init__(self, binary: str, flags: list[str], timeout: float = _RPC_WAIT, *,
-                 env: dict[str, str] | None = None, cwd: str | None = None):
+                 env: dict[str, str] | None = None, cwd: str | None = None, experimental_api: bool = False):
         self.timeout = timeout
         launch = {"env": dict(env) if env is not None else {**os.environ, "CODEX_HOME": str(codex_home())}}
         if cwd is not None:
@@ -575,7 +575,10 @@ class _AppServer:
         threading.Thread(target=self._read, daemon=True).start()
         self.next_id = 0
         try:
-            self.call("initialize", {"clientInfo": {"name": "brindle", "version": "0"}})
+            params: dict = {"clientInfo": {"name": "brindle", "version": "0"}}
+            if experimental_api:
+                params["capabilities"] = {"experimentalApi": True}
+            self.call("initialize", params)
             self._send({"method": "initialized"})
         except Exception:
             self.close()
