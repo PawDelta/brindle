@@ -279,7 +279,7 @@ describe("the usage feed", () => {
     expect(screen.getByTestId("profile-usage").dataset.provider).toBe("codex");
   });
 
-  it("renders Claude usage while the independent Codex account request is pending", async () => {
+  it("shows Claude while Codex is pending and retains verified Codex usage after an unknown refresh", async () => {
     const scopes = { claude_usage_scope: "claude-login", codex_usage_scope: "codex-login" };
     const { providers, near } = usageScenario("normal");
     const daemon = new FakeDaemon({
@@ -290,12 +290,17 @@ describe("the usage feed", () => {
     const { baseUrl, token } = daemon.client();
     let finishCodex!: (response: Response) => void;
     const pending = new Promise<Response>((resolve) => { finishCodex = resolve; });
+    const codex = providers.find((p) => p.provider === "codex")!;
+    const codexResponse = (provider: typeof codex) => new Response(JSON.stringify({
+      providers: [provider], near: [], codex_usage_scope: scopes.codex_usage_scope,
+    }));
+    let nextCodex: typeof codex = { ...codex, known: false, windows: [] };
     let codexRequests = 0;
     const client = new DaemonClient({ baseUrl, token, fetch: (input, init) => {
       const url = new URL(String(input));
       if (url.searchParams.has("codex_account_scope")) {
         codexRequests++;
-        return pending;
+        return codexRequests === 1 ? pending : Promise.resolve(codexResponse(nextCodex));
       }
       return daemon.fetch(input, init);
     } });
@@ -305,10 +310,27 @@ describe("the usage feed", () => {
     await act(async () => { fireEvent.focus(window); });
     expect(reading.dataset.provider).toBe("claude");
     expect(codexRequests).toBe(1);
-    await act(async () => finishCodex(new Response(JSON.stringify({
-      providers: providers.filter((p) => p.provider === "codex"), near: [], codex_usage_scope: scopes.codex_usage_scope,
-    }))));
+    await act(async () => finishCodex(codexResponse({
+      ...codex, windows: codex.windows.map((w) => w.minutes === 10080 ? { ...w, used: 98 } : w),
+    })));
     expect(reading.dataset.provider).toBe("codex");
+    expect(screen.queryByTestId("usage-warning-dot")).not.toBeNull();
+
+    await act(async () => { fireEvent.focus(window); });
+    expect(codexRequests).toBe(2);
+    expect(reading.dataset.provider).toBe("codex");
+    expect(screen.queryByTestId("usage-warning-dot")).not.toBeNull();
+
+    nextCodex = codex;
+    await act(async () => { fireEvent.focus(window); });
+    expect(codexRequests).toBe(3);
+    expect(reading.dataset.provider).toBe("codex");
+    expect(screen.queryByTestId("usage-warning-dot")).toBeNull();
+
+    daemon.data.usage = { ...daemon.data.usage, codex_usage_scope: "another-codex-login" };
+    await act(async () => { fireEvent.focus(window); });
+    expect(codexRequests).toBe(4);
+    expect(reading.dataset.provider).toBe("claude");
   });
 
   it("follows the engine on a gentle poll: the weekly reading changes provider and warning style as usage changes", async () => {

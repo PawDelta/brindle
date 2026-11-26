@@ -179,7 +179,9 @@ export function UsageProvider({ client, children, pollMs = USAGE_POLL_MS }: { cl
       while (scope.checking) await scope.checking;
       if (account.codex_usage_scope !== identity || generation !== scope.generation || revision !== scope.codexRevision) return;
       const provider = codexProvider(account);
-      const reading = provider && weeklyReading(provider);
+      // The daemon can return an unknown reading when the provider is unavailable.
+      if (!provider?.known) return;
+      const reading = weeklyReading(provider);
       setState((previous) => {
         if (previous.scope !== scope || generation !== scope.generation || revision !== scope.codexRevision ||
             previous.identities.codex !== identity || hasCodexWeekly(previous.usage)) return previous;
