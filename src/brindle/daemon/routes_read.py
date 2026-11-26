@@ -1116,8 +1116,11 @@ def account(db: DB, request: Request) -> Any:
     cfg = config.load_repo_config(repo) if repo else config.RepoConfig()
     on = available and plugins.learning_name(cfg) == plugins.CLOUD
     note = learning.kept_note(cfg, repo) if on and repo else None
+    codex_scope = quota.codex_usage_scope()
     return {**details.to_json(),
-            "org_id": ent.org_id, "status": ent.status, "features": sorted(ent.features),
+            "subject": ent.sub, "org_id": ent.org_id, "status": ent.status, "features": sorted(ent.features),
+            "claude_usage_scope": quota.claude_usage_scope(),
+            "codex_usage_scope": codex_scope.identity if codex_scope else None,
             "seats": ent.seats, "role": ent.role, "expires_at": ent.exp,
             "in_grace": ent.in_grace, "grace_until": ent.grace_until,
             "learning_available": available, "learning": on, "learning_note": note}
@@ -1422,10 +1425,39 @@ def get_usage(db: DB, request: Request) -> Any:
     limited, at USAGE_NEAR_PERCENT of their fullest window or about to reset it within the
     hour, worst first. Providers brindle knows nothing current about come back
     with ``known: false``."""
+    if request.query_params.get("scope_only") == "1":
+        codex_scope = quota.codex_usage_scope()
+        return {"providers": [], "near": [], "claude_usage_scope": quota.claude_usage_scope(),
+                "codex_usage_scope": codex_scope.identity if codex_scope else None}
+
+    # The Codex account RPC can wait on the provider. Only an explicit
+    # Codex-only request may invoke it.
+    codex_account = request.query_params.get("codex_account_scope")
+    fresh = codex_account is None and request.query_params.get("fresh") == "1"
+    if fresh:
+        expected = request.query_params.get("claude_scope")
+        if expected is None:
+            quota.refresh_claude_usage()
+        else:
+            quota.refresh_claude_usage(expected_identity=expected)
+    claude_scope = quota.claude_usage_scope() if codex_account is None else None
+    codex_scope = quota.codex_usage_scope() if fresh or codex_account is not None else None
     now = time.time()
     providers, near = [], []
-    for name in quota.PROVIDERS:
-        q = quota.get(name)
+    names = ("codex",) if codex_account is not None else quota.PROVIDERS
+    for name in names:
+        if codex_account is not None:
+            q = quota.codex_account_usage(codex_scope, now) if codex_scope and codex_scope.identity == codex_account else None
+        elif name == "claude" and claude_scope:
+            q = quota.get(name, identity_key=claude_scope)
+        elif name == "codex" and fresh:
+            q = quota.scoped_codex_usage(codex_scope, now) if codex_scope else None
+        else:
+            q = quota.get(name)
+        if name == "codex" and codex_scope:
+            active_scope = quota.codex_usage_scope()
+            if active_scope != codex_scope:
+                codex_scope, q = active_scope, None
         if q is None:
             providers.append({"provider": name, "known": False, "limited": False, "windows": [],
                               "limited_until": None, "updated_at": None})
@@ -1451,7 +1483,8 @@ def get_usage(db: DB, request: Request) -> Any:
             near.append({"provider": name, "reason": "resets_soon", "used": soon.used,
                          "resets_at": soon.resets_at})
     near.sort(key=lambda n: (n["reason"] != "limited", -(n["used"] or 0)))
-    return {"providers": providers, "near": near}
+    return {"providers": providers, "near": near, "claude_usage_scope": claude_scope,
+            "codex_usage_scope": codex_scope.identity if codex_scope else None}
 
 
 ROUTES = [

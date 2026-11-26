@@ -342,7 +342,7 @@ describe("Sidebar", () => {
 
   it("marks the usage reading failed when the load really failed", async () => {
     mount({}, { screen: "new" }, (daemon) => (input, init) =>
-      String(input).endsWith("/usage") ? Promise.resolve(new Response("{}", { status: 500 })) : daemon.fetch(input, init));
+      new URL(String(input)).pathname.endsWith("/usage") ? Promise.resolve(new Response("{}", { status: 500 })) : daemon.fetch(input, init));
     await waitFor(() => expect(screen.getByTestId("profile-usage").dataset.state).toBe("failed"));
   });
 

@@ -1,8 +1,9 @@
 import { connectDaemon, renderApp, inTestContext } from "../test/harness";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { ONBOARDED_KEY } from "../api/providers";
+import { DaemonClient, type Usage } from "../api/client";
 import type { SessionDTO } from "../api/schema";
 import type { Route } from "../routes";
 import { UsageProvider } from "../store/usage";
@@ -174,8 +175,9 @@ describe("the sidebar's weekly usage reading", () => {
 });
 
 describe("the usage feed", () => {
-  function sidebar(daemon: FakeDaemon, pollMs: number) {
-    const { client, store, sync } = connectDaemon(daemon);
+  function sidebar(daemon: FakeDaemon, pollMs: number, daemonClient = daemon.client()) {
+    const { client, store, sync } = connectDaemon(daemon, daemonClient);
+    store.dispatch({ type: "account", account: daemon.data.account });
     const navigate = vi.fn<(r: Route) => void>();
     render(
       inTestContext(<><UsageProvider client={client} pollMs={pollMs}>
@@ -184,6 +186,152 @@ describe("the usage feed", () => {
     );
     return { navigate, stop: () => sync.stop() };
   }
+
+  it("shows the saved weekly reading during launch and wake refreshes", async () => {
+    const account = { signed_in: true, subject: "sam", claude_usage_scope: "subscription-a" };
+    const claudeUsage = (name: UsageScenario) => {
+      const usage = usageScenario(name);
+      return { ...usage, providers: usage.providers.filter((p) => p.provider === "claude"), claude_usage_scope: account.claude_usage_scope };
+    };
+    const daemon = new FakeDaemon({
+      account,
+      repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], usage: claudeUsage("normal"),
+    });
+    const first = sidebar(daemon, 60_000);
+    expect((await loadedReading()).dataset.provider).toBe("claude");
+    first.stop();
+    cleanup();
+
+    const client = daemon.client();
+    let finishLaunch!: (usage: Usage) => void;
+    const launch = new Promise<Usage>((resolve) => { finishLaunch = resolve; });
+    const refresh = vi.spyOn(client, "usage").mockReturnValue(launch);
+    const second = sidebar(daemon, 60_000, client);
+    expect(screen.getByTestId("profile-usage").dataset.state).toBe("reading");
+    expect(screen.getByTestId("profile-usage").dataset.provider).toBe("claude");
+    expect(refresh).toHaveBeenCalled();
+    const empty = { providers: [], near: [], claude_usage_scope: account.claude_usage_scope };
+    await act(async () => finishLaunch(empty));
+    expect(screen.getByTestId("profile-usage").dataset.provider).toBe("claude");
+
+    let finishWake!: (usage: Usage) => void;
+    const wake = new Promise<Usage>((resolve) => { finishWake = resolve; });
+    let freshRequests = 0;
+    const freshWake = () => { freshRequests++; return wake; };
+    refresh.mockImplementation((fresh = true) => fresh ? freshWake() : Promise.resolve(empty));
+    await act(async () => { fireEvent.focus(window); });
+    expect(screen.getByTestId("profile-usage").dataset.provider).toBe("claude");
+    let finishCheck!: (usage: Usage) => void;
+    const check = new Promise<Usage>((resolve) => { finishCheck = resolve; });
+    refresh.mockImplementation((fresh = true) => fresh ? freshWake() : check);
+    fireEvent.focus(window);
+    expect(screen.getByTestId("profile-usage").dataset.state).toBe("checking");
+    await act(async () => finishCheck(empty));
+    expect(screen.getByTestId("profile-usage").dataset.state).toBe("reading");
+    await act(async () => finishWake(claudeUsage("near")));
+    expect(screen.getByTestId("profile-usage").textContent).toContain("63%");
+    expect(freshRequests).toBe(1);
+
+    const switched = { ...account, claude_usage_scope: "subscription-b" };
+    const switchedUsage = { ...empty, claude_usage_scope: switched.claude_usage_scope };
+    let finishOld!: (usage: Usage) => void;
+    const oldRefresh = new Promise<Usage>((resolve) => { finishOld = resolve; });
+    refresh.mockImplementation((fresh = true) => fresh ? oldRefresh : Promise.resolve(empty));
+    await act(async () => { fireEvent.focus(window); });
+    let finishSwitch!: (usage: Usage) => void;
+    const switchRefresh = new Promise<Usage>((resolve) => { finishSwitch = resolve; });
+    refresh.mockImplementation((fresh = true) => fresh ? switchRefresh : Promise.resolve(switchedUsage));
+    await act(async () => { fireEvent.focus(window); });
+    expect(screen.getByTestId("profile-usage").dataset.state).toBe("none");
+    await act(async () => finishOld(claudeUsage("near")));
+    expect(screen.getByTestId("profile-usage").dataset.state).toBe("none");
+    await act(async () => finishSwitch(switchedUsage));
+    expect(screen.getByTestId("profile-usage").dataset.state).toBe("none");
+
+    second.stop();
+    cleanup();
+    daemon.data.account = switched;
+    refresh.mockReturnValue(new Promise(() => {}));
+    sidebar(daemon, 60_000, client);
+    expect(screen.getByTestId("profile-usage").dataset.state).toBe("none");
+  });
+
+  it("restores Codex weekly usage before launch refresh and after an empty response", async () => {
+    const account = { signed_in: true, subject: "sam", codex_usage_scope: "codex-login" };
+    const daemon = new FakeDaemon({
+      account,
+      repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root],
+      usage: { ...usageScenario("normal"), ...account },
+    });
+    const first = sidebar(daemon, 60_000);
+    expect((await loadedReading()).dataset.provider).toBe("codex");
+    first.stop();
+    cleanup();
+
+    const client = daemon.client();
+    let finish!: (usage: Usage) => void;
+    const pending = new Promise<Usage>((resolve) => { finish = resolve; });
+    vi.spyOn(client, "usage").mockReturnValue(pending);
+    sidebar(daemon, 60_000, client);
+    expect(screen.getByTestId("profile-usage").dataset.state).toBe("reading");
+    expect(screen.getByTestId("profile-usage").dataset.provider).toBe("codex");
+    await act(async () => finish({ providers: [], near: [], ...account }));
+    expect(screen.getByTestId("profile-usage").dataset.provider).toBe("codex");
+  });
+
+  it("shows Claude while Codex is pending and retains verified Codex usage after an unknown refresh", async () => {
+    const scopes = { claude_usage_scope: "claude-login", codex_usage_scope: "codex-login" };
+    const { providers, near } = usageScenario("normal");
+    const daemon = new FakeDaemon({
+      account: { signed_in: true, subject: "sam", ...scopes },
+      repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root],
+      usage: { providers: providers.filter((p) => p.provider === "claude"), near, ...scopes },
+    });
+    const { baseUrl, token } = daemon.client();
+    let finishCodex!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => { finishCodex = resolve; });
+    const codex = providers.find((p) => p.provider === "codex")!;
+    const codexResponse = (provider: typeof codex) => new Response(JSON.stringify({
+      providers: [provider], near: [], codex_usage_scope: scopes.codex_usage_scope,
+    }));
+    let nextCodex: typeof codex = { ...codex, known: false, windows: [] };
+    let codexRequests = 0;
+    const client = new DaemonClient({ baseUrl, token, fetch: (input, init) => {
+      const url = new URL(String(input));
+      if (url.searchParams.has("codex_account_scope")) {
+        codexRequests++;
+        return codexRequests === 1 ? pending : Promise.resolve(codexResponse(nextCodex));
+      }
+      return daemon.fetch(input, init);
+    } });
+    sidebar(daemon, 60_000, client);
+    const reading = await loadedReading();
+    expect(reading.dataset.provider).toBe("claude");
+    await act(async () => { fireEvent.focus(window); });
+    expect(reading.dataset.provider).toBe("claude");
+    expect(codexRequests).toBe(1);
+    await act(async () => finishCodex(codexResponse({
+      ...codex, windows: codex.windows.map((w) => w.minutes === 10080 ? { ...w, used: 98 } : w),
+    })));
+    expect(reading.dataset.provider).toBe("codex");
+    expect(screen.queryByTestId("usage-warning-dot")).not.toBeNull();
+
+    await act(async () => { fireEvent.focus(window); });
+    expect(codexRequests).toBe(2);
+    expect(reading.dataset.provider).toBe("codex");
+    expect(screen.queryByTestId("usage-warning-dot")).not.toBeNull();
+
+    nextCodex = codex;
+    await act(async () => { fireEvent.focus(window); });
+    expect(codexRequests).toBe(3);
+    expect(reading.dataset.provider).toBe("codex");
+    expect(screen.queryByTestId("usage-warning-dot")).toBeNull();
+
+    daemon.data.usage = { ...daemon.data.usage, codex_usage_scope: "another-codex-login" };
+    await act(async () => { fireEvent.focus(window); });
+    expect(codexRequests).toBe(4);
+    expect(reading.dataset.provider).toBe("claude");
+  });
 
   it("follows the engine on a gentle poll: the weekly reading changes provider and warning style as usage changes", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], usage: usageScenario("normal") });
