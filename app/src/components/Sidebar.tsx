@@ -28,7 +28,7 @@
    as the accent (styles.css .side-*). */
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
-import type { DaemonClient, ProviderUsage } from "../api/client";
+import type { DaemonClient } from "../api/client";
 import { DaemonContext } from "../api/context";
 import { openExternal, type OpenUrl } from "../api/open";
 import type { AgentDTO, GoalDTO, SessionDTO } from "../api/schema";
@@ -49,7 +49,7 @@ import { teamNews, waitingCount } from "../store/appUpdates";
 import { cliStatus, formatAge, isPastWorker, isPaused, type CliStatus } from "../store/overview";
 import { planWindows, providerName, WARN } from "../screens/Account/usage";
 import { useSessions } from "../store/sessions";
-import { useUsage } from "../store/usage";
+import { useUsage, weeklyReading, type WeeklyReading } from "../store/usage";
 import { useAppState, useStore } from "../store/useStore";
 import Logo from "./Logo";
 import { Preflight } from "./Preflight";
@@ -71,36 +71,36 @@ export interface SidebarProps {
   openUrl?: OpenUrl;
 }
 
-const weeklyWindow = (provider: ProviderUsage) => (provider.known ? planWindows(provider).find((window) => window.minutes === 10080) : undefined);
-
 /* The reset day only matters once the weekly window is close to full. */
 const RESET_SHOWN_FROM = 80;
+
+const mostUsed = (readings: WeeklyReading[]) =>
+  readings.reduce<WeeklyReading | undefined>((highest, reading) => !highest || reading.used > highest.used ? reading : highest, undefined);
 
 /* Each click is its own request, so a second one with Account open scrolls back to Usage. */
 let usageAsks = 0;
 /* No reading is not a fault: a new user has none yet, and the first load may still be out.
    Only a failed load says "unavailable"; otherwise a neutral "Usage" opens the same page. */
-function UsageReading({ provider, warning, failed }: { provider?: ProviderUsage; warning: boolean; failed: boolean }) {
-  const window = provider && weeklyWindow(provider);
+function UsageReading({ reading, warning, failed }: { reading?: WeeklyReading; warning: boolean; failed: boolean }) {
   return (
     <span
       className={`min-w-0 truncate font-mono text-[11.5px] ${warning ? "text-sap" : "text-ink-3"}`}
       data-testid="profile-usage"
-      data-provider={window ? provider?.provider : undefined}
-      data-state={window ? "reading" : failed ? "failed" : "none"}
+      data-provider={reading?.provider}
+      data-state={reading ? "reading" : failed ? "failed" : "none"}
     >
-      {provider && window ? (
+      {reading ? (
         <>
-          <span>{providerName(provider.provider)}</span>
-          {" "}{Math.round(window.used)}%
-          {window?.resets_at != null && window.used >= RESET_SHOWN_FROM && <> · {new Date(window.resets_at * 1000).toLocaleDateString("en-US", { weekday: "short" })}</>}
+          <span>{providerName(reading.provider)}</span>
+          {" "}{Math.round(reading.used)}%
+          {reading.resetsAt != null && reading.used >= RESET_SHOWN_FROM && <> · {new Date(reading.resetsAt * 1000).toLocaleDateString("en-US", { weekday: "short" })}</>}
         </>
       ) : failed ? "Usage unavailable" : "Usage"}
     </span>
   );
 }
 
-function AccountButton({ route, navigate, provider, warning, failed }: Pick<SidebarProps, "route" | "navigate"> & { provider?: ProviderUsage; warning: boolean; failed: boolean }) {
+function AccountButton({ route, navigate, reading, warning, failed }: Pick<SidebarProps, "route" | "navigate"> & { reading?: WeeklyReading; warning: boolean; failed: boolean }) {
   const client = useContext(DaemonContext);
   const store = useStore();
   const connection = useAppState((s) => s.connection);
@@ -134,7 +134,7 @@ function AccountButton({ route, navigate, provider, warning, failed }: Pick<Side
     >
       <AccountAvatar />
       {warning && <span aria-hidden="true" data-testid="usage-warning-dot" className="absolute left-6 top-0 size-1.5 rounded-full bg-sap ring-2 ring-canvas-2" />}
-      <UsageReading provider={provider} warning={warning} failed={failed} />
+      <UsageReading reading={reading} warning={warning} failed={failed} />
     </button>
   );
 }
@@ -770,8 +770,7 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings,
   const [pausedOpen, setPausedOpen] = useState(readPausedOpen);
   const list = useRef<HTMLElement>(null);
   const noRefresh = useCallback(() => Promise.resolve(), []);
-  const { usage, error: usageError } = useUsage();
-  const mostUsed = usage?.providers.filter((provider) => weeklyWindow(provider)).sort((a, b) => weeklyWindow(b)!.used - weeklyWindow(a)!.used)[0];
+  const { usage, weekly, error: usageError } = useUsage();
 
   // The live sessions in reading order (⌘1-9), and the paused ones after them.
   // The practice repos last, each grouped as "Practice run" rather than by their folder's name.
@@ -797,7 +796,11 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings,
   ).length, [workspaces, alive]);
   const agent = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []).find((a) => a.id === selected?.root), [workspaces, selected]);
   // An open session follows its supervisor's provider, even before its model is known.
-  const shown = route.screen === "session" ? usage?.providers.find((p) => p.provider === agent?.provider) : mostUsed;
+  const reading = route.screen === "session"
+    ? weekly.find((reading) => reading.provider === agent?.provider)
+    : mostUsed(usage?.providers.flatMap((provider) => weeklyReading(provider) ?? []) ?? []) ?? mostUsed(weekly);
+  const provider = route.screen === "session" ? agent?.provider : reading?.provider;
+  const shown = usage?.providers.find((p) => p.provider === provider);
   const warning = !!shown && (shown.limited || planWindows(shown).some((window) => window.used >= WARN));
 
   // An open session's agents show, on each navigation to it; a sheet opening or closing over the
@@ -1037,7 +1040,7 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings,
       </div>
       <div className="flex shrink-0 flex-col gap-2 border-t border-line px-s1 pt-s1" data-testid="sidebar-foot">
         <div className="flex h-10 min-w-0 shrink-0 flex-nowrap items-center gap-1 whitespace-nowrap" role="group" aria-label="Sidebar foot" data-testid="sidebar-foot-row">
-          <AccountButton route={route} navigate={navigate} provider={shown} warning={warning} failed={usageError != null} />
+          <AccountButton route={route} navigate={navigate} reading={reading} warning={warning} failed={usageError != null} />
           <span className="flex-1" />
           <LibraryButton open={libraryOpen} waiting={plansWaiting} onToggle={toggleLibrary} />
           <TerminalToggle />

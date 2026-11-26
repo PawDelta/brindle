@@ -1,8 +1,9 @@
 import { connectDaemon, renderApp, inTestContext } from "../test/harness";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
 import { ONBOARDED_KEY } from "../api/providers";
+import type { Usage } from "../api/client";
 import type { SessionDTO } from "../api/schema";
 import type { Route } from "../routes";
 import { UsageProvider } from "../store/usage";
@@ -174,8 +175,9 @@ describe("the sidebar's weekly usage reading", () => {
 });
 
 describe("the usage feed", () => {
-  function sidebar(daemon: FakeDaemon, pollMs: number) {
-    const { client, store, sync } = connectDaemon(daemon);
+  function sidebar(daemon: FakeDaemon, pollMs: number, daemonClient = daemon.client()) {
+    const { client, store, sync } = connectDaemon(daemon, daemonClient);
+    store.dispatch({ type: "account", account: daemon.data.account });
     const navigate = vi.fn<(r: Route) => void>();
     render(
       inTestContext(<><UsageProvider client={client} pollMs={pollMs}>
@@ -184,6 +186,42 @@ describe("the usage feed", () => {
     );
     return { navigate, stop: () => sync.stop() };
   }
+
+  it("shows the saved weekly reading during launch and wake refreshes", async () => {
+    const daemon = new FakeDaemon({
+      account: { signed_in: true, subject: "sam" },
+      repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], usage: usageScenario("normal"),
+    });
+    const first = sidebar(daemon, 60_000);
+    expect((await loadedReading()).dataset.provider).toBe("codex");
+    first.stop();
+    cleanup();
+
+    const client = daemon.client();
+    let finishLaunch!: (usage: Usage) => void;
+    const launch = new Promise<Usage>((resolve) => { finishLaunch = resolve; });
+    const refresh = vi.spyOn(client, "usage").mockReturnValue(launch);
+    const second = sidebar(daemon, 60_000, client);
+    expect(screen.getByTestId("profile-usage").dataset.state).toBe("reading");
+    expect(screen.getByTestId("profile-usage").dataset.provider).toBe("codex");
+    expect(refresh).toHaveBeenCalled();
+    await act(async () => finishLaunch({ providers: [], near: [] }));
+    expect(screen.getByTestId("profile-usage").dataset.provider).toBe("codex");
+
+    let finishWake!: (usage: Usage) => void;
+    refresh.mockReturnValue(new Promise((resolve) => { finishWake = resolve; }));
+    fireEvent.focus(window);
+    expect(screen.getByTestId("profile-usage").dataset.provider).toBe("codex");
+    await act(async () => finishWake(usageScenario("near")));
+    expect(screen.getByTestId("profile-usage").dataset.provider).toBe("claude");
+
+    second.stop();
+    cleanup();
+    daemon.data.account = { signed_in: true, subject: "other" };
+    refresh.mockReturnValue(new Promise(() => {}));
+    sidebar(daemon, 60_000, client);
+    expect(screen.getByTestId("profile-usage").dataset.state).toBe("none");
+  });
 
   it("follows the engine on a gentle poll: the weekly reading changes provider and warning style as usage changes", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], usage: usageScenario("normal") });

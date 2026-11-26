@@ -1223,6 +1223,8 @@ export interface ProfileDetail extends ProfileDTO {
    (routes_read.account), never a token. `learning` is whether hosted
    learning is on; `learning_note` the learner's kept note for the repo. */
 export interface AccountInfo extends AccountDTO {
+  /* The signed entitlement's account ID, available offline. */
+  subject?: string;
   org_id?: string;
   status?: string;
   features?: string[];
@@ -3287,7 +3289,7 @@ export class DaemonClient {
 
   /* Each provider's subscription windows as its own CLI reports them, and the near ones. */
   usage() {
-    return this.get<Usage>("/usage");
+    return this.get<Usage>("/usage", { fresh: 1 });
   }
 
   /* The URL of WS /v1/events. The token is never in it: the stream sends it

@@ -1117,7 +1117,7 @@ def account(db: DB, request: Request) -> Any:
     on = available and plugins.learning_name(cfg) == plugins.CLOUD
     note = learning.kept_note(cfg, repo) if on and repo else None
     return {**details.to_json(),
-            "org_id": ent.org_id, "status": ent.status, "features": sorted(ent.features),
+            "subject": ent.sub, "org_id": ent.org_id, "status": ent.status, "features": sorted(ent.features),
             "seats": ent.seats, "role": ent.role, "expires_at": ent.exp,
             "in_grace": ent.in_grace, "grace_until": ent.grace_until,
             "learning_available": available, "learning": on, "learning_note": note}
@@ -1422,6 +1422,10 @@ def get_usage(db: DB, request: Request) -> Any:
     limited, at USAGE_NEAR_PERCENT of their fullest window or about to reset it within the
     hour, worst first. Providers brindle knows nothing current about come back
     with ``known: false``."""
+    # Codex reads its rollouts in quota.get. Claude's desktop reading needs
+    # the same throttled CLI refresh the terminal sidebar uses.
+    if request.query_params.get("fresh") == "1":
+        quota.refresh_claude_usage()
     now = time.time()
     providers, near = [], []
     for name in quota.PROVIDERS:

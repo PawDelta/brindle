@@ -1675,4 +1675,5 @@ def test_account_identity_is_cached_with_orgs_and_fails_soft_offline(brindle_hom
     for _ in range(2):
         code, body = _get("/v1/account", AUTH)
         assert code == 200 and body["signed_in"] and body["name"] is None and body["email"] is None
+        assert body["subject"] == ent.sub
     assert reads == ["me", "orgs", "me", "orgs"]

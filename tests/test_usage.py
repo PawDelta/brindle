@@ -2,6 +2,8 @@ import json
 import shlex
 import subprocess
 
+from starlette.requests import Request
+
 from brindle import provider_homes, providers, quota, spawn
 from brindle.daemon import routes_read
 from brindle.profiles import Profile
@@ -31,16 +33,16 @@ def test_served_claude_usage_follows_subscription_switch_and_back(tmp_path, monk
 
     monkeypatch.setattr(spawn, "read", fetch)
 
-    def served():
-        result = routes_read.get_usage.__wrapped__(None, None)
+    def served(*, fresh=False):
+        request = Request({"type": "http", "query_string": b"fresh=1" if fresh else b""})
+        result = routes_read.get_usage.__wrapped__(None, request)
         return next(p for p in result["providers"] if p["provider"] == "claude")
 
     login("A")
     # A pre-upgrade provider-only cache has no safe subscription attribution.
     quota._save({"claude": {"windows": [{"used": 99}], "updated_at": quota.time.time()}})
     assert not served()["known"]
-    assert quota.refresh_claude_usage(force=True)
-    assert served()["windows"][0]["used"] == 21
+    assert served(fresh=True)["windows"][0]["used"] == 21
     login("B")  # Same organization, different subscription owner.
     assert not served()["known"]
     used = 78
