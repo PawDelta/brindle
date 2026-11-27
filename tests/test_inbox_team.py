@@ -135,6 +135,8 @@ def test_a_share_for_feedback_adds_one_waiting_item(library, daemon):
         return [i["doc"] for i in _inbox(daemon) if i["inbox_group"] == "needs_you"]
 
     assert waiting() == ["ad_2"]
+    # pawdelta-web's GET /me/inbox emits the role beside the sender. A Comment
+    # invite has only this share row. A sign-off invite also has the review row.
     for doc, role in (("ad_feedback", "comment"), ("ad_fyi", "view"), ("ad_editor", "edit"),
                       ("ad_2", "reviewer")):
         library.items.append({"item_key": f"shared:{doc}", "kind": "shared_with_you", "created_at": 40,
