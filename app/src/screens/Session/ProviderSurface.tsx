@@ -43,7 +43,7 @@ export interface ProviderSurfaceProps {
   repo: string;
   /* The session's root: whether its panes may show is asked of it alone (store/panes). */
   root?: string;
-  /* The agent shown; null for a session with no agents in the snapshot (paused). */
+  /* The agent shown; null while its launch is pending or its session has no agents in the snapshot. */
   agent: AgentDTO | null;
   /* Whether its process is alive, from the liveness sweep (undefined: not known yet). */
   alive?: boolean;
@@ -83,6 +83,7 @@ export function surfaceCard(agent: AgentDTO | null, alive: boolean | undefined, 
   if (sessionStatus === "resuming" && !agent?.locked) return { kind: "returning" };
   const name = agent ? providerName(agent.provider) : "The session";
   if (!agent) {
+    if (sessionStatus === "starting") return { kind: "starting" };
     if (sessionStatus === "failed") return { kind: "failed", title: `${name} failed`, why: "Its supervisor stopped with an error." };
     return { kind: "ended", title: sessionStatus === "paused" ? `${name} is paused` : `${name} isn't running`, why: null };
   }

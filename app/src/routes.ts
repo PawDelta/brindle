@@ -86,6 +86,8 @@ export type Route =
       screen: "session";
       agent?: string;
       sheet?: SheetRef;
+      /* Opened from the acknowledgement of a new launch. */
+      launched?: boolean;
     } & SessionRef);
 
 /* Settings' tabs, in order: everything the person sets, behind the sidebar's account entry. */

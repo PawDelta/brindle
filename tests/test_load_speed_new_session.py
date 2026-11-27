@@ -226,6 +226,7 @@ def test_start_answers_once_the_session_row_exists_and_launches_behind_it(db, re
         try:
             if fails:
                 raise agents.AgentError("claude isn't installed")
+            own.update_agent(agent.id, tmux_window="%1")
         finally:
             done.set()
 
@@ -238,6 +239,7 @@ def test_start_answers_once_the_session_row_exists_and_launches_behind_it(db, re
     got = routes_actions.start_session(db, {}, {"repo": str(repo)})
     assert holding.wait(5) and not done.is_set()      # answered before the launch finished
     assert db.get_agent(got["id"]).status == "starting"
+    assert not bus.tail(db, kinds=("agent.pane_registered",), root_id=got["id"])
     release.set()
     assert done.wait(5)
     for t in threading.enumerate():
@@ -246,3 +248,7 @@ def test_start_answers_once_the_session_row_exists_and_launches_behind_it(db, re
     if fails:
         failed = db.get_agent(got["id"])
         assert (failed.status, failed.failed_why) == ("failed", "launch: claude isn't installed")
+        assert not bus.tail(db, kinds=("agent.pane_registered",), root_id=got["id"])
+    else:
+        assert db.get_agent(got["id"]).tmux_window
+        assert bus.tail(db, kinds=("agent.pane_registered",), root_id=got["id"])

@@ -1185,6 +1185,68 @@ describe("App", () => {
     expect(daemon.requests.some((r) => r.path.endsWith("/pause"))).toBe(false);
   });
 
+  it("keeps a newly launched pane starting until its own window arrives", async () => {
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }],
+      sessions: [{ ...paused, workspace_id: "other" }],
+      workspaces: [{ ...root, agents: [] }, { ...root, id: "other", path: OTHER, agents: [] }],
+    });
+    daemon.holdLaunch = true;
+    const { client, store, sync } = connectDaemon(daemon);
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "new", repo: REPO }} />);
+    const prompt = await screen.findByLabelText("What should brindle work on?");
+    await act(async () => { await sync.idle(); });
+    expect(store.getState().synced).toBe(true);
+
+    const snapshot = client.snapshot.bind(client);
+    let releaseEarly!: () => void;
+    let releaseLive!: () => void;
+    const early = new Promise<void>((resolve) => { releaseEarly = resolve; });
+    const live = new Promise<void>((resolve) => { releaseLive = resolve; });
+    let readStarted!: () => void;
+    const reading = new Promise<void>((resolve) => { readStarted = resolve; });
+    vi.spyOn(client, "snapshot").mockImplementationOnce(async () => {
+      const rows = await snapshot();
+      readStarted();
+      await early;
+      return rows;
+    }).mockImplementation(async () => {
+      await live;
+      return snapshot();
+    });
+
+    const pane = () => within(screen.getByRole("region", { name: "Session" }));
+    const expectStarting = () => {
+      expect(pane().getByTestId("state-card").dataset.kind).toBe("starting");
+      expect(pane().getByTestId("session-status").dataset.state).toBe("starting");
+    };
+    try {
+      fireEvent.change(prompt, { target: { value: "Fix the flaky test" } });
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+      await reading;
+      await act(async () => daemon.finishLaunch());
+      // The last applied snapshot belongs to the old view. The launch has answered.
+      expectStarting();
+
+      await act(async () => {
+        daemon.send({ type: "liveness", agents: { new1: false } });
+        releaseEarly();
+      });
+      // The first snapshot of this root was taken before it had a window.
+      expect(store.getState().workspaces.flatMap((ws) => ws.agents ?? []).find((a) => a.id === "new1")?.status).toBe("exited");
+      expectStarting();
+
+      await act(async () => { releaseLive(); await sync.idle(); });
+      expect(pane().getByTestId("terminal").textContent).toBe("new1");
+      expect(pane().queryByTestId("state-card")).toBeNull();
+    } finally {
+      releaseEarly();
+      releaseLive();
+      daemon.finishLaunch();
+      sync.stop();
+    }
+  });
+
   it.each(["before", "after"])("a session whose status beat its window into the snapshot still opens running, not paused (#216), read %s launch completes", async (readWhen) => {
     // The engine publishes the new chat's status before it records the chat's window: the snapshot that
     // status asks for lists it "exited" with no window, and nothing on the bus says when the window lands.
