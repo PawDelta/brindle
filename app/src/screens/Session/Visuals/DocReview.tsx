@@ -71,11 +71,11 @@ function Change({ before, after }: { before: string; after: string }) {
   );
 }
 
-function Who({ who, supervisor = false }: { who: string; supervisor?: boolean }) {
+function Who({ who, supervisor = false, children }: { who: string; supervisor?: boolean; children?: ReactNode }) {
   return (
     <div className="flex min-w-0 items-center gap-1.5">
       <Avatar who={supervisor ? "supervisor" : who} />
-      <b title={personName(who)} className="min-w-0 truncate font-medium text-ink">{supervisor ? (who === "person" ? "Your supervisor" : `${personName(who)}’s supervisor`) : personName(who)}</b>
+      <b title={personName(who)} className="min-w-0 truncate font-medium text-ink">{supervisor ? (who === "person" ? "Your supervisor" : `${personName(who)}’s supervisor`) : personName(who)}{children}</b>
     </div>
   );
 }
@@ -97,6 +97,11 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
   const [replying, setReplying] = useState(false);
   const [text, setText] = useState("");
   const open = t.status === "open";
+  const latestReply = t.replies?.at(-1);
+  // Questions are routed when posted. Other feedback is marked sent by the verdict that carries it.
+  const supervisorReplying = open && (latestReply
+    ? latestReply.author === "person" && !latestReply.from_supervisor && latestReply.sent
+    : t.author === "person" && (t.question || t.sent));
   const suggestion = t.kind === "suggestion";
   const canJudge = !limits;
   const canResolve = !limits || limits.resolve(t);
@@ -126,9 +131,9 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
       {t.attachments?.map((name) => (
         <span key={name} title={name} className="max-w-full justify-self-start truncate rounded-sm border border-line px-1.5 py-px font-mono text-[11px] text-ink-2">{name}</span>
       ))}
-      {!!t.replies?.length && (
+      {(latestReply || supervisorReplying) && (
         <div className="ml-[9px] grid gap-1.5 border-l border-line-strong pl-2.5">
-          {t.replies.map((r) => (
+          {t.replies?.map((r) => (
             <div key={r.id} className="grid gap-1.5" data-from-supervisor={r.from_supervisor || undefined}>
               <div className="flex items-center gap-1.5">
                 <Who who={r.from_supervisor ? (t.author_name ?? t.author) : (r.author_name ?? (r.author.startsWith("teammate:") ? "A teammate" : r.author))} supervisor={r.from_supervisor} />
@@ -137,6 +142,16 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
               <span className="whitespace-pre-wrap break-words">{r.text}</span>
             </div>
           ))}
+          {supervisorReplying && (
+            <div className={onLine} role="status" data-state="supervisor-replying">
+              <Who who="person" supervisor><span className="font-normal text-ink-3"> is replying</span></Who>
+              <span aria-hidden="true" className="flex shrink-0 gap-0.5">
+                <span className="size-1 rounded-full bg-current motion-safe:animate-pulse" />
+                <span className="size-1 rounded-full bg-current motion-safe:animate-pulse [animation-delay:150ms]" />
+                <span className="size-1 rounded-full bg-current motion-safe:animate-pulse [animation-delay:300ms]" />
+              </span>
+            </div>
+          )}
         </div>
       )}
       {replying && (
