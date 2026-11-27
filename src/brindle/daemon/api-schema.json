@@ -2539,6 +2539,41 @@
       "title": "DesignShareLinkDTO",
       "type": "object"
     },
+    "DesignSignOffDTO": {
+      "properties": {
+        "at": {
+          "title": "At",
+          "type": "number"
+        },
+        "optional": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Optional"
+        },
+        "rev": {
+          "title": "Rev",
+          "type": "integer"
+        },
+        "sub": {
+          "title": "Sub",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sub",
+        "rev",
+        "at"
+      ],
+      "title": "DesignSignOffDTO",
+      "type": "object"
+    },
     "DesignTaskDTO": {
       "description": "One task of a design's plan (GET /v1/analysis-docs/{id} ``tasks``), in\nits board state: queued, working, in review, merged or cancelled.",
       "properties": {
@@ -13144,6 +13179,41 @@
           "title": "DesignAccessRequestDTO",
           "type": "object"
         },
+        "DesignSignOffDTO": {
+          "properties": {
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "optional": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Optional"
+            },
+            "rev": {
+              "title": "Rev",
+              "type": "integer"
+            },
+            "sub": {
+              "title": "Sub",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sub",
+            "rev",
+            "at"
+          ],
+          "title": "DesignSignOffDTO",
+          "type": "object"
+        },
         "PlanAlongsideDTO": {
           "description": "A task the supervisor assigned outside an open plan (assign's\noutside_plan): it ran at once instead of waiting on the plan. ``reason``:\nthe supervisor's. ``can_stop``: Stop still has something to cancel or remove.",
           "properties": {
@@ -14425,7 +14495,7 @@
           "type": "object"
         }
       },
-      "description": "A design someone else shared, as the person reviewing it reads it\n(brindle.pro.shared_reader): ``id`` is its Library doc id and it has no\nplan on this machine. ``can_*``: what the Library lets this account do,\n``can_sign_off`` false only when it can't be one of the signers.\n``author``: who wrote it, ``person`` if that is this account.",
+      "description": "A design someone else shared, as the person reviewing it reads it\n(brindle.pro.shared_reader): ``id`` is its Library doc id and it has no\nplan on this machine. ``can_*``: what the Library lets this account do now.\n``sign_off``: whether this account's sign-off is required or optional.\n``author``: who wrote it, ``person`` if that is this account.",
       "properties": {
         "access_request": {
           "anyOf": [
@@ -14566,6 +14636,30 @@
         "session": {
           "title": "Session",
           "type": "string"
+        },
+        "sign_off": {
+          "anyOf": [
+            {
+              "enum": [
+                "required",
+                "optional"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sign Off"
+        },
+        "sign_offs": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DesignSignOffDTO"
+          },
+          "title": "Sign Offs",
+          "type": "array"
         },
         "signed_off": {
           "default": false,
