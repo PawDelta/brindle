@@ -211,8 +211,9 @@ it("keeps an approved plan board live from recorded worker events and drops stal
   view.unmount();
 });
 
-it("asks immediately in the thread without turning the question into a change request", async () => {
-  let plan = doc(1, "Workers run on your machine.");
+it.each(["summary", "context"])("asks immediately in the %s thread without turning the question into a change request", async (section) => {
+  const passage = "Workers run on your machine.";
+  let plan = doc(1, passage, { sections: [{ id: section, title: "Where workers run", markdown: passage }] });
   const store = createAppStore();
   const client: PlansClient & PlanDocClient & VisualsClient = {
     ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan,
@@ -222,7 +223,7 @@ it("asks immediately in the thread without turning the question into a change re
     ] }),
   };
   render(inTestStore(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />, store));
-  const text = (await screen.findByText("Workers run on your machine.")).firstChild!;
+  const text = (await screen.findByText(passage)).firstChild!;
   const range = document.createRange();
   range.setStart(text, 0);
   range.setEnd(text, 7);
@@ -241,7 +242,13 @@ it("asks immediately in the thread without turning the question into a change re
   await act(async () => store.dispatch({ type: "stream", message: { type: "event", id: 1, ts: 2, kind: "visual.plan_changed", root_id: "boss", repo_root: null, agent_id: null, workspace_id: null, task_id: null, payload: {} } }));
   expect(thread.querySelector('[data-from-supervisor="true"]')).toBeTruthy();
   expect(thread.querySelector('[data-state="supervisor-replying"]')).toBeNull();
-  expect((screen.getByRole("button", { name: "Request changes" }) as HTMLButtonElement).disabled).toBe(true);
+  const request = screen.getByRole<HTMLButtonElement>("button", { name: "Request changes" });
+  if (section === "context") {
+    fireEvent.click(request);
+    expect(screen.getByTestId<HTMLButtonElement>("plan-send-back").disabled).toBe(true);
+  } else {
+    expect(request.disabled).toBe(true);
+  }
   expect((screen.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
 });
 
@@ -461,6 +468,9 @@ it("design doc writes go one at a time, a read sent before one came back can't u
   view.unmount();
   const second: Plan = { ...base, rev: 2, revisions: [...base.revisions!, { rev: 2, author: "supervisor", source: "proposal", at: 20 }], threads: [{ ...base.threads![0], replies: again }] };
   const reopened = render(reader({ ...visual, rev: 2 }));
+  await act(async () => reads[reads.length - 1]({ ...second, threads: redirected.threads }));
+  expect(supervisorReplying()).toBeNull();
+  reopened.rerender(reader({ ...visual, rev: 2, answer: { option: "x", note: "", at: 20 } }));
   await act(async () => reads[reads.length - 1](second));
   await act(async () => fireEvent.click(bar().getByRole("button", { name: "Request changes" })));
   expect(sent).toEqual([false, false]);

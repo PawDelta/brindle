@@ -46,7 +46,7 @@ import { Diagram } from "./DocDiagram";
 import { FormatBar, FormatProvider, textareaTarget, useFormatTarget } from "./DocFormat";
 import { DocumentHistory, DocHistoryComparison, type HistoryEvent, type WorkItem } from "./DocHistory";
 import { DocMarkdown } from "./DocMarkdown";
-import { DraftCard, Review, ReviewStrip, SignOffSheet, type Draft, type ReviewTab, type SignOffRow, type ThreadActions, type TodoItem } from "./DocReview";
+import { DraftCard, Review, ReviewStrip, SignOffSheet, isSupervisorReplying, type Draft, type ReviewTab, type SignOffRow, type ThreadActions, type TodoItem } from "./DocReview";
 import { SharePanel } from "./SharePanel";
 import { Policies } from "./DocPolicies";
 import type { LiveClient } from "./DocEditor";
@@ -1140,7 +1140,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         key: `t${t.id}`, anchor: h.anchor,
         // A teammate's suggestions are the author's to judge, and a teammate resolves only their own comments.
         node: <MarginNote thread={t} busy={busy} canJudge={!teammate && plan.state === "open"} canReply={canComment} canResolve={!teammate || (canComment && t.author === "person")} actions={actions} lit={followed?.thread === String(t.id) || hovered === t.id}
-          onHover={(on) => setHovered(on ? t.id : null)} />,
+          onHover={(on) => setHovered(on ? t.id : null)} supervisorReplying={isSupervisorReplying(t, plan)} />,
       })),
       ...(draft && draftAt?.at === at ? [{
         key: "draft", anchor: draftAt.anchor,

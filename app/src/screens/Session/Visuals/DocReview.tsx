@@ -80,7 +80,30 @@ function Who({ who, supervisor = false, children }: { who: string; supervisor?: 
   );
 }
 
-function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, judge }: {
+export function isSupervisorReplying(t: PlanThreadDTO, plan: Pick<Plan, "state" | "rev" | "verdict">): boolean {
+  if (t.status !== "open" || (plan.state !== "open" && plan.state !== "redirected")) return false;
+  const reply = t.replies?.at(-1);
+  // Only the question itself is routed immediately. A reply to it stays in the doc.
+  if (t.question) return t.author === "person" && !reply;
+  const latest = reply ?? t;
+  return plan.state === "redirected" && plan.verdict?.rev === plan.rev
+    && latest.author === "person" && !reply?.from_supervisor && latest.sent === true;
+}
+
+export function SupervisorReplying() {
+  return (
+    <div className={onLine} role="status" data-state="supervisor-replying">
+      <Who who="person" supervisor><span className="font-normal text-ink-3"> is replying</span></Who>
+      <span aria-hidden="true" className="flex shrink-0 gap-0.5">
+        <span className="size-1 rounded-full bg-current motion-safe:animate-pulse" />
+        <span className="size-1 rounded-full bg-current motion-safe:animate-pulse [animation-delay:150ms]" />
+        <span className="size-1 rounded-full bg-current motion-safe:animate-pulse [animation-delay:300ms]" />
+      </span>
+    </div>
+  );
+}
+
+function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, judge, supervisorReplying }: {
   thread: PlanThreadDTO;
   where: string;
   busy: boolean;
@@ -93,15 +116,11 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
   active?: boolean;
   /* Who accepts or rejects a suggestion, said where this person can't. */
   judge?: string;
+  supervisorReplying: boolean;
 }) {
   const [replying, setReplying] = useState(false);
   const [text, setText] = useState("");
   const open = t.status === "open";
-  const latestReply = t.replies?.at(-1);
-  // Questions are routed when posted. Other feedback is marked sent by the verdict that carries it.
-  const supervisorReplying = open && (latestReply
-    ? latestReply.author === "person" && !latestReply.from_supervisor && latestReply.sent
-    : t.author === "person" && (t.question || t.sent));
   const suggestion = t.kind === "suggestion";
   const canJudge = !limits;
   const canResolve = !limits || limits.resolve(t);
@@ -131,7 +150,7 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
       {t.attachments?.map((name) => (
         <span key={name} title={name} className="max-w-full justify-self-start truncate rounded-sm border border-line px-1.5 py-px font-mono text-[11px] text-ink-2">{name}</span>
       ))}
-      {(latestReply || supervisorReplying) && (
+      {(!!t.replies?.length || supervisorReplying) && (
         <div className="ml-[9px] grid gap-1.5 border-l border-line-strong pl-2.5">
           {t.replies?.map((r) => (
             <div key={r.id} className="grid gap-1.5" data-from-supervisor={r.from_supervisor || undefined}>
@@ -142,16 +161,7 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
               <span className="whitespace-pre-wrap break-words">{r.text}</span>
             </div>
           ))}
-          {supervisorReplying && (
-            <div className={onLine} role="status" data-state="supervisor-replying">
-              <Who who="person" supervisor><span className="font-normal text-ink-3"> is replying</span></Who>
-              <span aria-hidden="true" className="flex shrink-0 gap-0.5">
-                <span className="size-1 rounded-full bg-current motion-safe:animate-pulse" />
-                <span className="size-1 rounded-full bg-current motion-safe:animate-pulse [animation-delay:150ms]" />
-                <span className="size-1 rounded-full bg-current motion-safe:animate-pulse [animation-delay:300ms]" />
-              </span>
-            </div>
-          )}
+          {supervisorReplying && <SupervisorReplying />}
         </div>
       )}
       {replying && (
@@ -265,7 +275,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
   const answered = threads.filter((t) => t.status !== "open");
   const counts: Record<ReviewTab, string | null> = { comments: String(open.length), decisions: todo.length ? `${decided}/${todo.length}` : null, history: null, tasks: null };
   const nextNumber = Math.max(0, ...threads.map((t) => t.id)) + 1;
-  const thread = (t: PlanThreadDTO) => <Thread key={t.id} thread={t} where={where(t)} busy={busy} can={plan.state === "open"} limits={limits} actions={actions} onShow={() => onShow(t)} active={active === t.id} judge={judge} />;
+  const thread = (t: PlanThreadDTO) => <Thread key={t.id} thread={t} where={where(t)} busy={busy} can={plan.state === "open"} limits={limits} actions={actions} onShow={() => onShow(t)} active={active === t.id} judge={judge} supervisorReplying={isSupervisorReplying(t, plan)} />;
   let body: ReactNode;
   if (tab === "tasks") {
     body = (
