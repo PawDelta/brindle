@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { DaemonError, type DesignShareLink, type SharedDesign } from "../../../api/client";
+import { DaemonError, toBase64, type DesignShareLink, type SharedDesign } from "../../../api/client";
+import { FakeDaemon } from "../../../test/fakeDaemon";
 import type { ShareLinkClient, SharedDesignClient } from "./client";
 import { SharedDesignReader } from "./SharedDesignReader";
 import { AccessRequest } from "./AccessRequest";
@@ -53,6 +54,41 @@ it("shows a commenter's optional sign-off beside the required reviewer's", async
   expect(sheet.getByTestId("signoff-u_me").dataset.signOff).toBe("optional");
   expect(sheet.getByTestId("signoff-u_required").dataset.state).toBe("waiting");
   expect(screen.queryByTestId("plan-sign-off")).toBeNull();
+});
+
+it("uses live optional sign-offs when the HTTP snapshot is stale for the same revision", async () => {
+  const doc: SharedDesign = {
+    ...design, sign_off: "optional", signed_off: true,
+    sign_offs: [{ sub: "u_me", rev: 1, at: 1, optional: true }],
+    gate: { ...design.gate!, waiting_on: ["u_required"], reviewers: [{ sub: "u_required", required: true, status: "waiting" }] },
+  };
+  const daemon = new FakeDaemon();
+  const live = daemon.client();
+  const text = daemon.seedLive(doc.id, { s: "Workers run here." }, { author: "u_author", me: doc.me });
+  const version = { id: doc.rev, writers: [], signOffs: ["u_me"], snapshot: toBase64(text.export({ mode: "snapshot" })) };
+  daemon.setLiveState(doc.id, { lock: "sign_off", version });
+  const client = {
+    visualLive: live.visualLive.bind(live),
+    sharedDesign: async () => doc,
+    writeSharedDesign: async () => doc,
+    libraryPeople: async () => ({ people: [] }),
+  };
+  await act(async () => { render(<SharedDesignReader client={client} docId={doc.id} onBack={() => {}} />); });
+  fireEvent.click(screen.getByRole("tab", { name: /Decisions/ }));
+  const sheet = within(screen.getByTestId("plan-signoffs"));
+  const ownRow = () => sheet.getByTestId("signoff-u_me");
+  expect(ownRow().dataset.state).toBe("signed");
+
+  await act(async () => daemon.setLiveState(doc.id, { version: { ...version, signOffs: [] } }));
+  expect(ownRow().dataset.state).toBe("waiting");
+
+  await act(async () => daemon.setLiveState(doc.id, {
+    version: { ...version, signOffs: ["u_new"], optionalSignOffs: ["u_new"] },
+  }));
+  expect(ownRow().dataset.state).toBe("waiting");
+  const newRow = sheet.getByTestId("signoff-u_new");
+  expect(newRow.dataset.state).toBe("signed");
+  expect(newRow.dataset.signOff).toBe("optional");
 });
 
 it.each(["s", "context"])("asks the author for access and keeps a sent request disabled in section %s", async (section) => {

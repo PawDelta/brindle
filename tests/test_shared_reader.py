@@ -135,7 +135,7 @@ def test_a_teammates_frozen_version_carries_the_librarys_sign_offs_and_their_own
 
     relay = FakeRelay(Clock(), author="u_author")
     relay.frozen = lib.rev = 2                          # version 2 is out for sign-off
-    lib.sign_offs = [{"sub": "u_other", "rev": 1, "at": 1.0}]      # signed an earlier version only
+    lib.sign_offs = [{"sub": "u_old", "rev": 1, "at": 1.0, "optional": True}]
     here = live_docs.Manager(relay.transport("user_1"), available=lambda: True, drive=False)
     built = build_app(TOKEN)
     built.state.live_docs = here
@@ -152,8 +152,11 @@ def test_a_teammates_frozen_version_carries_the_librarys_sign_offs_and_their_own
             first = state(window)
             assert (first["lock"], first["version"]["id"], first["version"]["signOffs"]) == ("sign_off", 2, [])
             assert client.post(f"{ROUTE}/sign-offs", json={"rev": 2}).json()["signed_off"] is True
+            lib.sign_offs.append({"sub": "u_guest", "rev": 2, "at": 10.0, "optional": True})
             window.send_json({"refresh": True})
-            assert state(window)["version"]["signOffs"] == ["user_1"]
+            version = state(window)["version"]
+            assert version["signOffs"] == ["user_1", "u_guest"]
+            assert version["optionalSignOffs"] == ["u_guest"]
         client.portal.call(here.stop)
     assert not db.conn.execute("SELECT 1 FROM plan_shares").fetchone()
 

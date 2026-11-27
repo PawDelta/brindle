@@ -211,9 +211,11 @@ def _frozen_version(db: DB, doc_id: str, frozen: Any, review: dict | None = None
                 if who and who not in seen:
                     seen.add(who)
                     writers.append(who)
-    signed = [s["sub"] for s in review.get("sign_offs") or []
-              if isinstance(s, dict) and isinstance(s.get("sub"), str) and s.get("rev") == rev]
-    return {"id": rev, "writers": writers, "signOffs": signed, "snapshot": _b64(SharedDoc.new(sections).export_snapshot())}
+    sign_offs = [s for s in review.get("sign_offs") or []
+                 if isinstance(s, dict) and isinstance(s.get("sub"), str) and s.get("rev") == rev]
+    return {"id": rev, "writers": writers, "signOffs": [s["sub"] for s in sign_offs],
+            "optionalSignOffs": [s["sub"] for s in sign_offs if s.get("optional") is True],
+            "snapshot": _b64(SharedDoc.new(sections).export_snapshot())}
 
 
 def unsent(db: DB, doc_id: str) -> bool:

@@ -1003,13 +1003,16 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     state: r.status === "signed_off" ? "signed" : r.status === "changes_requested" ? "changes" : r.status === "waived" ? "waived" : "waiting",
   }));
   const sheetRev = frozen?.id ?? plan.rev;
+  const optionalSigners = frozen?.optionalSignOffs ?? (teammate?.signOffs ?? [])
+    .filter((r) => r.rev === sheetRev && r.optional).map((r) => r.sub);
+  const liveSigners = frozen && new Set(frozen.signOffs);
   const listed = new Set(sheetRows.map((r) => r.key));
-  for (const r of teammate?.signOffs ?? []) {
-    if (r.rev !== sheetRev || !r.optional || listed.has(r.sub)) continue;
-    const you = r.sub === teammate?.me;
-    const name = nameOf(r.sub);
-    sheetRows.push({ key: r.sub, who: you ? "person" : name, name: you ? "You" : personName(name), required: false, state: "signed" });
-    listed.add(r.sub);
+  for (const sub of optionalSigners) {
+    if (listed.has(sub) || (liveSigners && !liveSigners.has(sub))) continue;
+    const you = sub === teammate?.me;
+    const name = nameOf(sub);
+    sheetRows.push({ key: sub, who: you ? "person" : name, name: you ? "You" : personName(name), required: false, state: "signed" });
+    listed.add(sub);
   }
   if (teammate?.me && teammate.signOff === "optional" && sheetRev === plan.rev && !listed.has(teammate.me)) {
     sheetRows.push({ key: teammate.me, who: "person", name: "You", required: false, state: teammate.signedOff ? "signed" : "waiting" });
