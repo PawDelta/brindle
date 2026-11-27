@@ -80,7 +80,14 @@ const MOVED = new Set(["stale", "decided", "conflict", "withdrawn"]);
 
 /* The person's own footer actions, and one of them to run again after the network stopped it. */
 type Actions = { decide(approved: boolean, shared?: boolean): Promise<void>; cancelPlanning(): Promise<void>; stopSharing(): Promise<void>; signOff(): Promise<void> };
-type Again = { plan: string; rev: number; run(a: Actions): Promise<void> };
+/* `version`: the frozen review version on screen when it was asked: a verdict or sign-off is never
+   sent again for a version the person didn't see. */
+type Again = { kind: "decide" | "cancel" | "stopSharing" | "signOff"; plan: string; rev: number; version: number | undefined; run(a: Actions): Promise<void> };
+/* Whether a stopped action may run again now: the same plan, revision and frozen version are on
+   screen, it isn't an old revision, and the screen still offers that action. */
+export function mayRunAgain(a: Pick<Again, "plan" | "rev" | "version">, now: { plan: string; rev: number; version: number | undefined; historical: boolean; offered: boolean }): boolean {
+  return a.plan === now.plan && a.rev === now.rev && a.version === now.version && !now.historical && now.offered;
+}
 function refusal(e: unknown): string {
   if (!(e instanceof DaemonError)) return `Couldn't send: ${message(e)}`;
   if (e.code === "gate_unverified") return message(e);
@@ -838,7 +845,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
      frozen version to wait for or to name. */
   const decide = async (approved: boolean, shared = true) => {
     if (historical || !client || (approved && shared && reviewBlocked)) return;
-    asking.current = { plan: plan.id, rev: plan.rev, run: (a) => a.decide(approved, shared) };
+    asking.current = { kind: "decide", plan: plan.id, rev: plan.rev, version: reviewVersion, run: (a) => a.decide(approved, shared) };
     setSending(approved ? "approve" : "changes");
     const version = shared ? reviewVersion : undefined;
     const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(version === undefined ? {} : { version }), ...(attached.length ? { attachments: attached } : {}) }));
@@ -854,7 +861,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   /* Close the plan without approving it: nothing is built or sent to the Library, and the tasks it held wait for the supervisor. */
   const cancelPlanning = async () => {
     if (historical || !client || !client.cancelPlan) return;
-    asking.current = { plan: plan.id, rev: plan.rev, run: (a) => a.cancelPlanning() };
+    asking.current = { kind: "cancel", plan: plan.id, rev: plan.rev, version: reviewVersion, run: (a) => a.cancelPlanning() };
     setSending("cancel");
     const now = await send(() => client.cancelPlan!(plan.id, plan.rev));
     if (!alive.current) return;
@@ -868,7 +875,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const stopSharing = async () => {
     if (historical) return;
     const read = shownTexts;
-    asking.current = { plan: plan.id, rev: plan.rev, run: (a) => a.stopSharing() };
+    asking.current = { kind: "stopSharing", plan: plan.id, rev: plan.rev, version: reviewVersion, run: (a) => a.stopSharing() };
     setSending("approve");
     const now = await send(() => sharing!.stopSharingPlan!(plan.id, plan.rev));
     if (now && read && [...read].some(([id, text]) => (id === LEDE ? now.lede : now.sections.find((s) => s.id === id)?.markdown) !== text)) {
@@ -880,16 +887,21 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   };
   const signOff = async () => {
     if (historical || !source.signOff || reviewBlocked) return;
-    asking.current = { plan: plan.id, rev: plan.rev, run: (a) => a.signOff() };
+    asking.current = { kind: "signOff", plan: plan.id, rev: plan.rev, version: reviewVersion, run: (a) => a.signOff() };
     setSending("approve");
     if (await write(() => source.signOff!(plan.rev, reviewVersion)) && frozen) setRefreshes((n) => n + 1);
     if (alive.current) setSending(null);
   };
   // Try again runs the person's action as this render has it (its guards, drafts and revision),
-  // and only while the plan on screen is still the one it was asked for.
+  // and only while the plan, revision and frozen version on screen are the ones it was asked for
+  // and the screen still offers that action.
   const footerActions = useRef<Actions | null>(null);
   footerActions.current = { decide, cancelPlanning, stopSharing, signOff };
-  const tryAgain = again && again.plan === plan.id && again.rev === plan.rev && !historical
+  const offered = (a: Again) => a.kind === "stopSharing"
+    ? !!(open && gate?.unconfirmed?.can_stop_sharing && !next && sharing?.stopSharingPlan)
+    : a.kind === "signOff" ? !!source.signOff && !reviewBlocked
+    : open;
+  const tryAgain = again && mayRunAgain(again, { plan: plan.id, rev: plan.rev, version: reviewVersion, historical: !!historical, offered: offered(again) })
     ? () => { if (footerActions.current) void again.run(footerActions.current); } : undefined;
   // A write that may change the review (the Share panel's sign-off) asks for the frozen version again.
   const reviewWrite = async (work: () => Promise<Plan>) => {

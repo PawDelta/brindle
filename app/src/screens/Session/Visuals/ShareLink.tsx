@@ -121,12 +121,17 @@ export function ShareLinkPanel({ target, state, onState }: {
   // The audiences to pick from, read for the design open now; a failed read has its own Try again.
   const [scopesRead, setScopesRead] = useState<{ pending: boolean; why?: string; net?: LibraryNetwork | null }>({ pending: false });
   const [scopesAgain, setScopesAgain] = useState(0);
+  // A change of design (or of whether it is scoped) starts the menu over.
   useEffect(() => {
-    let active = true;
-    setScopes(null);
     setError(null);
     setCopied(false);
     setBusy(false);
+  }, [target.key, state.scoped]);
+  // The audience read has its own lifecycle: reading it again leaves a change still out (or its
+  // failure and Try again) as it is.
+  useEffect(() => {
+    let active = true;
+    setScopes(null);
     const read = state.scoped ? latest.current.scopes : undefined;
     setScopesRead({ pending: !!read });
     read?.().then(
