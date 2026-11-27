@@ -29,7 +29,7 @@
 
 import { Suspense, lazy, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent, type ReactNode, type TextareaHTMLAttributes } from "react";
 import { LoroDoc } from "loro-crdt";
-import { DaemonError, fromBase64, type DaemonClient, type DocRevisionComparison, type DocScope, type LibraryPerson, type LiveDocState, type Plan, type PlanAnchor, type PlanChange, type VisualDTO } from "../../../api/client";
+import { DaemonError, fromBase64, type DaemonClient, type DocRevisionComparison, type DocScope, type LibraryPerson, type LiveDocState, type Plan, type PlanAnchor, type PlanChange, type SharedDesign, type VisualDTO } from "../../../api/client";
 import { liveReviewGate } from "../../../api/liveReview";
 import type { PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
 import { DocReference } from "../../../components/DocReference";
@@ -348,6 +348,8 @@ function LibrarySignIn() {
 export interface Teammate {
   me?: string;
   rights: { comment: boolean; suggest: boolean; signOff: boolean };
+  signOff?: SharedDesign["sign_off"];
+  signOffs?: SharedDesign["sign_offs"];
   signedOff: boolean;
   author: string | null;
   directory: LibraryPerson[];
@@ -1000,6 +1002,18 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     key: r.sub!, who: r.you ? "person" : nameOf(r.sub!), name: r.you ? "You" : personName(nameOf(r.sub!)), required: r.required,
     state: r.status === "signed_off" ? "signed" : r.status === "changes_requested" ? "changes" : r.status === "waived" ? "waived" : "waiting",
   }));
+  const sheetRev = frozen?.id ?? plan.rev;
+  const listed = new Set(sheetRows.map((r) => r.key));
+  for (const r of teammate?.signOffs ?? []) {
+    if (r.rev !== sheetRev || !r.optional || listed.has(r.sub)) continue;
+    const you = r.sub === teammate?.me;
+    const name = nameOf(r.sub);
+    sheetRows.push({ key: r.sub, who: you ? "person" : name, name: you ? "You" : personName(name), required: false, state: "signed" });
+    listed.add(r.sub);
+  }
+  if (teammate?.me && teammate.signOff === "optional" && sheetRev === plan.rev && !listed.has(teammate.me)) {
+    sheetRows.push({ key: teammate.me, who: "person", name: "You", required: false, state: teammate.signedOff ? "signed" : "waiting" });
+  }
   const sinceRevs = lastRead !== null && lastRead < plan.rev ? (plan.revisions ?? []).filter((r) => r.rev > lastRead).map((r) => ({ rev: r.rev, sections: (r.changed ?? []).map((id) => partName(id)) })) : null;
   const sheet = gate && (frozen || !useLiveReview) ? (
     <SignOffSheet version={frozen ? `version ${frozen.id}` : `rev ${plan.rev}`} rows={sheetRows} since={sinceRevs && lastRead !== null ? { from: lastRead, changes: sinceRevs } : null} onShowChanges={() => setTab("history")} />

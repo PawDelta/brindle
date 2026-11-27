@@ -107,6 +107,25 @@ def test_teammate_reads_writes_as_themselves_and_nothing_is_kept(db, lib, app):
     assert not [k for k, _, _ in lib.calls.calls if k.startswith((f"POST {DESIGN}/edits", f"POST {DESIGN}/revisions"))]
 
 
+def test_commenter_can_sign_off_when_the_library_allows_it(lib, app):
+    lib.reviewers = [{"sub": "u_other", "required": True}]
+    lib.permissions["user_1"]["can_suggest"] = False
+    lib.sign_offs = [{"sub": "u_guest", "rev": 1, "at": 1.0, "optional": True}]
+    route = f"GET {DESIGN}"
+    assert app.get(ROUTE).json()["can_sign_off"] is False
+
+    lib.calls.routes[route] = lambda f, h: (200, {**lib.view(), "can_sign_off": True, "sign_off": "optional"})
+    read = app.get(ROUTE).json()
+    assert read["can_sign_off"] is True
+    assert read["sign_off"] == "optional"
+    assert read["sign_offs"] == lib.sign_offs
+    assert read["gate"]["waiting_on"] == ["u_other"]
+
+    lib.reviewers.append({"sub": "user_1", "required": True})
+    lib.calls.routes[route] = lambda f, h: (200, {**lib.view(), "can_sign_off": False, "sign_off": "required"})
+    assert app.get(ROUTE).json()["can_sign_off"] is False
+
+
 def test_a_teammates_frozen_version_carries_the_librarys_sign_offs_and_their_own_once_signed(db, lib):
     """A teammate keeps no plan here, so the live channel reads a frozen
     version's sign-offs from the Library itself; once they sign off, their

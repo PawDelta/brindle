@@ -73,6 +73,8 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
   const teammate: Teammate | undefined = shown ? {
     me: shown.me,
     rights: { comment: shown.can_comment ?? false, suggest: shown.can_suggest ?? false, signOff: shown.can_sign_off ?? false },
+    signOff: shown.sign_off,
+    signOffs: shown.sign_offs,
     signedOff: shown.signed_off ?? false,
     author: shown.author ?? null,
     directory,

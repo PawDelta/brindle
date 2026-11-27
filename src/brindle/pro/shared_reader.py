@@ -112,8 +112,9 @@ def _can(view: dict, me: str, name: str) -> bool:
 
 
 def _can_sign(view: dict, me: str, author: Any) -> bool:
-    """False only when this account can't be a signer: a covering rule may count
-    people the view doesn't name, and for those the Library's answer decides."""
+    """Use the Library's decision, or infer eligibility on older servers."""
+    if "can_sign_off" in view:
+        return view["can_sign_off"] is True
     people = view.get("reviewers") or []
     return me == author or bool(view.get("policy_reviewers")) or any(isinstance(r, dict) and r.get("sub") == me for r in people)
 
@@ -145,6 +146,11 @@ def _dto(doc_id: str, view: dict, me: str, *, review: bool = True, names: dict |
     for thread in threads:
         for row in [thread, *thread["replies"]]:
             row["author_name"] = (names or {}).get(row["author"], "A teammate") if row["author"] != plan_docs.PERSON else None
+    sign_off = view.get("sign_off") if review else None
+    raw_sign_offs = view.get("sign_offs") if review else None
+    sign_offs = [{"sub": s["sub"], "rev": s["rev"], "at": _at(s.get("at")), "optional": s.get("optional")}
+                 for s in (raw_sign_offs or []) if isinstance(s, dict)
+                 and isinstance(s.get("sub"), str) and isinstance(s.get("rev"), int)]
     return SharedDesignDTO(
         id=doc_id, session="", title=view.get("title") or UNTITLED, rev=view["rev"], state="open", ask=content["ask"],
         markdown=content["markdown"], lede=content["lede"], sections=content["sections"], decisions=decisions,
@@ -157,9 +163,10 @@ def _dto(doc_id: str, view: dict, me: str, *, review: bool = True, names: dict |
         can_edit=_can(view, me, "can_edit"),     # may write in its live draft (the reader's Editing)
         can_comment=_can(view, me, "can_comment"), can_suggest=_can(view, me, "can_suggest"),
         can_sign_off=review and _can_sign(view, me, author),
+        sign_off=sign_off if sign_off in ("required", "optional") else None,
+        sign_offs=sign_offs,
         access_request=view.get("access_request"),
-        signed_off=any(isinstance(s, dict) and s.get("sub") == me and s.get("rev") == view["rev"]
-                       for s in view.get("sign_offs") or [])).to_json()
+        signed_off=any(s["sub"] == me and s["rev"] == view["rev"] for s in sign_offs)).to_json()
 
 
 def _title(doc_id: str, client, store) -> str | None:

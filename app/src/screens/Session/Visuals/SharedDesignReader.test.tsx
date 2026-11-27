@@ -28,6 +28,33 @@ it.each([
   if (!can_comment) expect(screen.queryByRole("button", { name: "Comment" })).toBeNull();
 });
 
+it("shows a commenter's optional sign-off beside the required reviewer's", async () => {
+  let doc: SharedDesign = {
+    ...design, can_edit: false, can_suggest: false, sign_off: "optional",
+    gate: { ...design.gate!, waiting_on: ["u_required"], reviewers: [{ sub: "u_required", required: true, status: "waiting" }] },
+  };
+  const client: SharedDesignClient = {
+    sharedDesign: async () => doc,
+    writeSharedDesign: async () => (doc = {
+      ...doc, can_sign_off: false, signed_off: true, sign_off: null,
+      sign_offs: [{ sub: "u_me", rev: 1, at: 1, optional: true }],
+    }),
+    libraryPeople: async () => ({ people: [] }),
+  };
+  await act(async () => { render(<SharedDesignReader client={client} docId="doc_1" onBack={() => {}} />); });
+  expect(screen.getByTestId("plan-sign-off").hasAttribute("disabled")).toBe(false);
+  fireEvent.click(screen.getByRole("tab", { name: /Decisions/ }));
+  const sheet = within(screen.getByTestId("plan-signoffs"));
+  expect(sheet.getByTestId("signoff-u_me").dataset.signOff).toBe("optional");
+  expect(sheet.getByTestId("signoff-u_required").dataset.signOff).toBe("required");
+
+  await act(async () => fireEvent.click(screen.getByTestId("plan-sign-off")));
+  expect(sheet.getByTestId("signoff-u_me").dataset.state).toBe("signed");
+  expect(sheet.getByTestId("signoff-u_me").dataset.signOff).toBe("optional");
+  expect(sheet.getByTestId("signoff-u_required").dataset.state).toBe("waiting");
+  expect(screen.queryByTestId("plan-sign-off")).toBeNull();
+});
+
 it.each(["s", "context"])("asks the author for access and keeps a sent request disabled in section %s", async (section) => {
   const requests: string[] = [];
   const client: SharedDesignClient = {
