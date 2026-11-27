@@ -77,6 +77,10 @@ const noSubscribe = () => () => {};
    a verdict given elsewhere): the doc is read again. Any other refusal (a template's empty required
    section, a closed gate, a lock) says why in the engine's or the Library's own words. */
 const MOVED = new Set(["stale", "decided", "conflict", "withdrawn"]);
+
+/* The person's own footer actions, and one of them to run again after the network stopped it. */
+type Actions = { decide(approved: boolean, shared?: boolean): Promise<void>; cancelPlanning(): Promise<void>; stopSharing(): Promise<void>; signOff(): Promise<void> };
+type Again = { plan: string; rev: number; run(a: Actions): Promise<void> };
 function refusal(e: unknown): string {
   if (!(e instanceof DaemonError)) return `Couldn't send: ${message(e)}`;
   if (e.code === "gate_unverified") return message(e);
@@ -466,7 +470,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const [error, setError] = useState<string | null>(null);
   /* A write the network stopped: a calm note, and Try again sends the same write. */
   const [net, setNet] = useState<LibraryNetwork | null>(null);
-  const sendAgain = useRef<(() => void) | null>(null);
+  const asking = useRef<Again | null>(null);
+  const [again, setAgain] = useState<Again | null>(null);
   const slow = useSlowPending(busy);
   const [picked, setPicked] = useState<Picked | null>(null);
   // What the person is writing belongs to the text it was started on (`source`): the doc stays
@@ -635,7 +640,11 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     setBusy(true);
     setError(null);
     setNet(null);
-    sendAgain.current = () => void send(work, refused);
+    // The person's own action this write belongs to (a verdict, a sign-off), if any: Try again runs
+    // that action again, as it is now. A write from a card or thread has none; its own control stays.
+    const mine = asking.current;
+    asking.current = null;
+    setAgain(null);
     try {
       const now = await work();
       writes.end(now);
@@ -643,7 +652,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     } catch (e) {
       writes.end(null);
       refused?.(e);
-      if (alive.current) { setError(refusal(e)); setNet(libraryNetwork(e)); }
+      if (alive.current) { setError(refusal(e)); setNet(libraryNetwork(e)); setAgain(mine); }
       return null;
     } finally {
       if (alive.current) setBusy(false);
@@ -653,7 +662,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const footerNotes = (span: string) => <>
     {slow && <SlowConnectionNote className={`m-0 ${span} text-xs text-ink-3`} />}
     {error && net && <LibraryNetworkNote state={net} className={`m-0 flex ${span} items-center gap-2 text-xs text-ink-2`}
-      buttonClassName={`${quiet} px-2 text-xs`} onTryAgain={busy ? undefined : () => sendAgain.current?.()} />}
+      buttonClassName={`${quiet} px-2 text-xs`} onTryAgain={busy ? undefined : tryAgain} />}
   </>;
   // Own answers on a decision card (brindle/plan_answers.py). Adding one picks it and removing one
   // drops its pick, so the engine's `confirmed` speaks for the card from then on.
@@ -829,6 +838,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
      frozen version to wait for or to name. */
   const decide = async (approved: boolean, shared = true) => {
     if (historical || !client || (approved && shared && reviewBlocked)) return;
+    asking.current = { plan: plan.id, rev: plan.rev, run: (a) => a.decide(approved, shared) };
     setSending(approved ? "approve" : "changes");
     const version = shared ? reviewVersion : undefined;
     const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(version === undefined ? {} : { version }), ...(attached.length ? { attachments: attached } : {}) }));
@@ -844,6 +854,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   /* Close the plan without approving it: nothing is built or sent to the Library, and the tasks it held wait for the supervisor. */
   const cancelPlanning = async () => {
     if (historical || !client || !client.cancelPlan) return;
+    asking.current = { plan: plan.id, rev: plan.rev, run: (a) => a.cancelPlanning() };
     setSending("cancel");
     const now = await send(() => client.cancelPlan!(plan.id, plan.rev));
     if (!alive.current) return;
@@ -857,6 +868,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const stopSharing = async () => {
     if (historical) return;
     const read = shownTexts;
+    asking.current = { plan: plan.id, rev: plan.rev, run: (a) => a.stopSharing() };
     setSending("approve");
     const now = await send(() => sharing!.stopSharingPlan!(plan.id, plan.rev));
     if (now && read && [...read].some(([id, text]) => (id === LEDE ? now.lede : now.sections.find((s) => s.id === id)?.markdown) !== text)) {
@@ -868,10 +880,17 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   };
   const signOff = async () => {
     if (historical || !source.signOff || reviewBlocked) return;
+    asking.current = { plan: plan.id, rev: plan.rev, run: (a) => a.signOff() };
     setSending("approve");
     if (await write(() => source.signOff!(plan.rev, reviewVersion)) && frozen) setRefreshes((n) => n + 1);
     if (alive.current) setSending(null);
   };
+  // Try again runs the person's action as this render has it (its guards, drafts and revision),
+  // and only while the plan on screen is still the one it was asked for.
+  const footerActions = useRef<Actions | null>(null);
+  footerActions.current = { decide, cancelPlanning, stopSharing, signOff };
+  const tryAgain = again && again.plan === plan.id && again.rev === plan.rev && !historical
+    ? () => { if (footerActions.current) void again.run(footerActions.current); } : undefined;
   // A write that may change the review (the Share panel's sign-off) asks for the frozen version again.
   const reviewWrite = async (work: () => Promise<Plan>) => {
     if (historical) return false;

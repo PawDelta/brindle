@@ -39,6 +39,12 @@ export function LibraryNetworkNote({ state, onTryAgain, className = "msg", butto
   </div>;
 }
 
+/* The same, inline on a row whose write failed: the row keeps its own Try again. */
+const SHORT: Record<LibraryNetwork, string> = { slow: "Slow connection", offline: "Offline" };
+export function LibraryNetworkLabel({ state }: { state: LibraryNetwork }) {
+  return <span className="st" data-testid="library-network" data-state={state} title={SAY[state]}>{SHORT[state]}</span>;
+}
+
 export function SlowConnectionNote({ className = "msg" }: { className?: string }) {
   return <div className={className} role="status" data-testid="library-slow" data-state="slow">Slow connection, still working…</div>;
 }

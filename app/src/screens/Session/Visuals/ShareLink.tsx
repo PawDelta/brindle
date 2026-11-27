@@ -44,6 +44,8 @@ export function useShareLink(target: ShareLinkTarget | undefined, fresh?: unknow
   const [state, setRead] = useState<DesignShareLink | null>(null);
   const [blocked, setBlocked] = useState<{ reason: string; reading: boolean; network?: LibraryNetwork } | null>(null);
   const [reads, setReads] = useState(0);
+  /* A read is out (the first one included): a slow one says so. */
+  const [pending, setPending] = useState(false);
   const latest = useRef(target);
   latest.current = target;
   const generation = useRef(0);
@@ -52,18 +54,22 @@ export function useShareLink(target: ShareLinkTarget | undefined, fresh?: unknow
     generation.current++;
     setRead(null);
     setBlocked(null);
+    setPending(false);
   }, [key]);
   useEffect(() => {
     const t = latest.current;
     if (!t) return;
     const asked = ++generation.current;
+    setPending(true);
     setBlocked((current) => current && { ...current, reading: true });
     t.read().then((got) => {
       if (generation.current !== asked) return;
+      setPending(false);
       setRead(got);
       setBlocked(null);
     }, (e: unknown) => {
       if (generation.current !== asked) return;
+      setPending(false);
       const network = libraryNetwork(e);
       if (e instanceof DaemonError && (e.code === "busy" || network)) {
         setBlocked({ reason: e.message, reading: false, network: network ?? undefined });
@@ -75,12 +81,15 @@ export function useShareLink(target: ShareLinkTarget | undefined, fresh?: unknow
     generation.current++;
     setRead(next);
     setBlocked(null);
+    setPending(false);
   }, []);
-  return { state, setState, blocked, readAgain: () => setReads((n) => n + 1) };
+  return { state, setState, blocked, pending, readAgain: () => setReads((n) => n + 1) };
 }
 
 export function ShareLinkSection({ target, link }: { target: ShareLinkTarget; link: ReturnType<typeof useShareLink> }) {
+  const slow = useSlowPending(link.pending);
   return <>
+    {slow && <section className="sec" aria-label="Plan link"><SlowConnectionNote /></section>}
     {link.blocked && <section className="sec" aria-label="Plan link">
       {link.blocked.network
         ? <LibraryNetworkNote state={link.blocked.network} onTryAgain={link.blocked.reading ? undefined : link.readAgain} />
@@ -109,18 +118,23 @@ export function ShareLinkPanel({ target, state, onState }: {
   useEffect(() => { setPermission(state.link?.permission ?? "view"); }, [target.key, state.link?.permission]);
   const latest = useRef(target);
   latest.current = target;
+  // The audiences to pick from, read for the design open now; a failed read has its own Try again.
+  const [scopesRead, setScopesRead] = useState<{ pending: boolean; why?: string; net?: LibraryNetwork | null }>({ pending: false });
+  const [scopesAgain, setScopesAgain] = useState(0);
   useEffect(() => {
     let active = true;
     setScopes(null);
     setError(null);
     setCopied(false);
     setBusy(false);
-    if (state.scoped) latest.current.scopes?.().then(
-      (got) => { if (active) setScopes(got.scopes); },
-      (e) => { if (active) setError(message(e)); },
+    const read = state.scoped ? latest.current.scopes : undefined;
+    setScopesRead({ pending: !!read });
+    read?.().then(
+      (got) => { if (active) { setScopes(got.scopes); setScopesRead({ pending: false }); } },
+      (e) => { if (active) setScopesRead({ pending: false, why: message(e), net: libraryNetwork(e) }); },
     );
     return () => { active = false; };
-  }, [target.key, state.scoped]);
+  }, [target.key, state.scoped, scopesAgain]);
   // Whose answer this is: a design switched under an open menu drops the earlier one's.
   const asked = useRef(target.key);
   asked.current = target.key;
@@ -179,7 +193,7 @@ export function ShareLinkPanel({ target, state, onState }: {
     const got = await target.revoke();
     return { ...state, ...got, access: state.access ?? state.link?.access };
   });
-  const slow = useSlowPending(busy);
+  const slow = useSlowPending(busy || scopesRead.pending);
   const link = state.link;
   const locked =state.access === "off" || link?.access === "off";
   return (
@@ -202,6 +216,9 @@ export function ShareLinkPanel({ target, state, onState }: {
         {link && <p className="hint">People with access can open this plan in their browser. Everyone else sees a page saying it couldn't be found.</p>}
       </>}
       {slow && <SlowConnectionNote />}
+      {scopesRead.net && <LibraryNetworkNote state={scopesRead.net} onTryAgain={() => setScopesAgain((n) => n + 1)} />}
+      {scopesRead.why && !scopesRead.net && <div className="msg bad" role="alert" data-testid="share-link-scopes-error"><span className="grow">{scopesRead.why}</span>
+        <button type="button" className="sp-btn q end" onClick={() => setScopesAgain((n) => n + 1)}>Try again</button></div>}
       {error && net && <LibraryNetworkNote state={net} onTryAgain={() => { if (last.current) void run(last.current.call, last.current.after); }} />}
       {error && !net && <p role="alert" className="hint bad">{error}</p>}
     </section>

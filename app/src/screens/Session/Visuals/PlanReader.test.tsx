@@ -534,6 +534,26 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   expect(decided).toEqual([true]);
 });
 
+it("an approval the network stopped shows a calm note, and Try again approves through the same action", async () => {
+  let plan = doc(1, "Workers run on your machine.");
+  const sent: { rev: number; approved: boolean }[] = [];
+  const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...docWrites(() => plan), plan: async () => plan,
+    decidePlan: async (_id, verdict) => {
+      sent.push({ rev: verdict.rev, approved: verdict.approved });
+      if (sent.length === 1) throw new DaemonError("library_offline", "Couldn't reach brindle Pro.", 503);
+      return (plan = { ...plan, state: "approved" });
+    } };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const build = await screen.findByTestId("plan-build");
+  await act(async () => fireEvent.click(build));
+  const note = screen.getByTestId("library-network");
+  expect(note.dataset.state).toBe("offline");
+  await act(async () => fireEvent.click(within(note).getByRole("button")));
+  expect(sent).toEqual([{ rev: 1, approved: true }, { rev: 1, approved: true }]);
+  expect(screen.queryByTestId("library-network")).toBeNull();
+  await waitFor(() => expect(screen.queryByTestId("plan-build")).toBeNull());
+});
+
 it("a plan being written offers no sign-off, the same plan can be signed once proposed, and superseded or ended plans stay closed", async () => {
   let plan = doc(0, "", { state: "writing", sections: [] });
   const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan };

@@ -10,7 +10,7 @@ import type { PlanGateRowDTO } from "../../../api/schema";
 import type { Writes } from "./PlanReader";
 import { displayName, initials } from "./PlanCards";
 import { PolicyPreview } from "./DocPolicies";
-import { LibraryNetworkNote, SlowConnectionNote, libraryNetwork, useSlowPending, type LibraryNetwork } from "./LibraryNetwork";
+import { LibraryNetworkLabel, LibraryNetworkNote, SlowConnectionNote, libraryNetwork, useSlowPending, type LibraryNetwork } from "./LibraryNetwork";
 import "./SharePanel.css";
 
 type Scope = { kind: string; id: string };
@@ -67,7 +67,7 @@ type Person = { sub: string; name: string; access: ShareAccessLevel | null; sign
   sent?: ShareQueued["state"] | "unconfirmed"; op?: ShareQueued["op"]; why?: string | null; receipt?: string | null; rev?: number };
 type Work = { key: string; label: string; run(): Promise<Plan> };
 /* A write out now, or one the Library refused, kept so Try again sends the same one. */
-type Busy = Record<string, { state: "saving" | "failed"; refused?: Work; why?: string }>;
+type Busy = Record<string, { state: "saving" | "failed"; refused?: Work; why?: string; net?: LibraryNetwork | null }>;
 
 export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onClose, children, signOff, teams = [], owned = false, previewRules, onStopAll }: {
   plan: Plan; target?: SharePeopleTarget; nameOf(sub: string): string; writes: Writes;
@@ -268,7 +268,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
         if (work.key === "all") latest.current.onStopAll?.();
       } catch (e) {
         const why = e instanceof Error ? e.message : "";
-        if (mounted.current) setBusy((old) => ({ ...old, [work.key]: { state: "failed", refused: work, why } }));
+        if (mounted.current) setBusy((old) => ({ ...old, [work.key]: { state: "failed", refused: work, why, net: libraryNetwork(e) } }));
       } finally {
         flight.current.delete(work.key);
         out.current--;
@@ -335,7 +335,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     const b = busy[key];
     if (!b) return null;
     return b.state === "saving" ? <span className="st"><i className="spin" />Saving…</span>
-      : <><span className="st bad" title={b.why}>{b.refused?.label ?? label}</span><button className="sp-btn q" data-testid={`share-try-${key}`} onClick={() => b.refused && run(b.refused)}>Try again</button>
+      : <>{b.net ? <LibraryNetworkLabel state={b.net} /> : <span className="st bad" title={b.why}>{b.refused?.label ?? label}</span>}<button className="sp-btn q" data-testid={`share-try-${key}`} onClick={() => b.refused && run(b.refused)}>Try again</button>
         {cancel && <button className="sp-btn q end" onClick={cancel}>Cancel</button>}</>;
   };
   const drop = (sub: string) => {

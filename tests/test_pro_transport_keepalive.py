@@ -29,7 +29,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         self.served += 1
-        body = b'{"ok": true}'
+        body = b"<html>not json</html>" if self.path == "/bad" else b'{"ok": true}'
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -67,6 +67,15 @@ def test_requests_reuse_one_connection(server):
     assert auth.UrllibTransport().request("POST", base + "/members", {"a": "b"}, {}) == (
         200, {"ok": True})
     assert len(srv.connections) == 1
+
+
+def test_a_response_that_does_not_decode_drops_its_connection(server):
+    srv, base = server
+    t = auth.UrllibTransport()
+    with pytest.raises(TransportError, match="non-JSON"):
+        t.request("GET", base + "/bad", None, {})
+    assert t.request("GET", base + "/me", None, {}) == (200, {"ok": True})
+    assert len(srv.connections) == 2
 
 
 def test_handshake_timeout_reaches_the_app_as_library_slow(monkeypatch):

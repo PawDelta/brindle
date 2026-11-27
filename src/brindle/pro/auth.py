@@ -301,14 +301,46 @@ class _KeepAlive:
                 conn.close()
                 raise
             break
-        if r.isclosed() and not r.will_close and len(body) <= self.max_bytes \
-                and conn.sock is not None:
-            self.pool.give(key, conn)
-        else:
+        clean = r.isclosed() and not r.will_close and len(body) <= self.max_bytes \
+            and conn.sock is not None
+        if not clean:
             conn.close()   # Connection: close, a partial read or an over-size body
-        resp = urllib.response.addinfourl(io.BytesIO(body), r.msg, req.get_full_url(), r.status)
+        resp = _Held(io.BytesIO(body), r.msg, req.get_full_url(), r.status,
+                     (self.pool, key, conn) if clean else None)
         resp.msg = r.reason
         return resp
+
+
+class _Held(urllib.response.addinfourl):
+    """A buffered response that keeps its connection checked out until the
+    response is closed: then the connection goes back to the pool, unless
+    :meth:`discard` said the response wasn't accepted (it is closed instead).
+    A response nobody closes never returns its connection."""
+
+    def __init__(self, fp, headers, url, code, held) -> None:
+        super().__init__(fp, headers, url, code)
+        self._held = held
+
+    def discard(self) -> None:
+        held, self._held = self._held, None
+        if held:
+            held[2].close()
+
+    def close(self) -> None:
+        held, self._held = self._held, None
+        try:
+            super().close()
+        finally:
+            if held:
+                pool, key, conn = held
+                pool.give(key, conn)
+
+
+def _discard(resp) -> None:
+    """Drop the connection behind ``resp`` (or the response an HTTPError wraps)."""
+    for r in (resp, getattr(resp, "fp", None)):
+        if isinstance(r, _Held):
+            r.discard()
 
 
 class _KeepAliveHTTPSHandler(_KeepAlive, urllib.request.HTTPSHandler):
@@ -415,15 +447,21 @@ class UrllibTransport:
             if network := _network(reason):
                 raise TransportError(NETWORK_MESSAGES[network], network=network) from None
             raise TransportError(f"cannot reach brindle Pro backend: {_sanitize(reason)}") from None
+        # The connection stays checked out until the response is accepted: one
+        # that can't be decoded is dropped, never handed to the next caller.
         with resp:
-            status = resp.status if hasattr(resp, "status") else resp.code
             try:
-                body = resp.read(self.max_bytes + 1)
-            except OSError as e:
-                raise TransportError("error reading the backend response") from e
-        if len(body) > self.max_bytes:
-            raise TransportError("backend response too large")
-        return self._decode_response(status, body, resp.headers.get("Content-Type") or "")
+                status = resp.status if hasattr(resp, "status") else resp.code
+                try:
+                    body = resp.read(self.max_bytes + 1)
+                except OSError as e:
+                    raise TransportError("error reading the backend response") from e
+                if len(body) > self.max_bytes:
+                    raise TransportError("backend response too large")
+                return self._decode_response(status, body, resp.headers.get("Content-Type") or "")
+            except BaseException:
+                _discard(resp)
+                raise
 
 
 # -- client -------------------------------------------------------------------------------------

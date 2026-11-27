@@ -307,6 +307,21 @@ it("a team is shared from the first panel and then listed as a row", async () =>
   expect(screen.queryByTestId("share-team-group-platform")).toBeNull();
 });
 
+it("marks a write the network stopped as slow, and Try again sends the same write", async () => {
+  const lib = library({ shared: false, kept_here: false });
+  const share = lib.target.shareScope;
+  let down = true;
+  lib.target.shareScope = (scope) => down ? Promise.reject(new DaemonError("library_slow", "Couldn't reach brindle Pro.", 503)) : share(scope);
+  await act(async () => render(<Reader lib={lib} />));
+  const team = within(screen.getByTestId("share-team-group-platform"));
+  await act(async () => fireEvent.click(team.getByRole("button", { name: "Share" })));
+  expect(team.getByTestId("library-network").getAttribute("data-state")).toBe("slow");
+  down = false;
+  await act(async () => fireEvent.click(screen.getByTestId("share-try-scope:group:platform")));
+  expect(lib.calls).toEqual(["shareScope group:platform"]);
+  expect(screen.getByTestId("share-scope-group-platform")).toBeTruthy();
+});
+
 it("discards a directory response from a previous opening", async () => {
   const replies: ((people: LibraryPerson[]) => void)[] = [];
   const lib = library();
