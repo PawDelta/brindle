@@ -1185,7 +1185,7 @@ describe("App", () => {
     expect(daemon.requests.some((r) => r.path.endsWith("/pause"))).toBe(false);
   });
 
-  it("keeps a newly launched pane starting until its own window arrives", async () => {
+  it.each(["running", "exited"])("keeps a newly launched pane starting until its own window arrives (%s)", async (registered) => {
     const daemon = new FakeDaemon({
       repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }],
       sessions: [{ ...paused, workspace_id: "other" }],
@@ -1200,9 +1200,9 @@ describe("App", () => {
 
     const snapshot = client.snapshot.bind(client);
     let releaseEarly!: () => void;
-    let releaseLive!: () => void;
+    let releaseRegistered!: () => void;
     const early = new Promise<void>((resolve) => { releaseEarly = resolve; });
-    const live = new Promise<void>((resolve) => { releaseLive = resolve; });
+    const withWindow = new Promise<void>((resolve) => { releaseRegistered = resolve; });
     let readStarted!: () => void;
     const reading = new Promise<void>((resolve) => { readStarted = resolve; });
     vi.spyOn(client, "snapshot").mockImplementationOnce(async () => {
@@ -1211,7 +1211,7 @@ describe("App", () => {
       await early;
       return rows;
     }).mockImplementation(async () => {
-      await live;
+      await withWindow;
       return snapshot();
     });
 
@@ -1236,12 +1236,24 @@ describe("App", () => {
       expect(store.getState().workspaces.flatMap((ws) => ws.agents ?? []).find((a) => a.id === "new1")?.status).toBe("exited");
       expectStarting();
 
-      await act(async () => { releaseLive(); await sync.idle(); });
-      expect(pane().getByTestId("terminal").textContent).toBe("new1");
-      expect(pane().queryByTestId("state-card")).toBeNull();
+      if (registered === "exited") {
+        // The pane registered and exited between snapshots. Its window is still recorded.
+        daemon.data.workspaces = daemon.data.workspaces.map((ws) => ({
+          ...ws,
+          agents: ws.agents?.map((a) => a.id === "new1" ? { ...a, status: "exited" } : a),
+        }));
+      }
+      await act(async () => { releaseRegistered(); await sync.idle(); });
+      if (registered === "exited") {
+        expect(pane().getByTestId("state-card").dataset.kind).toBe("ended");
+        expect(pane().queryByTestId("terminal")).toBeNull();
+      } else {
+        expect(pane().getByTestId("terminal").textContent).toBe("new1");
+        expect(pane().queryByTestId("state-card")).toBeNull();
+      }
     } finally {
       releaseEarly();
-      releaseLive();
+      releaseRegistered();
       daemon.finishLaunch();
       sync.stop();
     }

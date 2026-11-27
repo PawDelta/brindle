@@ -167,11 +167,11 @@ export function SessionScreen({ client, root, repo, launched, refresh, store, ag
     : panes.returning?.includes(root) && !panes.back?.includes(root) ? "recovery named it, not back yet"
     : panes.stale?.includes(root) ? "row not read since its return"
     : panes.unsure ? "engine not heard since connecting" : null;
-  // A launch can answer before a snapshot sees its window. An absent root or a pane
-  // sampled before registration cannot settle this launch. A reported failure can.
+  // A launch can answer before a snapshot sees its window. Once registered, the
+  // window settles the launch even if the pane has already exited.
   const rootAgent = tree?.agent;
-  const launchResolved = !!((session && isPaused(session)) || (rootAgent && rootAgent.status !== "exited" &&
-    (rootAgent.window || rootAgent.locked || PANE_DOWN.has(rootAgent.status))));
+  const launchResolved = !!((session && isPaused(session)) || (rootAgent &&
+    (rootAgent.window || rootAgent.locked || (rootAgent.status !== "exited" && PANE_DOWN.has(rootAgent.status)))));
   const [settledLaunch, setSettledLaunch] = useState<string | null>(null);
   useEffect(() => {
     if (launched && launchResolved) setSettledLaunch(root);
