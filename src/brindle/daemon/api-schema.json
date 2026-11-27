@@ -3749,6 +3749,24 @@
           "default": null,
           "title": "Section"
         },
+        "share_role": {
+          "anyOf": [
+            {
+              "enum": [
+                "view",
+                "comment",
+                "edit",
+                "reviewer"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Share Role"
+        },
         "signoff": {
           "anyOf": [
             {

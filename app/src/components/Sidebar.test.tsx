@@ -479,6 +479,13 @@ describe("Sidebar", () => {
     await waitFor(() => expect(agentRow("w1")).toBeTruthy());
     fireEvent.click(inbox);
     expect(navigate).toHaveBeenLastCalledWith({ screen: "inbox" });
+    daemon.data.inbox = [question, { kind: "shared_with_you", reason: "Shared with you", doc: "ad_fyi", share_role: "view", read: false }];
+    daemon.publish("inbox.changed", {});
+    await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("1"));
+    expect(screen.getByTestId("inbox-news")).toBeTruthy();
+    daemon.data.inbox.push({ kind: "shared_with_you", reason: "Shared with you", doc: "ad_feedback", share_role: "comment" });
+    daemon.publish("inbox.changed", {});
+    await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("2"));
     // Nothing waiting: no pill at all.
     daemon.data.inbox = [];
     daemon.publish("message.queued", { agent_id: "sup1" });
