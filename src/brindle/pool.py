@@ -458,9 +458,7 @@ def _cleanup_reservation(
             current.claimed_at, current.claim_token,
         )
         if current.state == "cleanup_pending":
-            result = teardown_entry(repo_root, entry, cfg)
-            if result is not None and not result.ok:
-                return False
+            teardown_entry(repo_root, entry, cfg)
             if not db.mark_pool_cleanup_remove_pending(current.claim_token):
                 return False
             current = db.pool_cleanup_reservation(repo_root, current.path)

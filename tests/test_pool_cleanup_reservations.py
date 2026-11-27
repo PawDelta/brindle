@@ -1,3 +1,5 @@
+import pytest
+
 from brindle.db import PoolEntry, Workspace
 
 
@@ -15,6 +17,7 @@ def _entry(path: str, *, created_at: float = 1.0) -> PoolEntry:
     )
 
 
+@pytest.mark.variant("atomic transfer preserves pool metadata under durable cleanup ownership")
 def test_reserve_pool_entry_cleanup_transfers_entry_to_claim(db):
     entry = _entry("/repo/pool/test")
     db.add_pool_entry(entry)
@@ -89,6 +92,7 @@ def test_cleanup_reservation_transitions_and_deletion_are_conditional(db):
     assert not db.delete_pool_cleanup_reservation(claim.claim_token, "remove_pending")
 
 
+@pytest.mark.variant("registered workspace prevents abandoned-claim recovery")
 def test_abandoned_claim_cleanup_refuses_registered_workspace(db):
     entry = _entry("/repo/pool/registered")
     db.add_pool_entry(entry)

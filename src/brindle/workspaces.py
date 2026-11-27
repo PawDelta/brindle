@@ -473,7 +473,7 @@ def create(
     if eligible_pool_claim:
         from brindle import pool
 
-        rebind_failure: tuple[str, git.GitError | OSError] | None = None
+        rebind_failure: tuple[str, str, git.GitError | OSError] | None = None
         with pool.claim_lock(repo_root):
             candidate = pool.claim(db, repo_root, base)
             if candidate is not None:
@@ -482,7 +482,7 @@ def create(
                     pool.rebind(repo_root, candidate, branch, start_sha)
                 except (git.GitError, OSError) as error:
                     db.mark_pool_claim_cleanup_pending(candidate.claim_token)
-                    rebind_failure = (candidate.claim_token, error)
+                    rebind_failure = (candidate.claim_token, candidate.path, error)
                     candidate = None
                 if candidate is not None:
                     claimed = candidate
@@ -515,13 +515,19 @@ def create(
                     )
 
         if rebind_failure is not None:
-            claim_token, rebind_error = rebind_failure
+            claim_token, claim_path, rebind_error = rebind_failure
             try:
-                pool.sweep(db, repo_root, cfg)
-            except (git.GitError, OSError) as cleanup_error:
-                if any(claim.claim_token == claim_token for claim in db.pool_claims(repo_root)):
-                    raise rebind_error from cleanup_error
-            if any(claim.claim_token == claim_token for claim in db.pool_claims(repo_root)):
+                reservation = db.pool_cleanup_reservation(repo_root, claim_path)
+                cleanup_succeeded = (
+                    reservation is not None
+                    and reservation.claim_token == claim_token
+                    and pool._cleanup_reservation(db, repo_root, reservation, cfg)
+                )
+            except Exception as cleanup_error:
+                raise rebind_error from cleanup_error
+            if not cleanup_succeeded or any(
+                claim.claim_token == claim_token for claim in db.pool_claims(repo_root)
+            ):
                 raise rebind_error
 
     if pool_workspace is None:
