@@ -3,7 +3,8 @@
    and the spine plan in shots/visuals.tsx (?doc=spine), to hold beside plan-doc-redesign.html:
      node shots/plan-doc-shots.mjs --out <dir> [--channel chrome]
    Four states x light/dark at 1440px: the top of the doc with its outline and margin notes, the
-   first decision open, every decision picked (Approve on), and the approved bar. */
+   first decision open, every decision picked (Approve on), and the approved bar. Then a question the
+   supervisor is still replying to, with its margin thread cropped at 2x. */
 
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -55,6 +56,27 @@ try {
     await page.waitForSelector('[data-testid="plan-next"][data-state="approved"]');
     await shot("4-approved");
     await ctx.close();
+    // A margin thread awaiting the supervisor (?replying=1): the doc, then the thread alone at 2x.
+    for (const scale of [1, 2]) {
+      const asked = await browser.newContext({ viewport: { width: 1440, height: 960 }, colorScheme: theme, deviceScaleFactor: scale });
+      const doc = await asked.newPage();
+      doc.on("pageerror", (e) => console.log("pageerror", e.message));
+      await doc.goto(`${base}/shots/visuals.html?theme=${theme}&doc=spine&replying=1`);
+      await doc.waitForSelector("html[data-ready]");
+      await doc.click('[data-testid="visuals-button"]');
+      await doc.click('[data-testid="visual-row-v_31aa"]');
+      const thread = doc.locator('[data-testid="thread-4"]');
+      await thread.locator('[data-state="supervisor-replying"]').waitFor();
+      await thread.scrollIntoViewIfNeeded();
+      await doc.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
+      const name = `${scale === 1 ? "6-replying" : "7-replying-thread-2x"}-${theme}.png`;
+      const box = await thread.boundingBox();
+      const clip = scale === 1 ? undefined : { x: box.x - 24, y: box.y - 20, width: box.width + 48, height: box.height + 40 };
+      // Disabled animations hold the three dots at full strength.
+      await doc.screenshot({ path: resolve(out, name), animations: "disabled", clip });
+      console.log(name);
+      await asked.close();
+    }
   }
 } finally {
   await browser.close();
