@@ -3345,6 +3345,20 @@ def _helper_db() -> DB:
     return DB()
 
 
+@app.command("_prefetch-intent", hidden=True)
+def prefetch_intent_cmd(root: str, turn: int, kinds: str) -> None:
+    from concurrent.futures import wait
+
+    from brindle import intent
+
+    db = _helper_db()
+    try:
+        answers = intent.prefetch_turn(db, root, turn, kinds.split(","))
+    finally:
+        db.conn.close()
+    wait(answers, intent.BUDGET_S)
+
+
 @app.command("_after-launch", hidden=True)
 def after_launch_cmd(agent_id: str, token: Optional[str] = typer.Option(None)) -> None:
     from brindle.providers import get_provider

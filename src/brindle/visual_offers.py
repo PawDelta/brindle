@@ -13,7 +13,7 @@ import secrets
 import time
 import unicodedata
 
-from brindle import bus, config, debuglog, visuals
+from brindle import bus, config, debuglog, intent, visuals
 from brindle.db import DB, Agent
 from brindle.service.errors import ServiceError
 
@@ -140,9 +140,9 @@ def _link(c, root: str, text: str, source: str) -> None:
 
 
 def _grant(c, root: str, scope: str = "visual") -> None:
-    _unlink(c, root, "grant")
+    _unlink(c, root, f"grant:{scope}")
     c.execute("INSERT INTO visual_grants (root_id, remaining, explicit, scope) VALUES (?,1,0,?) "
-              "ON CONFLICT(root_id) DO UPDATE SET remaining=1, scope=excluded.scope", (root, scope))
+              "ON CONFLICT(root_id, scope) DO UPDATE SET remaining=1", (root, scope))
 
 
 # Conversational lead-ins before an ask: "ok then", "alright so", "hey, just".
@@ -354,6 +354,8 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
         message_at = time.time()
     scope = request_intent(text)
     closed_prompts = []
+    prefetch = None
+    own_words = False
     with db.tx() as c:
         if staged_only:
             if message_at <= time.time() - FOLD:
@@ -362,8 +364,10 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
                 "SELECT 1 FROM visual_person_words WHERE root_id=? AND staged=1 AND words=? "
                 "AND created_at<? AND created_at>?",
                 (root.id, _words(text), message_at + SAID_AT_TICK, time.time() - FOLD)).fetchone()
-            if not matching and not _fill_mark(c, root.id, text, said_at):
-                return
+            if not matching:
+                own_words = _fill_mark(c, root.id, text, said_at)
+                if not own_words:
+                    return
         if expires_at is not None and time.time() >= expires_at:
             raise ServiceError("stale", "this input observation expired", 409)
         if observation is not None:
@@ -381,30 +385,26 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
                       "generation=generation+1, invalidated_at=MAX(invalidated_at,excluded.invalidated_at)",
                       (root.id, time.time()))
         if not fold_only:
-            take_turn(c, root.id)   # a model call reading earlier messages (intent) sees it came in
+            turn = take_turn(c, root.id)   # a model call reading earlier messages sees it came in
         if not mid_turn:
             c.execute("UPDATE visual_offers SET state='answered', changed_at=? WHERE root_id=? AND state='open'",
                       (time.time(), root.id))
         if fold_visuals:
             closed_prompts = visuals.answered_in_chat(c, root.id, message_at, text)
-        # A tool approval or ordinary follow-up does not cancel the person's
-        # still unused request. Only a new artifact request or explicit stop does.
         cancelled = not fold_only and _cancels(text)
-        # What a cancel calls off: the plan when it says so, or when it names nothing ("ignore",
-        # "stop") and the plan is the request still standing. Calling off a chart spares the plan.
-        held = c.execute("SELECT scope FROM visual_grants WHERE root_id=? AND remaining>0", (root.id,)).fetchone()
-        plan_held = held is not None and held["scope"] == "plan"
-        names_plan = bool(re.search(r"\bplan|think\b", text, re.I))
-        spares_plan = cancelled and plan_held and not names_plan and bool(_NOT_THE_PLAN.search(text))
-        cancels_plan = cancelled and (names_plan or (plan_held and not spares_plan))
-        if not fold_only and (scope or (cancelled and not spares_plan)):
-            c.execute("DELETE FROM visual_grants WHERE root_id=?", (root.id,))
-            _unlink(c, root.id, "grant")
         if cancelled:
-            c.execute("DELETE FROM visual_person_words WHERE root_id=? AND created_at<=?",
-                      (root.id, time.time() if said_at is None else min(said_at, time.time())))
+            names_plan = bool(re.search(r"\bplan|think\b", text, re.I))
+            names_visual = bool(_NOT_THE_PLAN.search(text))
+            spare = "visual" if names_plan and not names_visual else "plan" if names_visual and not names_plan else ""
+            cancels_plan = names_plan or (not spare and c.execute(
+                "SELECT 1 FROM visual_grants WHERE root_id=? AND scope='plan' AND remaining>0", (root.id,)
+            ).fetchone() is not None)
+            c.execute("DELETE FROM visual_grants WHERE root_id=? AND scope!=?", (root.id, spare))
+            cutoff = time.time() if said_at is None else min(said_at, time.time())
+            c.execute("DELETE FROM visual_person_words WHERE root_id=? AND created_at<=? "
+                      "AND (source IS NULL OR source!=?)", (root.id, cutoff, f"grant:{spare}"))
         elif typed and not fold_only:
-            _keep_words(c, root.id, text)
+            own_words = _keep_words(c, root.id, text) is None
         elif cli_prompt:
             confirmed = c.execute("UPDATE visual_person_words SET staged=0 WHERE id=(SELECT MAX(id) FROM visual_person_words "
                                   "WHERE root_id=? AND words=? AND staged=1 AND created_at<?)",
@@ -415,12 +415,23 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
                 c.execute("UPDATE visual_person_words SET source='pasted' WHERE root_id=? "
                           "AND staged=1 AND words='' AND created_at<=?", (root.id, message_at))
             if not confirmed and not carries_delivery and not staged_only:
-                _fill_mark(c, root.id, text, said_at)
+                confirmed = _fill_mark(c, root.id, text, said_at)
+            own_words = own_words or bool(confirmed)
         # Tie the words to what this message raises, so one spends the other.
         # A cancel in the same message wins over the request it calls off.
         if not fold_only and scope and not cancelled:
             _grant(c, root.id, scope)
-            _link(c, root.id, text, "grant")
+            _link(c, root.id, text, f"grant:{scope}")
+        elif not fold_only and not cancelled and own_words:
+            prefetch = intent.prefetch_kinds(text)
+            if prefetch and not cli_prompt:
+                messages = intent.recent_words(c, root.id)
+    if prefetch:
+        intent_turn = intent.Turn(db.path, root.id, turn)
+        if cli_prompt:
+            intent.prefetch_from_hook(intent_turn, prefetch)
+        else:
+            intent.prefetch(intent_turn, [row["words"] for row in messages], prefetch)
     for visual_id, rev in closed_prompts:
         bus.publish(db, "visual.dismissed", repo_root=ws.repo_root, root_id=root.id,
                     visual=visual_id, rev=rev)
@@ -579,11 +590,13 @@ def _says_it_themselves(words: str, span: tuple[int, int], mentioned: list[tuple
         not holds_a_mention or _ASKS_FOR.match(own[0]) is not None)
 
 
-def _refuse_plan_ask(words: str) -> None:
-    """A message that asks for a plan is not spent on a visual: the plan still needs it."""
-    if request_intent(words) == "plan":
+def _spend_visual_quote(c, root: str, row) -> None:
+    if row["source"] == "grant:plan" or request_intent(row["words"]) == "plan":
         raise ServiceError("plan_requested", "the person asked for a plan, not a visual: call propose_plan "
                            "(their request is still unspent)", 409)
+    c.execute("DELETE FROM visual_person_words WHERE id=?", (row["id"],))
+    if row["source"] == "grant:visual":
+        c.execute("DELETE FROM visual_grants WHERE root_id=? AND scope='visual'", (root,))
 
 
 def _spend_quote(c, root: str, asked: str, now: float) -> bool:
@@ -600,10 +613,7 @@ def _spend_quote(c, root: str, asked: str, now: float) -> bool:
             mentioned = [q.span() for q in _QUOTED.finditer(words)]
             if mentioned or _NEGATED.search(words) or not _says_it_themselves(words, (0, len(words)), mentioned):
                 continue
-            _refuse_plan_ask(words)
-            c.execute("DELETE FROM visual_person_words WHERE id=?", (row["id"],))
-            if row["source"] == "grant":
-                c.execute("DELETE FROM visual_grants WHERE root_id=?", (root,))
+            _spend_visual_quote(c, root, row)
             return True
         if _word_count(quote) < MIN_QUOTE_WORDS:
             continue
@@ -611,10 +621,7 @@ def _spend_quote(c, root: str, asked: str, now: float) -> bool:
         if any(not _NEGATED.search(words[max(0, m.start() - _NEGATION_REACH):m.start()])
                and _says_it_themselves(words, m.span(), mentioned)
                for m in pattern.finditer(words)):
-            _refuse_plan_ask(words)
-            c.execute("DELETE FROM visual_person_words WHERE id=?", (row["id"],))
-            if row["source"] == "grant":
-                c.execute("DELETE FROM visual_grants WHERE root_id=?", (root,))
+            _spend_visual_quote(c, root, row)
             return True
     if c.execute("SELECT 1 FROM visual_person_words WHERE root_id=? AND staged=1 AND created_at>? AND instr(words, ?)",
                  (root, now - FOLD, quote)).fetchone():
@@ -662,7 +669,7 @@ def authorize(c, root: str, kind: str, *, supervisor: bool, asked: str | None = 
         # It still spends one the person left for it (a Redirect, or asking again).
         if c.execute("UPDATE visual_grants SET remaining=remaining-1 WHERE root_id=? AND remaining>0 "
                      "AND scope='plan'", (root,)).rowcount:
-            c.execute("DELETE FROM visual_person_words WHERE root_id=? AND source='grant'", (root,))
+            c.execute("DELETE FROM visual_person_words WHERE root_id=? AND source='grant:plan'", (root,))
         return True
     consume(c, root, kind)
     return True
@@ -687,4 +694,4 @@ def consume(c, root: str, kind: str = "visual") -> None:
                            "publication). Otherwise use offer_visual so they "
                            "can accept an offer, or ask them in text. A worker needs its supervisor to do this "
                            "first.", 403)
-    c.execute("DELETE FROM visual_person_words WHERE root_id=? AND source='grant'", (root,))
+    c.execute("DELETE FROM visual_person_words WHERE root_id=? AND source=?", (root, f"grant:{kind}"))

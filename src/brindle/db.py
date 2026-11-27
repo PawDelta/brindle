@@ -34,7 +34,7 @@ NATIVE_SUBAGENT_PRUNE_AFTER = 3600
 # SQLite user_version: 0 identifies databases written before version tracking.
 # Bump for incompatible SCHEMA or _migrate changes so older engines refuse the result.
 # Additive tables stay compatible with installed helpers launched from worktrees.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -1161,10 +1161,11 @@ CREATE TABLE IF NOT EXISTS visual_offers (
     changed_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS visual_grants (
-    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    root_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     remaining INTEGER NOT NULL,
     explicit INTEGER NOT NULL,
-    scope TEXT NOT NULL DEFAULT 'visual'
+    scope TEXT NOT NULL DEFAULT 'visual',
+    PRIMARY KEY (root_id, scope)
 );
 CREATE TABLE IF NOT EXISTS visual_input_state (
     root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
@@ -2059,11 +2060,7 @@ class DB:
             self.conn.execute("UPDATE visual_input_state SET observer=generation")
         if "invalidated_at" not in input_cols:
             self.conn.execute("ALTER TABLE visual_input_state ADD COLUMN invalidated_at REAL NOT NULL DEFAULT 0")
-        grant_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visual_grants)")}
-        if "scope" not in grant_cols:
-            self.conn.execute("ALTER TABLE visual_grants ADD COLUMN scope TEXT NOT NULL DEFAULT 'visual'")
-            # Earlier grants did not distinguish conditional requests or artifact scope.
-            self.conn.execute("UPDATE visual_grants SET remaining=0")
+        self._migrate_visual_grants()
         visual_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visuals)")}
         if "choices" not in visual_cols:
             self.conn.execute("ALTER TABLE visuals ADD COLUMN choices TEXT")
@@ -2263,6 +2260,30 @@ class DB:
                                   "text, heading_path, chunk_id UNINDEXED)")
         except sqlite3.OperationalError:
             pass
+
+    def _migrate_visual_grants(self) -> None:
+        def columns():
+            return {row["name"]: row["pk"] for row in self.conn.execute("PRAGMA table_info(visual_grants)")}
+
+        if columns().get("scope") == 2:
+            return
+        with self.tx() as c:
+            old = columns()
+            if old.get("scope") == 2:
+                return
+            c.execute("CREATE TABLE visual_grants_scoped ("
+                      "root_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE, "
+                      "remaining INTEGER NOT NULL, explicit INTEGER NOT NULL, "
+                      "scope TEXT NOT NULL DEFAULT 'visual', PRIMARY KEY (root_id, scope))")
+            if "scope" in old:
+                c.execute("INSERT INTO visual_grants_scoped SELECT root_id, remaining, explicit, scope FROM visual_grants")
+                c.execute("UPDATE visual_person_words AS w SET source='grant:' || ("
+                          "SELECT g.scope FROM visual_grants g WHERE g.root_id=w.root_id) "
+                          "WHERE w.source='grant' AND EXISTS (SELECT 1 FROM visual_grants g "
+                          "WHERE g.root_id=w.root_id AND g.remaining>0)")
+            # Grants from before scopes were tracked are revoked.
+            c.execute("DROP TABLE visual_grants")
+            c.execute("ALTER TABLE visual_grants_scoped RENAME TO visual_grants")
 
     def _has_schema_object(self, name: str) -> bool:
         """Whether table or index ``name`` exists, asked by a read: a CREATE ... IF NOT

@@ -149,6 +149,8 @@ def test_an_older_engine_writes_and_reads_rows_a_newer_engine_added_columns_to(t
     session's MCP server, say) keeps running against it: every write names its
     columns and every read goes by column name, so the extra columns are no
     concern of the older code's."""
+    # Additive migrations retain the schema version understood by both engines.
+    monkeypatch.setattr(db_module, "SCHEMA_VERSION", 1)
     path = tmp_path / "brindle.db"
     newer = DB(path)
     for table in ("workspaces", "tasks", "review_claims"):
@@ -156,7 +158,6 @@ def test_an_older_engine_writes_and_reads_rows_a_newer_engine_added_columns_to(t
     newer.conn.close()
 
     # Helpers launched from a development worktree use the released engine.
-    monkeypatch.setattr(db_module, "SCHEMA_VERSION", 1)
     db = DB(path)
     ws = Workspace("ws1", "/repo", "w", "worktree", "feat/x", "main", "/repo/w", None, "s", time.time())
     db.add_workspace(ws)

@@ -1,11 +1,13 @@
 import subprocess
+import threading
 import time
+from contextlib import closing
 
 import pytest
 
 from brindle import agents, intent, mcp_server, plans, visual_offers
 from brindle.daemon import holds
-from brindle.db import Agent, Workspace
+from brindle.db import DB, Agent, Workspace
 from brindle.mcp_server import ToolError
 
 PLAN = "# Fixes\n\nOne page.\n\n## Goal\n\nFix them all.\n\n## Split\n\nTwo workers."
@@ -51,7 +53,7 @@ def proposed(plan=PLAN) -> bool:
     try:
         mcp_server.propose_plan(plan)
     except ToolError as e:
-        assert "ask for one" in str(e)
+        assert e.__cause__.code == "plan_request_required"
         return False
     return True
 
@@ -88,12 +90,36 @@ def test_plan_ask_intent(db, session, monkeypatch, said, answer, granted):
 def test_a_failed_model_call_refuses_and_the_next_publish_asks_again(db, session, monkeypatch, failure, takes):
     clock = [100.0]
     monkeypatch.setattr(intent, "_clock", lambda: clock[0])
-    say(db, session, "ok so lets test the plan, please make a test one")
     monkeypatch.setattr(intent, "_ask", model(failure, meanwhile=lambda: clock.__setitem__(0, clock[0] + takes)))
-    assert not proposed()                                   # refused as without the model
+    say(db, session, "ok so lets test the plan, please make a test one")
+    with pytest.raises(ToolError) as refused:
+        mcp_server.propose_plan(PLAN)
+    assert refused.value.__cause__.code == "intent_unavailable"
     working = model("1")
     monkeypatch.setattr(intent, "_ask", working)
     assert proposed() and len(working.calls) == 1
+
+
+def test_slow_background_answer_authorizes_publish(db, session, monkeypatch):
+    started = threading.Event()
+    finish = threading.Event()
+    clock = [100.0]
+    monkeypatch.setattr(intent, "_clock", lambda: clock[0])
+
+    def answer():
+        started.set()
+        assert finish.wait(2)
+        clock[0] += 5
+
+    fake = model("1", meanwhile=answer)
+    monkeypatch.setattr(intent, "_ask", fake)
+    say(db, session, "ok so lets test the plan, please make a test one")
+    try:
+        assert started.wait(1)
+    finally:
+        finish.set()
+    assert proposed()
+    assert len(fake.calls) == 1
 
 
 @pytest.mark.variant("a message the model granted from must not grant a second plan")
@@ -115,9 +141,15 @@ def test_one_message_grants_one_plan(db, session, monkeypatch):
                  marks=pytest.mark.variant("the asking message stays: only the turn check refuses the old answer")),
 ])
 def test_a_message_sent_while_the_model_is_out_voids_its_answer(db, session, monkeypatch, newer):
+    monkeypatch.setattr(intent, "prefetch", lambda *args: [])
     say(db, session, "ok so lets test the plan, please make a test one")
     # The person writes again while the model is still reading their ask.
-    monkeypatch.setattr(intent, "_ask", model("1", meanwhile=lambda: say(db, session, newer)))
+    def meanwhile():
+        other = DB(db.path)
+        with closing(other.conn):
+            say(other, session, newer)
+
+    monkeypatch.setattr(intent, "_ask", model("1", meanwhile=meanwhile))
     assert not proposed()
 
 
@@ -147,6 +179,7 @@ class _Rows(list):
 
 @pytest.mark.variant("a race: a message between reading the candidates and the turn (fails on the pre-fix order)")
 def test_a_message_recorded_after_the_candidates_are_read_voids_the_answer(db, session, monkeypatch):
+    monkeypatch.setattr(intent, "prefetch", lambda *args: [])
     say(db, session, "ok so lets test the plan, please make a test one")
 
     def newer_message(conn):

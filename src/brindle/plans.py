@@ -886,7 +886,7 @@ def begin(db: DB, root_id: str, asked_at: float | None = None) -> str | None:
 
     try:
         v = visuals.publish(db, root, "Plan", _page("Plan", "The supervisor is writing this plan."),
-                            kind="plan", extra=write)
+                            kind="plan", extra=write, infer_intent=False)
     except ServiceError:
         return None
     with db.tx() as c:
