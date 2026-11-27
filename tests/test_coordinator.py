@@ -146,6 +146,7 @@ def _events_wake_one_coordinator(db, repo, monkeypatch):
 def _undo_restores_queue(db, repo, monkeypatch):
     ws = _repo_with_sessions(db, repo, monkeypatch)
     _task(db, ws, "queued", "pending", ["w-b"])
+    _task(db, ws, "upstream", "started", agent="w-a")
     monkeypatch.setenv("BRINDLE_AGENT_ID", "coord")
     mcp_server.hold_task("queued", "a's auth work lands first")
     mcp_server.reorder_queue("queued", ["w-a"], "start from a's branch")
@@ -164,8 +165,26 @@ def _undo_restores_queue(db, repo, monkeypatch):
     assert CliRunner().invoke(cli.app, ["coordinator", "undo", events[0][0][:8]]).exit_code != 0
 
 
+def _reorder_refuses_own_branch(db, repo, monkeypatch):
+    ws = _repo_with_sessions(db, repo, monkeypatch)
+    session_branch = "brindle/session-47"
+    session_ws = workspaces.create(db, str(repo), session_branch, base=ws.branch, fetch=False,
+                                   run_setup=False, apply_prefix=False).workspace
+    db.update_agent("b", workspace_id=session_ws.id)
+    _task(db, session_ws, "queued", "pending", ["w-b"])
+    _task(db, ws, "upstream", "started", agent="w-a")
+
+    coord = db.get_agent("coord")
+    for upstream in (session_branch, ws.branch):
+        with pytest.raises(coordinator.CoordinatorError):
+            coordinator.reorder_queue(db, coord, "queued", ["w-a", upstream], "wait for upstream")
+        assert tasks._loads(db.get_task("queued").depends_on) == ["w-b"]
+    assert not bus.tail(db, kinds=("coordinator.action",))
+
+
 @pytest.mark.parametrize("scenario", [
     _hold_task_only_pending_and_allowlisted, _events_wake_one_coordinator, _undo_restores_queue,
+    _reorder_refuses_own_branch,
 ], ids=lambda f: f.__name__.strip("_"))
 def test_coordinator_scenarios(scenario, db, repo, monkeypatch):
     scenario(db, repo, monkeypatch)
