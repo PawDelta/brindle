@@ -188,6 +188,45 @@ def release_task(db: DB, coord: Agent, task_id: str, reason: str) -> str:
     return f"Released task {t.id} (event {eid[:8]}).{_told(told)}"
 
 
+def _validate_reorder(db: DB, t: Task, caller_ws: Workspace, added: list[str]) -> None:
+    owner = _owner(db, t)
+    protected = set()
+    if owner:
+        session = db.get_agent(owner)
+        session_ws = db.get_workspace(session.workspace_id) if session else None
+        if session_ws:
+            protected.add((session_ws.repo_root, session_ws.branch))
+        protected.update((r.repo_root, r.branch) for r in db.session_repos(owner) if r.branch)
+
+    # Follow the recorded bases. A sibling worker can share the same commit
+    # as the caller without being part of its branch lineage.
+    bases = {ws.branch: ws.base_branch for ws in db.find_workspaces(t.repo_root)}
+    bases[caller_ws.branch] = caller_ws.base_branch
+    lineage = [caller_ws.branch]
+    if t.isolate:
+        caller = db.get_agent(t.caller_id) if t.caller_id else None
+        lineage.append(agents.delegation_base(db, caller, caller_ws))
+        target = agents.delegation_workspace(db, caller_ws, True, t.branch)
+        if target and target.base_branch:
+            lineage.append(target.base_branch)
+    seen = set()
+    for start in lineage:
+        branch: str | None = start
+        while branch and branch not in seen:
+            seen.add(branch)
+            protected.add((t.repo_root, branch))
+            branch = bases.get(branch)
+
+    session_repos = tasks._session_repos(db, caller_ws, t.caller_id)
+    for dep in added:
+        repo, task, ws = tasks._resolve_dependency(db, caller_ws, dep, session_repos,
+                                                   dependent_task_id=t.id)
+        branch = (task.branch if task else None) or (ws.branch if ws else dep)
+        if (repo, branch) in protected:
+            raise CoordinatorError(f"Task {t.id} cannot wait for {dep}: {branch} is its own "
+                                   "session branch or part of its base lineage.")
+
+
 def reorder_queue(db: DB, coord: Agent, task_id: str, after: list[str], reason: str) -> str:
     """Make a queued task also wait for ``after`` (agent ids or branches),
     such as another session's work on the same files."""
@@ -202,6 +241,7 @@ def reorder_queue(db: DB, coord: Agent, task_id: str, after: list[str], reason: 
     caller_ws = db.get_workspace(t.caller_ws_id)
     if caller_ws is not None:
         try:
+            _validate_reorder(db, t, caller_ws, added)
             tasks.unmet_dependencies(db, caller_ws, added, caller_id=t.caller_id,
                                      dependent_task_id=t.id)
         except agents.AgentError as e:
