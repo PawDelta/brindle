@@ -1,6 +1,7 @@
 """The Pro transport keeps connections alive instead of paying a TLS
 handshake on every Library call."""
 
+import http.client
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -66,6 +67,25 @@ def test_requests_reuse_one_connection(server):
     assert auth.UrllibTransport().request("POST", base + "/members", {"a": "b"}, {}) == (
         200, {"ok": True})
     assert len(srv.connections) == 1
+
+
+def test_handshake_timeout_reaches_the_app_as_library_slow(monkeypatch):
+    from brindle.daemon import routes_actions as actions
+
+    monkeypatch.setenv("BRINDLE_PRO_DEV", "1")
+
+    def handshake_times_out(self):
+        raise TimeoutError("_ssl.c:1015: The handshake operation timed out")
+
+    monkeypatch.setattr(http.client.HTTPConnection, "connect", handshake_times_out)
+    with pytest.raises(TransportError) as caught:
+        auth.UrllibTransport().request("GET", "http://127.0.0.1:9/me", None, {})
+    try:   # how the Library helpers wrap it (shared_docs raises RuntimeError from it)
+        raise RuntimeError("could not read access") from caught.value
+    except RuntimeError as wrapped:
+        err = actions.upstream_error(wrapped)
+    assert (err.code, err.http_status) == ("library_slow", 503)
+    assert "_ssl" not in err.message
 
 
 @pytest.mark.parametrize("method,sent", [

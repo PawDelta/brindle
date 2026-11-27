@@ -59,6 +59,7 @@ import { Alongside, Decision, Tasks, displayName, overlaps, passChip, personName
 import { Annotated, DecisionCard, type OwnAnswers, MarginNote, Menu, ModeMenu, Outline, Tick, decisionsInOrder, docLayout, menuNote, menuRow, menuTitle, onSpine, placeDecisions, spineParts } from "./PlanDesignDoc";
 import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
+import { LibraryNetworkNote, SlowConnectionNote, libraryNetwork, useSlowPending, type LibraryNetwork } from "./LibraryNetwork";
 import { StoreContext } from "../../../store/useStore";
 
 type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach" | "cancelPlan" | "stopAlongside">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient>;
@@ -463,6 +464,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const [sending, setSending] = useState<"approve" | "changes" | "cancel" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /* A write the network stopped: a calm note, and Try again sends the same write. */
+  const [net, setNet] = useState<LibraryNetwork | null>(null);
+  const sendAgain = useRef<(() => void) | null>(null);
+  const slow = useSlowPending(busy);
   const [picked, setPicked] = useState<Picked | null>(null);
   // What the person is writing belongs to the text it was started on (`source`): the doc stays
   // open across revisions, and a draft begun on one must not be sent against another's text.
@@ -629,6 +634,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (!writes.begin()) return null;
     setBusy(true);
     setError(null);
+    setNet(null);
+    sendAgain.current = () => void send(work, refused);
     try {
       const now = await work();
       writes.end(now);
@@ -636,13 +643,18 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     } catch (e) {
       writes.end(null);
       refused?.(e);
-      if (alive.current) setError(refusal(e));
+      if (alive.current) { setError(refusal(e)); setNet(libraryNetwork(e)); }
       return null;
     } finally {
       if (alive.current) setBusy(false);
     }
   };
   const write = async (work: () => Promise<Plan>) => (await send(work)) !== null;
+  const footerNotes = (span: string) => <>
+    {slow && <SlowConnectionNote className={`m-0 ${span} text-xs text-ink-3`} />}
+    {error && net && <LibraryNetworkNote state={net} className={`m-0 flex ${span} items-center gap-2 text-xs text-ink-2`}
+      buttonClassName={`${quiet} px-2 text-xs`} onTryAgain={busy ? undefined : () => sendAgain.current?.()} />}
+  </>;
   // Own answers on a decision card (brindle/plan_answers.py). Adding one picks it and removing one
   // drops its pick, so the engine's `confirmed` speaks for the card from then on.
   const ownAnswers = (decision: string): OwnAnswers | undefined => {
@@ -788,6 +800,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const upload = async (files: File[]) => {
     setUploading((n) => n + 1);
     setError(null);
+    setNet(null);
     try {
       for (const file of files) {
         const got = await client!.attach!(target!, await fileAttachment(file));
@@ -1359,7 +1372,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               {chrome?.onBack && <button type="button" className={button} onClick={chrome.onBack}>Back to the session</button>}
             </>
           ) : <div className="grid w-full gap-2">{decidedBar}</div>}
-          {error && <p role="alert" className="m-0 basis-full text-xs text-sap">{error}</p>}
+          {footerNotes("basis-full")}
+          {error && !net && <p role="alert" className="m-0 basis-full text-xs text-sap">{error}</p>}
         </footer>
       </>
     );
@@ -1513,7 +1527,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             </div>
           </>
         ) : decidedBar}
-        {error && error !== gate?.unconfirmed?.message && <p role="alert" className="col-span-full text-xs text-sap">{error}</p>}
+        {footerNotes("col-span-full")}
+        {error && !net && error !== gate?.unconfirmed?.message && <p role="alert" className="col-span-full text-xs text-sap">{error}</p>}
       </footer>
     </>
   );

@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { DaemonError, type DesignShareLink, type DocScope, type LibraryPerson, type Plan, type ShareAccess, type ShareQueued } from "../../../api/client";
 import { SharePanel, type SharePeopleTarget } from "./SharePanel";
 import { ShareLinkPanel, type ShareLinkTarget } from "./ShareLink";
+import { SLOW_NOTE_AFTER_MS } from "./LibraryNetwork";
 
 afterEach(cleanup);
 
@@ -387,6 +388,30 @@ it("can reload the access list when the sign-in refresh is busy", async () => {
   await act(async () => fireEvent.click(within(alert).getByRole("button", { name: "Try again" })));
   expect(access.queryByRole("alert")).toBeNull();
   expect(row("sam").getAttribute("data-access")).toBe("comment");
+});
+
+it("says a slow read is still working, and shows an offline Library as a calm note with Try again", async () => {
+  vi.useFakeTimers();
+  try {
+    const lib = library({ people: [{ sub: "sam", name: "Sam", access: "comment", sign_off: null }] });
+    const read = lib.target.access;
+    let fail: (e: unknown) => void = () => {};
+    lib.target.access = () => new Promise((_, reject) => { fail = reject; });
+    await act(async () => render(<Reader lib={lib} />));
+    expect(screen.queryByTestId("library-slow")).toBeNull();
+    await act(async () => { await vi.advanceTimersByTimeAsync(SLOW_NOTE_AFTER_MS); });
+    expect(screen.getByTestId("library-slow").getAttribute("data-state")).toBe("slow");
+    await act(async () => fail(new DaemonError("library_offline", "Couldn't reach brindle Pro.", 503)));
+    expect(screen.queryByTestId("library-slow")).toBeNull();
+    const note = screen.getByTestId("library-network");
+    expect(note.getAttribute("data-state")).toBe("offline");
+    lib.target.access = read;
+    await act(async () => fireEvent.click(within(note).getByRole("button")));
+    expect(screen.queryByTestId("library-network")).toBeNull();
+    expect(row("sam").getAttribute("data-access")).toBe("comment");
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 it("updates link view and edit access while retaining the URL, and rolls back a refused change", async () => {

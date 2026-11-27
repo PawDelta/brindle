@@ -92,10 +92,13 @@ class AuthError(Exception):
 
 
 class TransportError(AuthError):
-    """The backend couldn't be reached (network, TLS, timeout, bad response)."""
+    """The backend couldn't be reached (network, TLS, timeout, bad response).
+    ``network``: :data:`NETWORK_SLOW` (a timeout, a handshake included) or
+    :data:`NETWORK_OFFLINE` (no route, refused, reset, DNS), else None."""
 
-    def __init__(self, message: str, code: str = "transport") -> None:
+    def __init__(self, message: str, code: str = "transport", network: str | None = None) -> None:
         super().__init__(message, code=code)
+        self.network = network
 
 
 class AirGapped(TransportError):
@@ -316,20 +319,28 @@ class _KeepAliveHTTPHandler(_KeepAlive, urllib.request.HTTPHandler):
     pass
 
 
-OFFLINE_MESSAGE = "Couldn't reach brindle Pro: the connection is slow or offline. Try again."
+NETWORK_SLOW, NETWORK_OFFLINE = "slow", "offline"
+NETWORK_MESSAGES = {
+    NETWORK_SLOW: "Couldn't reach brindle Pro: the connection is too slow right now. Try again.",
+    NETWORK_OFFLINE: "Couldn't reach brindle Pro: this Mac looks offline. Try again.",
+}
 _NETWORK_ERRNOS = frozenset({errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN,
                              errno.EHOSTDOWN})
 
 
-def _offline(reason) -> bool:
-    """A timeout or a failure to connect at all (as opposed to, say, a
-    certificate that doesn't verify), shown as a plain message rather than
-    socket or TLS internals."""
+def _network(reason) -> str | None:
+    """A timeout (slow) or a failure to connect at all (offline), as opposed
+    to, say, a certificate that doesn't verify: these get a plain message
+    rather than socket or TLS internals."""
     if isinstance(reason, ssl.SSLCertVerificationError):
-        return False
-    return (isinstance(reason, (TimeoutError, ConnectionError, socket.gaierror,
-                                ssl.SSLEOFError, ssl.SSLZeroReturnError))
-            or (isinstance(reason, OSError) and reason.errno in _NETWORK_ERRNOS))
+        return None
+    if isinstance(reason, TimeoutError):
+        return NETWORK_SLOW
+    if isinstance(reason, (ConnectionError, socket.gaierror, ssl.SSLEOFError,
+                           ssl.SSLZeroReturnError)) \
+            or (isinstance(reason, OSError) and reason.errno in _NETWORK_ERRNOS):
+        return NETWORK_OFFLINE
+    return None
 
 
 _TLS_LOCK = threading.Lock()
@@ -401,8 +412,8 @@ class UrllibTransport:
             raise
         except (urllib.error.URLError, OSError, ValueError) as e:
             reason = getattr(e, "reason", e)
-            if _offline(reason):
-                raise TransportError(OFFLINE_MESSAGE) from None
+            if network := _network(reason):
+                raise TransportError(NETWORK_MESSAGES[network], network=network) from None
             raise TransportError(f"cannot reach brindle Pro backend: {_sanitize(reason)}") from None
         with resp:
             status = resp.status if hasattr(resp, "status") else resp.code
