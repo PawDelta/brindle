@@ -85,14 +85,15 @@ describe("the Inbox queue", () => {
 
   it("puts each row in its part, threads on one design in one row, sign-off progress as dots", async () => {
     mount([{ ...progress, from_person: { sub: "u_chen", name: null }, signoff: { ...progress.signoff!, waiting: [{ sub: "u_sam", name: null }, { sub: "unknown", name: null }] } },
-      { ...comment(11, "u_chen", "c:11"), from_person: { sub: "u_chen", name: null } }, review, asked, comment(12, "u_sam", "c:12")], {}, (_daemon, client) => {
+      { ...comment(11, "u_chen", "c:11"), from_person: { sub: "u_chen", name: null } }, review, asked, comment(12, "u_sam", "c:12"),
+      { kind: "shared_with_you", reason: "Shared with you", doc: "ad_feedback", share_role: "comment" }], {}, (_daemon, client) => {
       vi.spyOn(client, "libraryPeople").mockResolvedValue({ people: [{ sub: "u_chen", first_name: "Chen", last_name: "Wei", email: "chen@example.test" }, { sub: "u_sam", email: "sam@example.test" }] });
       return client;
     });
     const waiting = await screen.findByTestId("inbox-waiting");
     const team = screen.getByTestId("inbox-team");
     // What's stopped comes first: the agent's question before the review request.
-    expect(within(waiting).getAllByTestId("inbox-row").map((r) => r.dataset.kind)).toEqual(["question", "review_requested"]);
+    expect(within(waiting).getAllByTestId("inbox-row").map((r) => r.dataset.kind)).toEqual(["question", "review_requested", "shared_with_you"]);
     expect(within(team).getAllByTestId("inbox-row").map((r) => r.dataset.kind)).toEqual(["signoff_progress", "shared_doc_comment"]);
     const pips = within(row("signoff_progress")).getByTestId("signoff-pips");
     expect([pips.dataset.signed, pips.dataset.required]).toEqual(["2", "3"]);
