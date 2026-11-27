@@ -21,6 +21,12 @@ Transport rules (``UrllibTransport``):
 * Every request has a timeout; responses larger than ``MAX_RESPONSE`` are
   refused; only 307/308 redirects to the same scheme, host and port are
   followed.
+* Connections are kept alive (HTTP/1.1) in a small process-wide pool per
+  scheme, host and port, so a Library call doesn't pay a TLS handshake each
+  time. A connection is dropped after any error, a partial read or
+  ``Connection: close``. A GET/HEAD/OPTIONS that fails because a reused
+  connection had gone stale is sent once more on a fresh one; nothing else is
+  ever sent twice.
 * In air-gap mode (:mod:`brindle.airgap`) nothing is sent at all:
   ``Client.call`` raises :class:`AirGapped` before the transport sees the
   request.
@@ -31,16 +37,23 @@ logged, and server error text is sanitized before it is shown.
 
 from __future__ import annotations
 
+import errno
 import fcntl
+import http.client
+import io
 import json
 import logging
 import os
 import re
+import selectors
+import socket
 import ssl
+import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import urllib.response
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -169,17 +182,182 @@ class _SameOriginRedirects(urllib.request.HTTPRedirectHandler):
                                       headers=dict(req.header_items()))
 
 
+POOL_SIZE = 4        # idle keep-alive connections kept per scheme, host and port
+POOL_IDLE = 30.0     # seconds an idle connection is trusted (load balancers drop them at ~60)
+_IDEMPOTENT = frozenset({"GET", "HEAD", "OPTIONS"})
+# How a reused connection that the server already closed fails before any
+# response arrives (RemoteDisconnected is a ConnectionResetError).
+_STALE = (ConnectionResetError, BrokenPipeError, ConnectionAbortedError,
+          ssl.SSLZeroReturnError, ssl.SSLEOFError)
+
+
+def _still_open(conn: http.client.HTTPConnection) -> bool:
+    """An idle connection is usable only while its socket has nothing to read:
+    a readable idle socket means the server closed it (or sent junk)."""
+    sock = conn.sock
+    if sock is None:
+        return False
+    try:
+        with selectors.DefaultSelector() as sel:
+            sel.register(sock, selectors.EVENT_READ)
+            return not sel.select(0)
+    except (OSError, ValueError):
+        return False
+
+
+class _ConnectionPool:
+    """Idle keep-alive connections by (scheme, host:port, TLS context). A
+    connection serves one request at a time: ``take`` removes it from the
+    pool and ``give`` returns it once its response was read in full, so
+    concurrent callers (the daemon's thread pools) never share one."""
+
+    def __init__(self, size: int = POOL_SIZE) -> None:
+        self.size = size
+        self._lock = threading.Lock()
+        self._idle: dict[tuple, list[tuple[http.client.HTTPConnection, float]]] = {}
+        self._pid = os.getpid()
+
+    def _owned(self) -> None:
+        if self._pid != os.getpid():   # a forked child: the parent's sockets aren't ours
+            self._idle, self._pid = {}, os.getpid()
+
+    def take(self, key: tuple) -> http.client.HTTPConnection | None:
+        dead = []
+        try:
+            with self._lock:
+                self._owned()
+                idle = self._idle.get(key) or []
+                while idle:
+                    conn, since = idle.pop()
+                    if time.monotonic() - since < POOL_IDLE and _still_open(conn):
+                        return conn
+                    dead.append(conn)
+                return None
+        finally:
+            for conn in dead:
+                conn.close()
+
+    def give(self, key: tuple, conn: http.client.HTTPConnection) -> None:
+        with self._lock:
+            self._owned()
+            idle = self._idle.setdefault(key, [])
+            if len(idle) < self.size:
+                idle.append((conn, time.monotonic()))
+                return
+        conn.close()
+
+
+_POOL = _ConnectionPool()
+
+
+class _KeepAlive:
+    """``do_open`` for urllib's HTTP(S) handlers: send on a pooled connection
+    (urllib's own sends ``Connection: close`` and opens a new one each time),
+    read the whole capped body, put the connection back if it is still clean,
+    and hand urllib an in-memory response. Redirects, error statuses and the
+    rest of the opener chain work on that response as before."""
+
+    max_bytes = MAX_RESPONSE
+    pool = _POOL
+
+    def do_open(self, http_class, req, **kw):
+        host = req.host
+        if not host:
+            raise urllib.error.URLError("no host given")
+        key = (req.type, host.lower(), kw.get("context"))
+        headers = dict(req.unredirected_hdrs)
+        headers.update({k: v for k, v in req.headers.items() if k not in headers})
+        headers = {name.title(): val for name, val in headers.items()}
+        method = req.get_method()
+        conn = self.pool.take(key)
+        reused = conn is not None
+        while True:
+            if conn is None:
+                conn = http_class(host, timeout=req.timeout, **kw)
+            elif isinstance(req.timeout, (int, float)):
+                conn.timeout = req.timeout
+                conn.sock.settimeout(req.timeout)
+            try:
+                try:
+                    conn.request(method, req.selector, req.data, headers,
+                                 encode_chunked=req.has_header("Transfer-encoding"))
+                    r = conn.getresponse()
+                except _STALE:
+                    # Only a reused connection can be stale, and only a request
+                    # that is safe to repeat gets sent a second time.
+                    if not (reused and method in _IDEMPOTENT):
+                        raise
+                    conn.close()
+                    conn, reused = None, False
+                    continue
+                body = r.read(self.max_bytes + 1)
+            except (OSError, http.client.HTTPException) as e:
+                conn.close()
+                raise urllib.error.URLError(e) from None
+            except BaseException:
+                conn.close()
+                raise
+            break
+        if r.isclosed() and not r.will_close and len(body) <= self.max_bytes \
+                and conn.sock is not None:
+            self.pool.give(key, conn)
+        else:
+            conn.close()   # Connection: close, a partial read or an over-size body
+        resp = urllib.response.addinfourl(io.BytesIO(body), r.msg, req.get_full_url(), r.status)
+        resp.msg = r.reason
+        return resp
+
+
+class _KeepAliveHTTPSHandler(_KeepAlive, urllib.request.HTTPSHandler):
+    pass
+
+
+class _KeepAliveHTTPHandler(_KeepAlive, urllib.request.HTTPHandler):
+    pass
+
+
+OFFLINE_MESSAGE = "Couldn't reach brindle Pro: the connection is slow or offline. Try again."
+_NETWORK_ERRNOS = frozenset({errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN,
+                             errno.EHOSTDOWN})
+
+
+def _offline(reason) -> bool:
+    """A timeout or a failure to connect at all (as opposed to, say, a
+    certificate that doesn't verify), shown as a plain message rather than
+    socket or TLS internals."""
+    if isinstance(reason, ssl.SSLCertVerificationError):
+        return False
+    return (isinstance(reason, (TimeoutError, ConnectionError, socket.gaierror,
+                                ssl.SSLEOFError, ssl.SSLZeroReturnError))
+            or (isinstance(reason, OSError) and reason.errno in _NETWORK_ERRNOS))
+
+
+_TLS_LOCK = threading.Lock()
+_TLS: list[ssl.SSLContext] = []
+
+
+def _tls_context() -> ssl.SSLContext:
+    """One verifying TLS context for every transport, so their connections
+    share a pool."""
+    with _TLS_LOCK:
+        if not _TLS:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = True
+            ctx.verify_mode = ssl.CERT_REQUIRED
+            ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+            _TLS.append(ctx)
+        return _TLS[0]
+
+
 class UrllibTransport:
     def __init__(self, timeout: float = TIMEOUT, max_bytes: int = MAX_RESPONSE) -> None:
         self.timeout, self.max_bytes = timeout, max_bytes
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = True
-        ctx.verify_mode = ssl.CERT_REQUIRED
-        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         # build_opener would add default handlers (incl. file:// and ftp://);
         # assemble exactly what's needed instead.
         self.opener = urllib.request.OpenerDirector()
-        for h in (urllib.request.HTTPSHandler(context=ctx), urllib.request.HTTPHandler(),
+        https, plain = _KeepAliveHTTPSHandler(context=_tls_context()), _KeepAliveHTTPHandler()
+        https.max_bytes = plain.max_bytes = max_bytes
+        for h in (https, plain,
                   _SameOriginRedirects(), urllib.request.HTTPErrorProcessor(),
                   urllib.request.HTTPDefaultErrorHandler(), urllib.request.UnknownHandler()):
             self.opener.add_handler(h)
@@ -223,6 +401,8 @@ class UrllibTransport:
             raise
         except (urllib.error.URLError, OSError, ValueError) as e:
             reason = getattr(e, "reason", e)
+            if _offline(reason):
+                raise TransportError(OFFLINE_MESSAGE) from None
             raise TransportError(f"cannot reach brindle Pro backend: {_sanitize(reason)}") from None
         with resp:
             status = resp.status if hasattr(resp, "status") else resp.code
