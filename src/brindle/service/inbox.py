@@ -313,7 +313,7 @@ def _dismiss_key(item: InboxItemDTO) -> str:
     if item.kind == "permission" and item.agent_id and item.permission and item.permission.request_id:
         return permission_dismiss_key(item.agent_id, item.permission.request_id)
     data = item.to_json()
-    for k in ("decision_count", "from_name", "file_count", "checks_state", "access_role", "pr_head_sha"):
+    for k in ("decision_count", "from_name", "file_count", "checks_state", "access_role", "share_role", "pr_head_sha"):
         data.pop(k, None)  # enrichment preserves existing dismissal keys
     if data.get("choices") is None:
         data.pop("choices", None)   # added later: an item without choices keeps the key it always had
@@ -447,7 +447,7 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
     # A session asking through a choice visual answers there: its open question
     # folds into the visual's row instead of offering a second place to answer.
     choosing = {i.root_id for i in shown_items if i.kind == "visual" and i.reason == "asks you to choose"}
-    return [i.model_copy(update={"inbox_group": inbox_team.group(i.kind)})
+    return [i.model_copy(update={"inbox_group": inbox_team.group(i.kind, i.share_role)})
             for i in shown_items if not (i.kind == "question" and i.root_id in choosing)]
 
 

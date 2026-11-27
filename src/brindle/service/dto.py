@@ -307,6 +307,7 @@ class InboxItemDTO(_DTO):
     excerpt: str | None = None     # a shared-doc comment's newest words
     signoff: SignoffDTO | None = None
     access_role: Literal["comment", "edit"] | None = None
+    share_role: Literal["view", "comment", "edit", "reviewer"] | None = None
     decision_count: int | None = None  # the requested plan's decisions, when known
     from_name: str | None = None       # an org notice's sender, when supplied
     file_count: int | None = None      # files changed against the session's PR base
