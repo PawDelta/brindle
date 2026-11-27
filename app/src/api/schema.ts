@@ -685,6 +685,7 @@ export interface InboxItemDTO {
   request_id?: string | null;
   root_id?: string | null;
   section?: string | null;
+  share_role?: ("view" | "comment" | "edit" | "reviewer") | null;
   signoff?: SignoffDTO | null;
   thread_id?: number | null;
   url?: string | null;

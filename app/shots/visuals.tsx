@@ -140,6 +140,10 @@ if (params.get("doc") === "spine") {
         anchor: anchored("risks", RISKS, "7 days") },
     ],
   };
+  // ?replying=1: a question the person just asked, which their supervisor has yet to answer.
+  if (params.get("replying") === "1") plan.threads!.push({ id: 4, kind: "comment", question: true, rev: 2, author: "person", status: "open", at: now - 20,
+    text: "Do any of the three customers need missed events replayed after an outage?",
+    anchor: anchored("context", plan.sections[0].markdown, "Three customers have asked for push notifications") });
 }
 // Where each worker is once the plan is approved.
 const live: Partial<Plan["split"][number]>[] = [
