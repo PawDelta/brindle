@@ -52,7 +52,7 @@ def test_refused_vote_leaves_following_signoff_deliverable(app, lib):
     pytest.param("suggestions", marks=pytest.mark.variant(
         "Suggestion keys have their own feature flag and legacy matching uses the revision and edit range.")),
 ])
-def test_lost_response_after_save(app, lib, supported, tail):
+def test_lost_response_after_save(app, lib, supported, tail, db):
     feature = "comment_idempotency" if tail == "comments" else "suggestion_idempotency"
     lib.calls.routes[f"GET {DESIGN}"] = lambda *_: (200, {**lib.view(), "features": [feature] if supported else []})
     route = f"POST {DESIGN}/{tail}"
@@ -85,6 +85,15 @@ def test_lost_response_after_save(app, lib, supported, tail):
     save(mask_data(body), {})
     waiting = app.post(f"{ROUTE}/{tail}", json={**body, "client_id": "lost-response"}).json()
     assert waiting["outbox"][0]["state"] == "waiting"
+    read = lib.calls.routes[f"GET {DESIGN}"]
+    lib.calls.routes[f"GET {DESIGN}"] = lambda *_: (403, {"error": "forbidden"})
+    shared_docs.sync_open(db)
+    denied = app.get(ROUTE)
+    assert denied.status_code == 403
+    details = denied.json()["error"]
+    assert not details.get("refused_changes")
+    assert details["unconfirmed_changes"] == [{"client_id": "lost-response", "tail": f"/{tail}", "rev": 1}]
+    lib.calls.routes[f"GET {DESIGN}"] = read
     sent = app.get(ROUTE).json()
     assert len(sent["threads"]) == 2
     assert sent["outbox"][0]["state"] == "sent"
@@ -92,10 +101,13 @@ def test_lost_response_after_save(app, lib, supported, tail):
 
 
 def test_revoked_reader_gets_own_receipt_without_document(app, lib):
-    lib.calls.routes[f"POST {DESIGN}/votes"] = [TransportError("offline", network="offline")]
+    # This earlier comment can't read its anchor, so neither write reaches a POST.
+    lib.calls.routes[f"GET {DESIGN}"] = [TransportError("offline", network="offline") for _ in range(2)]
+    assert app.post(f"{ROUTE}/comments", json={"client_id": "comment", "rev": 1, "anchor": SECTION,
+                                              "text": "Check this"}).is_success
     body = {"client_id": "vote", "rev": 1, "decision": "d1", "option": "b"}
     assert app.post(f"{ROUTE}/votes", json=body).is_success
     lib.calls.routes[f"GET {DESIGN}"] = lambda *_: (403, {"error": "forbidden"})
     response = app.get(ROUTE)
     assert response.status_code == 403 and "threads" not in response.json()
-    assert response.json()["error"]["refused_changes"] == [{"client_id": "vote", "tail": "/votes", "rev": 1}]
+    assert [r["client_id"] for r in response.json()["error"]["refused_changes"]] == ["comment", "vote"]

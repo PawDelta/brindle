@@ -18,9 +18,10 @@ _locks = [threading.Lock() for _ in range(64)]
 
 
 class AccessLost(Refused):
-    def __init__(self, refusal, receipts):
+    def __init__(self, refusal, receipts, unconfirmed):
         super().__init__(str(refusal), refusal.status, refusal.code)
         self.receipts = receipts
+        self.unconfirmed = unconfirmed
 
 
 @contextmanager
@@ -77,6 +78,27 @@ def _matching_id(view, owner, tail, body):
     return max(matches, default=-1)
 
 
+def _read_for_delivery(db, owner, doc, load):
+    try:
+        return load()
+    except Refused as exc:
+        if exc.code == "key_unavailable" or not (exc.status == 404 or (exc.status == 403 and exc.code)):
+            raise
+        with db.tx() as tx:
+            tx.execute("UPDATE plan_outbox SET state='refused', code='forbidden' "
+                       "WHERE owner=? AND doc=? AND state='waiting' AND attempted=0", (owner, doc))
+            refused, unconfirmed = [], []
+            for row in tx.execute(
+                "SELECT state,client_id,tail,json_extract(payload,'$.rev') AS rev FROM plan_outbox "
+                "WHERE owner=? AND doc=? AND state IN ('refused','waiting') ORDER BY seq", (owner, doc)
+            ):
+                receipts = refused if row["state"] == "refused" else unconfirmed
+                receipts.append({k: row[k] for k in ("client_id", "tail", "rev")})
+        if refused or unconfirmed:
+            raise AccessLost(exc, refused, unconfirmed) from exc
+        raise
+
+
 def deliver(db, owner, doc, send, load, *, item=None, read=False, legacy=False):
     """Persist before sending. A reconnect uses the same account, revision and key."""
     conn = db.conn
@@ -88,20 +110,7 @@ def deliver(db, owner, doc, send, load, *, item=None, read=False, legacy=False):
             (owner, doc, client_id, tail, json.dumps(mask_data(body)), repo),
         )
     with _locks[hash((db.path, owner, doc)) % len(_locks)]:
-        try:
-            view = load() if read else None
-        except Refused as exc:
-            if exc.code == "key_unavailable" or not (exc.status == 404 or (exc.status == 403 and exc.code)):
-                raise
-            with db.tx() as tx:
-                tx.execute("UPDATE plan_outbox SET state='refused', code='forbidden' "
-                           "WHERE owner=? AND doc=? AND state='waiting'", (owner, doc))
-                receipts = [dict(r) for r in tx.execute(
-                    "SELECT client_id,tail,json_extract(payload,'$.rev') AS rev FROM plan_outbox "
-                    "WHERE owner=? AND doc=? AND state='refused' ORDER BY seq", (owner, doc))]
-            if receipts:
-                raise AccessLost(exc, receipts) from exc
-            raise
+        view = _read_for_delivery(db, owner, doc, load) if read else None
         features = view.get("features", []) if view is not None else None
         for row in conn.execute("SELECT * FROM plan_outbox WHERE owner=? AND doc=? AND state='waiting' ORDER BY seq",
                                 (owner, doc)).fetchall():
@@ -110,23 +119,32 @@ def deliver(db, owner, doc, send, load, *, item=None, read=False, legacy=False):
                 config.load_repo_config(row["repo"])
             if airgap.enabled():
                 break
+            tail = row["tail"]
+            if features is None and (row["attempted"] or tail in ("/comments", "/suggestions")):
+                try:
+                    view = _read_for_delivery(db, owner, doc, load)
+                except Exception as exc:
+                    if network_error(exc):
+                        break
+                    raise
+                features = view.get("features") or []
             try:
-                tail = row["tail"]
                 already_saved = False
+                prior_match, keyed = row["prior_match"], row["keyed"]
                 if tail in ("/comments", "/suggestions"):
-                    if features is None:
-                        view = load()
-                        features = view.get("features") or []
                     feature = "comment_idempotency" if tail == "/comments" else "suggestion_idempotency"
                     match = _matching_id(view, owner, tail, body)
-                    if row["prior_match"] is None:
-                        conn.execute("UPDATE plan_outbox SET prior_match=?, keyed=? WHERE seq=?",
-                                     (match, feature in features, row["seq"]))
-                    elif not row["keyed"] or feature not in features:
-                        already_saved = match > row["prior_match"]
+                    if not row["attempted"]:
+                        prior_match, keyed = match, feature in features
+                    elif not keyed or feature not in features:
+                        already_saved = match > prior_match
                     if feature in features:
                         body["idempotency_key"] = row["client_id"]
                 if not already_saved:
+                    if not row["attempted"]:
+                        # Record the replay evidence before the POST can reach the Library.
+                        conn.execute("UPDATE plan_outbox SET attempted=1, prior_match=?, keyed=? WHERE seq=?",
+                                     (prior_match, keyed, row["seq"]))
                     view = send(tail, body)
             except Exception as exc:
                 if network_error(exc):

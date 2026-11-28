@@ -44,6 +44,7 @@ function observeVisibleReads(read: () => void) {
 }
 
 const COLUMN_MODES = MODES.filter((m) => m.id !== "editing");
+const changeNames: Record<string, string> = { "/votes": "Pick", "/comments": "Comment", "/suggestions": "Suggestion", "/sign-offs": "Sign-off" };
 
 /* Who wrote and voted, by name where the org's directory knows them. */
 function named(doc: SharedDesign, directory: LibraryPerson[]): SharedDesign {
@@ -136,7 +137,11 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
           <ReaderBar lead={lead} />
           {error && failure?.source === source && failure.error.refusedChanges?.map(item =>
             <p key={item.client_id} data-state="refused" className="px-s3 text-sm text-ink-2">
-              <strong>Not sent</strong> · {({ "/votes": "Pick", "/comments": "Comment", "/suggestions": "Suggestion", "/sign-offs": "Sign-off" } as Record<string, string>)[item.tail]} · Revision {item.rev}
+              <strong>Not sent</strong> · {changeNames[item.tail]} · Revision {item.rev}
+            </p>)}
+          {error && failure?.source === source && failure.error.unconfirmedChanges?.map(item =>
+            <p key={item.client_id} data-state="unconfirmed" className="px-s3 text-sm text-ink-2">
+              <strong>Delivery unconfirmed</strong> · {changeNames[item.tail]} · Revision {item.rev}. Delivery will be checked when access returns.
             </p>)}
           <p className="p-s3 text-sm text-ink-3" role={error ? "alert" : undefined}>{error ?? "Loading…"}</p>
         </>

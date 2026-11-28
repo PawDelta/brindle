@@ -893,6 +893,7 @@ def _shared_design(repo: str | None, work: Callable[[Any], Any], *, require_enti
         error = actions.upstream_error(e)
         if isinstance(e, plan_outbox.AccessLost):
             error.extra["refused_changes"] = e.receipts
+            error.extra["unconfirmed_changes"] = e.unconfirmed
         raise error from e
 
 

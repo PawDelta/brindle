@@ -183,12 +183,14 @@ it("a teammate signs off through the Library, keeps a draft across a stale write
   reading = async () => {
     const lost = new DaemonError("forbidden", "no access", 403);
     lost.refusedChanges = [{ client_id: "comment", tail: "/comments", rev: 2 }];
+    lost.unconfirmedChanges = [{ client_id: "reply", tail: "/comments", rev: 1 }];
     throw lost;
   };
   await nextRead();
   expect(screen.queryByText("Workers run here.")).toBeNull();
   expect(screen.getByRole("alert")).toBeTruthy();
   expect(screen.getByText("Not sent").closest('[data-state="refused"]')).toBeTruthy();
+  expect(screen.getByText("Delivery unconfirmed").closest('[data-state="unconfirmed"]')).toBeTruthy();
 
   let granted!: (d: SharedDesign) => void;
   reading = () => new Promise<SharedDesign>((resolve) => { granted = resolve; });

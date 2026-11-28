@@ -1342,6 +1342,7 @@ CREATE TABLE IF NOT EXISTS plan_outbox (
     tail TEXT NOT NULL,
     payload TEXT NOT NULL,
     prior_match INTEGER,
+    attempted INTEGER NOT NULL DEFAULT 0,
     keyed INTEGER,
     repo TEXT,
     state TEXT NOT NULL DEFAULT 'waiting',
@@ -2108,6 +2109,13 @@ class DB:
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
+        outbox_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_outbox)")}
+        if "attempted" not in outbox_cols:
+            with self.tx() as c:
+                c.execute("ALTER TABLE plan_outbox ADD COLUMN attempted INTEGER NOT NULL DEFAULT 0")
+                # Older votes and sign-offs did not record a pre-send checkpoint.
+                c.execute("UPDATE plan_outbox SET attempted=1 WHERE state='waiting' AND "
+                          "(prior_match IS NOT NULL OR tail NOT IN ('/comments','/suggestions'))")
         share_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_share_threads)")}
         if "delivered_at" not in share_cols:
             self.conn.execute("ALTER TABLE plan_share_threads ADD COLUMN delivered_at REAL")

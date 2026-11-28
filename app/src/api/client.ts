@@ -1823,6 +1823,7 @@ export type GithubConnect = { route: "gh" } | { route: "token"; token: string };
 
 export class DaemonError extends Error {
   refusedChanges?: { client_id: string; tail: string; rev: number }[];
+  unconfirmedChanges?: DaemonError["refusedChanges"];
   /* The engine's ServiceError code ("not_found", "conflict", ...), "unreachable"
      when no response came back, or "http" for a response without an error body. */
   readonly code: string;
@@ -3395,7 +3396,8 @@ export class DaemonClient {
     }
     const body: unknown = await response.json().catch(() => undefined);
     if (!response.ok) {
-      const got = body as { error?: { code?: string; message?: string; refused_changes?: DaemonError["refusedChanges"] }; conflict?: SessionConflict; preflight?: PreflightDTO | PreflightItemDTO[]; reasons?: string[]; repo?: string } | undefined;
+      const got = body as { error?: { code?: string; message?: string; refused_changes?: DaemonError["refusedChanges"];
+        unconfirmed_changes?: DaemonError["unconfirmedChanges"] }; conflict?: SessionConflict; preflight?: PreflightDTO | PreflightItemDTO[]; reasons?: string[]; repo?: string } | undefined;
       if (got?.conflict) throw new DaemonError("conflict", got.conflict.message, response.status, got.conflict);
       const err = got?.error;
       if (got?.preflight) {
@@ -3406,6 +3408,7 @@ export class DaemonClient {
       }
       const failure = new DaemonError(err?.code ?? "http", err?.message ?? response.statusText, response.status, undefined, undefined, Array.isArray(got?.reasons) ? got.reasons : undefined);
       if (Array.isArray(err?.refused_changes)) failure.refusedChanges = err.refused_changes;
+      if (Array.isArray(err?.unconfirmed_changes)) failure.unconfirmedChanges = err.unconfirmed_changes;
       throw failure;
     }
     const route = new URL(url).pathname;
