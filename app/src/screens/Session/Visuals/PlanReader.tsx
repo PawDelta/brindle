@@ -61,6 +61,7 @@ import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
 import { LibraryNetworkNote, SlowConnectionNote, libraryNetwork, useSlowPending, type LibraryNetwork } from "./LibraryNetwork";
 import { StoreContext } from "../../../store/useStore";
+import { PlanDraftScope, readPlanDraft, savePlanDraft, usePlanDraft } from "./planDrafts";
 
 type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach" | "cancelPlan" | "stopAlongside">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient>;
 
@@ -390,16 +391,12 @@ const show = (el: Element | null | undefined, block: ScrollLogicalPosition = "st
 /* What a highlight offers, where it was made: a range of a section's text, or a diagram. */
 type Picked = { x: number; y: number } & ({ kind: "text"; section: string; start: number; quote: string } | { kind: "diagram"; section: string });
 
-function VerdictNote({ value, hasFeedback, children }: {
-  value: { current: string };
+function VerdictNote({ hasFeedback, children }: {
   hasFeedback: boolean;
   children(note: string, setNote: (note: string) => void, canRequest: boolean): ReactNode;
 }) {
-  const [note, setNote] = useState(value.current);
-  return children(note, (next) => {
-    value.current = next;
-    setNote(next);
-  }, hasFeedback || !!note.trim());
+  const [note, setNote] = usePlanDraft<string>("verdict");
+  return children(note ?? "", (next) => setNote(next || null), hasFeedback || !!note?.trim());
 }
 
 /* brindle's own sign-in, for a plan the Library can't confirm until it is renewed. */
@@ -448,10 +445,13 @@ export function DesignDoc({ source, author, teammate: receivedTeammate, plan: re
   /* The design's own linked work item, in its status line. */
   workItem?: WorkItem | null;
 }) {
+  const scope = receivedTeammate && !receivedTeammate.me ? null : JSON.stringify([receivedPlan.id, receivedTeammate?.me ?? null]);
   return (
-    <FormatProvider>
-      <DesignDocBody source={source} author={author} teammate={receivedTeammate} plan={receivedPlan} mode={chosenMode} writes={writes} liveClient={liveClient} chrome={chrome} top={top} history={history} workItems={workItems} workItem={workItem} work={work} shareLink={shareLink} />
-    </FormatProvider>
+    <PlanDraftScope.Provider key={scope} value={scope}>
+      <FormatProvider>
+        <DesignDocBody source={source} author={author} teammate={receivedTeammate} plan={receivedPlan} mode={chosenMode} writes={writes} liveClient={liveClient} chrome={chrome} top={top} history={history} workItems={workItems} workItem={workItem} work={work} shareLink={shareLink} />
+      </FormatProvider>
+    </PlanDraftScope.Provider>
   );
 }
 
@@ -512,8 +512,6 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const link = useShareLink(shareLink, `${sharingOpen}:${!!receivedPlan.gate}:${unshared}`);
   const [briefOpen, setBriefOpen] = useState(false);
   const [stripHost, setStripHost] = useState<HTMLDivElement | null>(null);
-  // A suggestion's section text as it is being typed on the page (SuggestEditor).
-  const [draftText, setDraftText] = useState<string | null>(null);
   const [historyRev, setHistoryRev] = useState<number | null>(null);
   const [historical, setHistorical] = useState<{ comparison: DocRevisionComparison; close(): void } | null>(null);
   const lastRead = useLastRead(receivedPlan.id, receivedPlan.rev);
@@ -525,16 +523,12 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const canComment = !teammate || teammate.rights.comment;
   const canSuggest = !teammate || teammate.rights.suggest;
   // Picks are the person's to make: a teammate's is a vote, which the Library ties to commenting.
-  const open = plan.state === "open" && canComment;
+  const open = plan.state === "open";
+  const canPick = open && canComment;
   const threads = useMemo(() => plan.threads ?? [], [plan.threads]);
   const sharedFiles = useMemo(() => overlaps(plan), [plan]);
   const [picks, setPicks] = useState<Record<string, string>>({});
-  const note = useRef("");
-  const [noteReset, resetNote] = useState(0);
-  const clearNote = () => {
-    note.current = "";
-    resetNote((n) => n + 1);
-  };
+  const draftScope = useContext(PlanDraftScope);
   const [attached, setAttached] = useState<string[]>([]);
   const [uploading, setUploading] = useState(0);
   const [sending, setSending] = useState<"approve" | "changes" | "cancel" | null>(null);
@@ -556,7 +550,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const [picked, setPicked] = useState<Picked | null>(null);
   // What the person is writing belongs to the text it was started on (`source`): the doc stays
   // open across revisions, and a draft begun on one must not be sent against another's text.
-  const [drafting, setDrafting] = useState<{ draft: Draft; source: string } | null>(null);
+  const [savedDraft, setDrafting, clearDraft] = usePlanDraft<{ draft: Draft; source: string; text: string; replacement: string | null }>("comment");
+  const drafting = (savedDraft?.draft.kind === "suggest" ? canSuggest : canComment) ? savedDraft : null;
   const draft = drafting?.draft ?? null;
   const [box, setEditing] = useState<{ section: string; text: string; source: string } | null>(null);
   // A section's box belongs to Suggesting and Editing: back in Viewing (or decided), it is closed.
@@ -570,7 +565,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const designDoc = onSpine(receivedPlan);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [cancelOpen, setCancelOpen] = useState(false);
-  const [changesOpen, setChangesOpen] = useState(false);
+  const [changesOpen, setChangesOpen] = useState(() => !!readPlanDraft<string>(draftScope, "verdict"));
   const doc = useRef<HTMLDivElement>(null);
   const picker = useRef<HTMLInputElement>(null);
   const alive = useRef(true);
@@ -622,6 +617,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     return name ? name[0].toUpperCase() + name.slice(1) : who;
   };
   const authorName = teammate ? (teammate.author ? firstName(teammate.author) : "the author") : "you";
+  const approver = teammate ? (authorName === "You" || authorName === "A teammate" ? "the author" : authorName) : undefined;
   const gateWhy = [...(gate?.waiting_on ?? []), ...(gate?.reviewers ?? []).flatMap((r) => r.changes_by ?? [])].reduce((text, who) => text.split(who).join(nameOf(who)), gate?.reason ?? "");
   // Everyone the author chose has signed and only org rules are left.
   const unsigned = (gate?.reviewers ?? []).filter((r) => r.required && r.status !== "signed_off" && r.status !== "waived");
@@ -665,9 +661,16 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // a pick on its way there.
   const valid = (d: PlanDecisionDTO, option: string | null | undefined) => (option && (d.options.some((o) => o.id === option) || d.answers?.some((a) => a.id === option)) ? option : undefined);
   const drafted = (d: PlanDecisionDTO) => valid(d, picks[d.id]) ?? valid(d, d.confirmed);
-  const chosen = (d: PlanDecisionDTO) => (open ? drafted(d) : plan.verdict?.picks?.[d.id]) ?? d.confirmed ?? d.mine ?? null;
-  const settled = (d: PlanDecisionDTO) => !open || !!drafted(d);
-  const next = plan.decisions.find((d) => !settled(d));
+  const publicPick = (d: PlanDecisionDTO) => {
+    const author = teammate?.author;
+    const option = author && Object.keys(d.votes ?? {}).find((id) => d.votes?.[id]?.includes(author));
+    return valid(d, d.confirmed) ?? valid(d, option);
+  };
+  const chosen = (d: PlanDecisionDTO) => open
+    ? (canPick ? drafted(d) : publicPick(d)) ?? null
+    : plan.verdict?.picks?.[d.id] ?? d.confirmed ?? d.mine ?? null;
+  const settled = (d: PlanDecisionDTO) => !open || !!chosen(d);
+  const next = canPick ? plan.decisions.find((d) => !settled(d)) : undefined;
   const decided = plan.decisions.filter(settled).length;
   const todo: TodoItem[] = plan.decisions.map((d) => {
     const label = settled(d) ? d.options.find((o) => o.id === chosen(d))?.label : undefined;
@@ -805,8 +808,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     setPicked(figure?.dataset.diagram ? { ...at, kind: "diagram", section: figure.dataset.diagram } : null);
   };
   const begin = (next: Draft) => {
-    setDrafting({ draft: next, source: sourceOf(anchorOf(next)) });
-    setDraftText(next.kind === "suggest" ? bodyOf(next.section) : null);
+    setDrafting({ draft: next, source: sourceOf(anchorOf(next)), text: "", replacement: next.kind === "suggest" ? bodyOf(next.section) : null });
     setPicked(null);
     setTab("comments");
     window.getSelection()?.removeAllRanges();
@@ -834,10 +836,9 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     void work.create({ kind: "passage", section, quote });
   };
   const comment = (anchor: PlanAnchor, on: string) => begin({ kind: "comment", anchor, where: on });
-  const setDraft = (_: null) => {
-    setDrafting(null);
-    setDraftText(null);
-  };
+  const draftText = drafting?.replacement ?? null;
+  const setDraftText = (replacement: string) => { if (drafting) setDrafting({ ...drafting, replacement }); };
+  const setDraftReason = (text: string) => { if (drafting) setDrafting({ ...drafting, text }); };
   // What the suggestion being typed changes: one replaced range of its section (start in code points).
   const draftChange = draft?.kind === "suggest" && draftText !== null ? changeBetween(bodyOf(draft.section), draftText) : null;
   // A suggestion is typed only in Suggesting, on text that isn't locked; a locked version takes none.
@@ -849,13 +850,13 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (!draft || draftStale) return;
     if (draft.kind === "suggest" && draftChange && (draftChange.before || draftChange.after)) {
       if (!suggestionReady) return;
-      if ((await write(() => source.suggest(plan.rev, { section: draft.section, ...draftChange }, text))) && alive.current) setDraft(null);
+      if (await write(() => source.suggest(plan.rev, { section: draft.section, ...draftChange }, text))) clearDraft();
       return;
     }
     if (!text.trim()) return;
     const on = anchorOf(draft);
     const start = on.kind === "text" ? toPoints(bodyOf(on.section), on.start) : 0;
-    if ((await write(() => source.comment(plan.rev, on.kind === "text" ? { ...on, start } : on, text, draft.kind === "ask"))) && alive.current) setDraft(null);
+    if (await write(() => source.comment(plan.rev, on.kind === "text" ? { ...on, start } : on, text, draft.kind === "ask"))) clearDraft();
   };
 
   // A section's box, saved: only what changed between the text it was opened on and the box is
@@ -893,7 +894,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // shows at once (and goes back to what was there if it isn't saved); a teammate's counts as
   // decided only once the Library has it.
   const pickOption = async (decision: string, option: string) => {
-    if (historical || busy) return;
+    if (!canPick || historical || busy) return;
     const before = picks[decision];
     if (!teammate) setPicks((p) => ({ ...p, [decision]: option }));
     const saved = await write(() => source.vote(plan.rev, decision, option));
@@ -939,12 +940,13 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     failedControl.current = approved ? "approve" : "changes";
     setSending(approved ? "approve" : "changes");
     const version = shared ? reviewVersion : undefined;
-    const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.current.trim(), ...(version === undefined ? {} : { version }), ...(attached.length ? { attachments: attached } : {}) }));
+    const note = readPlanDraft<string>(draftScope, "verdict");
+    const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note?.trim() ?? "", ...(version === undefined ? {} : { version }), ...(attached.length ? { attachments: attached } : {}) }));
+    if (now && readPlanDraft(draftScope, "verdict") === note) savePlanDraft(draftScope, "verdict", null);
     if (!alive.current) return;
     setSending(null);
     if (now) {
       // What was drafted went with the verdict: the next revision is a fresh read.
-      clearNote();
       setAttached([]);
       setPicks({});
     }
@@ -955,9 +957,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     failedControl.current = "cancel";
     setSending("cancel");
     const now = await send(() => client.cancelPlan!(plan.id, plan.rev));
-    if (!alive.current) return;
-    setSending(null);
-    if (now) clearNote();
+    if (now) savePlanDraft(draftScope, "verdict", null);
+    if (alive.current) setSending(null);
   };
   /* The plan becomes a personal doc, then the person's sign-off starts the build. */
   /* Built only when the personal doc it becomes reads as the text on screen (the live draft's, or a
@@ -1065,7 +1066,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       <div data-section={section} className="grid gap-2.5" data-testid="plan-suggest-preview">
         <DocText body={bodyOf(section)} marks={[...marksOf(section), { start: toUnits(bodyOf(section), draftChange.start), end: toUnits(bodyOf(section), draftChange.start) + draftChange.before.length, kind: "del", ins: draftChange.after }]} />
       </div>
-    ) : <SectionText section={section} body={bodyOf(section)} marks={marksOf(section)} layout={designDoc ? docLayout(section) : undefined}
+    ) : <SectionText section={section} body={bodyOf(section)} marks={marksOf(section)} layout={designDoc ? docLayout(section) : undefined} approver={approver}
       onOpen={mode === "viewing" ? undefined : opened} />;
   // The section being edited live wears a blue rule in the margin.
   const editingRule = "relative before:absolute before:-left-10 before:bottom-0 before:top-3.5 before:w-0.5 before:rounded-sm before:bg-[var(--group-1)]";
@@ -1213,7 +1214,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         <span className="text-xs text-ink-3">{teammate ? `Your edits are suggestions. ${authorName} accepts or rejects each one.` : "Your edits are suggestions. You accept or reject each one."}</span>
       </div>
       <div className="flex items-center gap-2">
-        <button type="button" className={quiet} onClick={() => setDraft(null)}>Discard all</button>
+        <button type="button" className={quiet} onClick={() => setDrafting(null)}>Discard all</button>
         <button type="button" className={main} disabled={busy || draftStale || !suggestionReady}
           onClick={() => doc.current?.ownerDocument.querySelector<HTMLFormElement>('[data-testid="thread-draft"]')?.requestSubmit()}>Send 1 suggestion</button>
       </div>
@@ -1264,7 +1265,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const placed = placeDecisions(parts, plan.decisions);
     const ordered = decisionsInOrder(parts, placed);
     const waiting = (d: PlanDecisionDTO) => open && !settled(d);
-    const left = ordered.filter(waiting);
+    const left = canPick ? ordered.filter(waiting) : [];
     const sectionIds = new Set(plan.sections.map((s) => s.id));
     // Where a note sits: beside its words, its section, its decision's card, or the overview.
     const home = (a: PlanAnchor | PlanThreadDTO["anchor"], thread?: number): { at: string; anchor: string | null } => {
@@ -1275,7 +1276,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       if (a.kind === "text" && !("state" in a && a.state === "detached")) return { at: section, anchor: thread === undefined ? "[data-sel]" : `[data-thread="${thread}"]` };
       return { at: section, anchor: null };
     };
-    const draftAt = draft ? (draft.kind === "suggest" ? { at: draft.section, anchor: null } : home(draft.anchor)) : null;
+    const draftAt = draftStale ? { at: LEDE, anchor: null }
+      : draft ? (draft.kind === "suggest" ? { at: draft.section, anchor: null } : home(draft.anchor)) : null;
     const notesFor = (at: string) => [
       ...openThreads.map((t) => ({ t, h: home(t.anchor, t.id) })).filter(({ h }) => h.at === at).map(({ t, h }) => ({
         key: `t${t.id}`, anchor: h.anchor, offset: t.anchor.start,
@@ -1286,7 +1288,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       ...(draft && draftAt?.at === at ? [{
         key: "draft", anchor: draftAt.anchor,
         node: <DraftCard key={`${draft.kind}:${draft.where}`} draft={draft} number={Math.max(0, ...threads.map((t) => t.id)) + 1} stale={draftStale} busy={busy}
-          onSend={(text) => void sendDraft(text)} onCancel={() => setDraft(null)} change={draftChange}
+          text={drafting?.text ?? ""} onText={setDraftReason} onSend={(text) => void sendDraft(text)} onCancel={() => setDrafting(null)} change={draftChange}
           className="grid gap-1.5 border-l border-branch pb-0.5 pl-[13px] pt-px font-sans text-[12.5px] leading-normal text-ink-2" />,
       }] : []),
     ];
@@ -1294,9 +1296,9 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const body = (s: PlanSectionDTO) => (s.kind === "mermaid" || s.kind === "svg" ? <Diagram section={s} figure={figures.get(s.id) ?? 1} /> : textBody(s.id, s.title));
     const cards = (at: string) => (placed.get(at) ?? []).map((d) => (
       <Annotated key={d.id} notes={notesFor(`decision:${d.id}`)}>
-        <DecisionCard decision={d} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} disabled={busy} picked={open ? drafted(d) ?? null : chosen(d)} nameOf={(who) => who === "person" ? "You" : nameOf(who)}
+        <DecisionCard decision={d} n={ordered.indexOf(d) + 1} of={ordered.length} open={open} canPick={canPick} disabled={busy} picked={chosen(d)} approver={approver} nameOf={(who) => who === "person" ? "You" : nameOf(who)}
           onPick={(o) => void pickOption(d.id, o)} onComment={canComment ? () => comment({ kind: "decision", decision: d.id }, decisionName(d.id)) : undefined}
-          answers={open ? ownAnswers(d.id) : undefined} />
+          answers={canPick ? ownAnswers(d.id) : undefined} />
       </Annotated>
     ));
     const titleAside = (s: PlanSectionDTO) => {
@@ -1379,7 +1381,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         <div ref={setStripHost} className="contents" />
         {typing && !historical && <FormatBar />}
         <div className="flex min-h-0 flex-1 bg-canvas" data-testid="plan-design-doc">
-          <Outline parts={parts} placed={placed} isOpen={waiting} decided={ordered.length - left.length} total={ordered.length} scrollPane={doc} footer={signOffs || undefined} />
+          <Outline parts={parts} placed={placed} isOpen={waiting} decided={decided} total={ordered.length} scrollPane={doc} footer={signOffs || undefined} />
           <div ref={doc} className="relative min-h-0 min-w-0 flex-1 overflow-auto border-l border-line max-[900px]:border-l-0" data-testid="plan-doc" data-mode={historical ? "viewing" : mode}
             onMouseUp={historical ? undefined : pick} onKeyUp={historical ? undefined : pick} onClick={historical ? undefined : followAnchor}>
             {historical ? <DocHistoryComparison key={historical.comparison.revision.rev} comparison={historical.comparison} onClose={historical.close} /> : (
@@ -1448,7 +1450,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                     </div>
                   </Menu>
                 )}
-                <VerdictNote key={noteReset} value={note} hasFeedback={hasFeedback}>{(note, setNote, canRequest) => (
+                <VerdictNote hasFeedback={hasFeedback}>{(note, setNote, canRequest) => (
                 <Menu label="Request changes" buttonClass={button} place="up" open={changesOpen} onOpenChange={setChangesOpen} testid="plan-changes-menu" again="changes">
                   <h4 className={menuTitle}>What should change?</h4>
                   <textarea className={menuNote} aria-label="Note for the supervisor" placeholder="A note for the supervisor (optional if you have commented)" value={note} onChange={(e) => setNote(e.target.value)} />
@@ -1548,7 +1550,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             )}
             {plan.sections.map(section)}
             {plan.decisions.map((d, i) => {
-              const mine = settled(d) ? (open ? "confirmed" : null) : d === next ? "yours to take next" : null;
+              const mine = settled(d) ? (open ? "confirmed" : null) : !canPick ? "not decided yet" : d === next ? "yours to take next" : null;
               return (
                 <section key={d.id} id={`plan-decision-${d.id}`} aria-labelledby={`plan-title-decision-${d.id}`} data-next={d === next || undefined} data-state={open && !settled(d) ? "undecided" : undefined} className={`grid gap-2.5 border-t pt-4 ${open && !settled(d) ? "border-pass" : "border-line"}`}>
                   <h3 className={heading}>
@@ -1556,7 +1558,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                     <span id={`plan-title-decision-${d.id}`}>{`Decision · ${d.title}`}</span>
                     <span className={aside}>{`decision ${i + 1} of ${plan.decisions.length}${mine ? ` · ${mine}` : ""}`}</span>
                   </h3>
-                  <Decision decision={d} chosen={chosen(d)} open={open && !busy} onPick={(o) => void pickOption(d.id, o)} nameOf={nameOf} />
+                  <Decision decision={d} chosen={chosen(d) ?? (canPick ? d.mine ?? null : null)} open={canPick && !busy} onPick={(o) => void pickOption(d.id, o)} nameOf={nameOf} />
                   <p className="flex max-w-[70ch] flex-wrap items-baseline gap-x-2 font-sans text-[12.5px] leading-normal text-ink-3">
                     {d.challenge && <span>{`${d.mine ? "Against its own pick: " : ""}${d.challenge}`}</span>}
                     {commentButton(() => comment({ kind: "decision", decision: d.id }, decisionName(d.id)))}
@@ -1571,8 +1573,9 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         {sharePanel}
         {!sharingOpen && (columnOpen ? (
           <Review plan={plan} tab={draft ? "comments" : tab} onTab={setTab} todo={todo} decided={decided} onJump={jump} where={where} draft={draft} draftStale={draftStale} busy={busy}
-            onDraftSend={(text) => void sendDraft(text)} onDraftCancel={() => setDraft(null)} draftChange={draftChange}
-            actions={actions} limits={teammate ? { reply: canComment, resolve: (t) => canComment && t.author === "person" } : undefined} onShow={showThread} shared={sharedFiles} onCollapse={() => { setDraft(null); collapse(true); }}
+            draftText={drafting?.text ?? ""} onDraftText={setDraftReason}
+            onDraftSend={(text) => void sendDraft(text)} onDraftCancel={() => setDrafting(null)} draftChange={draftChange}
+            actions={actions} limits={teammate ? { reply: canComment, resolve: (t) => canComment && t.author === "person" } : undefined} onShow={showThread} shared={sharedFiles} onCollapse={() => { setDrafting(null); collapse(true); }}
             active={followed ? Number(followed.thread) : null} judge={teammate ? authorName : undefined} sheet={sheet}
             historyPanel={source.history && <DocumentHistory client={source.history} planId={plan.id} refresh={historyVersion} nameOf={nameOf}
               onCompare={(comparison, close) => setHistorical(comparison ? { comparison, close } : null)} />}
@@ -1600,7 +1603,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             </div>
           </>
         ) : open ? (
-          <VerdictNote key={noteReset} value={note} hasFeedback={hasFeedback}>{(note, setNote, canRequest) => (
+          <VerdictNote hasFeedback={hasFeedback}>{(note, setNote, canRequest) => (
           <>
             <div className="grid min-w-0 gap-0.5" data-testid="plan-next">
               <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">

@@ -11,6 +11,7 @@
    No worker split or file lists: brindle handles the split once the plan is approved. */
 
 import { createContext, memo, useContext, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
+import { usePlanDraft } from "./planDrafts";
 import type { Plan } from "../../../api/client";
 import type { PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
 import { ago } from "../../../components/ProviderConnect";
@@ -220,12 +221,10 @@ function Mark({ chosen }: { chosen: boolean }) {
   );
 }
 
-/* The short field an own answer is typed in (the "ghost" treatment, shots/decision-other.tsx):
-   Enter saves it, Escape lets it go. Editing one's own answer offers Remove instead of Cancel. */
-function OwnAnswerField({ initial, busy, onSave, onCancel, onRemove }: {
-  initial: string; busy: boolean; onSave(text: string): void; onCancel(): void; onRemove?: () => void;
+/* Enter saves an own answer. Escape can close an untouched field or let go of focus. */
+function OwnAnswerField({ text, initial, busy, onText, onSave, onCancel, onRemove }: {
+  text: string; initial: string; busy: boolean; onText(text: string): void; onSave(text: string): void; onCancel(): void; onRemove?: () => void;
 }) {
-  const [text, setText] = useState(initial);
   const save = (e: FormEvent) => {
     e.preventDefault();
     if (text.trim() && !busy) onSave(text.trim());
@@ -236,13 +235,18 @@ function OwnAnswerField({ initial, busy, onSave, onCancel, onRemove }: {
       <Mark chosen />
       <span className="grid min-w-0 gap-1.5">
         <span className="text-sm font-semibold leading-[1.45] text-ink">Your own answer</span>
-        <input autoFocus value={text} onChange={(e) => setText(e.target.value)} disabled={busy} maxLength={OWN_MAX} aria-label="Your own answer"
-          placeholder="Say what you'd do instead" onKeyDown={(e) => { if (e.key === "Escape") onCancel(); }}
+        <input autoFocus value={text} onChange={(e) => onText(e.target.value)} disabled={busy} maxLength={OWN_MAX} aria-label="Your own answer"
+          placeholder="Say what you'd do instead" onKeyDown={(e) => {
+            if (e.key === "Escape" && text === initial) {
+              e.preventDefault();
+              onCancel();
+            }
+          }}
           className="w-full min-w-0 rounded-none border-0 border-b border-line-strong bg-transparent px-0 py-1 font-sans text-[13.5px] leading-[1.45] text-ink placeholder:text-ink-3 focus:border-branch focus:outline-none" />
         <span className={`${ownHint} gap-3`}>
           <span className="flex-1">Teammates can pick it too.</span>
-          {onRemove ? <button type="button" className={link} disabled={busy} onClick={onRemove}>Remove</button>
-            : <button type="button" className={link} disabled={busy} onClick={onCancel}>Cancel</button>}
+          {onRemove && <button type="button" className={link} disabled={busy} onClick={onRemove}>Remove</button>}
+          <button type="button" className={link} disabled={busy} onClick={onCancel}>Cancel</button>
         </span>
       </span>
     </form>
@@ -256,7 +260,9 @@ function OwnAnswerRows({ decision: d, open, disabled, picked, onPick, nameOf, an
   decision: PlanDecisionDTO; open: boolean; disabled: boolean; picked: string | null;
   onPick(option: string): void; nameOf?: (who: string) => string; answers?: OwnAnswers;
 }) {
-  const [typing, setTyping] = useState<string | null>(null);     // "new", or the id of the answer being reworded
+  const [draft, setDraft, clearDraft] = usePlanDraft<{ id: string; text: string }>(`answer:${d.id}`);
+  const typing = draft?.id; // "new", or the id of the answer being reworded
+  const field = { text: draft?.text ?? "", onText: (text: string) => { if (draft) setDraft({ ...draft, text }); }, onCancel: clearDraft };
   const [saving, setSaving] = useState(false);
   const own = d.answers ?? [];
   const named = (who: string) => (who === "person" ? "You" : nameOf?.(who) ?? personName(who));
@@ -265,15 +271,15 @@ function OwnAnswerRows({ decision: d, open, disabled, picked, onPick, nameOf, an
     setSaving(true);
     const saved = await work();
     setSaving(false);
-    if (saved) setTyping(null);
+    if (saved) clearDraft();
   };
   const mine = own.filter((a) => a.author === "person").length;
   return (
     <>
       {own.map((a) => {
         if (typing === a.id && answers) {
-          return <OwnAnswerField key={a.id} initial={a.text} busy={saving || disabled} onSave={(text) => void run(() => answers.edit(a.id, text))}
-            onCancel={() => setTyping(null)} onRemove={() => void run(() => answers.remove(a.id))} />;
+          return <OwnAnswerField key={a.id} {...field} initial={a.text} busy={saving || disabled} onSave={(text) => void run(() => answers.edit(a.id, text))}
+            onRemove={() => void run(() => answers.remove(a.id))} />;
         }
         const chosen = picked === a.id;
         const voters = d.votes?.[a.id] ?? [];
@@ -299,7 +305,7 @@ function OwnAnswerRows({ decision: d, open, disabled, picked, onPick, nameOf, an
                 {yours && open && answers && !a.locked && (
                   <>
                     <span aria-hidden>·</span>
-                    <button type="button" className={link} disabled={disabled || saving} onClick={(e) => { e.preventDefault(); setTyping(a.id); }}>Edit</button>
+                    <button type="button" className={link} disabled={disabled || saving} onClick={(e) => { e.preventDefault(); setDraft({ id: a.id, text: a.text }); }}>Edit</button>
                   </>
                 )}
               </span>
@@ -308,11 +314,11 @@ function OwnAnswerRows({ decision: d, open, disabled, picked, onPick, nameOf, an
         );
       })}
       {typing === "new" && answers && (
-        <OwnAnswerField initial="" busy={saving || disabled} onSave={(text) => void run(() => answers.add(text))} onCancel={() => setTyping(null)} />
+        <OwnAnswerField {...field} initial="" busy={saving || disabled} onSave={(text) => void run(() => answers.add(text))} />
       )}
       {open && answers && typing !== "new" && mine < 5 && own.length < 20 && (
         <div className="border-t border-dashed border-line px-4 py-2.5">
-          <button type="button" data-testid="plan-add-answer" disabled={disabled} onClick={() => setTyping("new")}
+          <button type="button" data-testid="plan-add-answer" disabled={disabled} onClick={() => setDraft({ id: "new", text: "" })}
             className="inline-flex cursor-pointer items-center gap-2 border-0 bg-transparent p-0 font-sans text-[13px] text-ink-3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45">
             <span aria-hidden className="grid size-[15px] place-items-center rounded-full font-mono text-[12px] leading-none shadow-[inset_0_0_0_1.5px_var(--line)]">+</span>
             Your own answer
@@ -325,7 +331,7 @@ function OwnAnswerRows({ decision: d, open, disabled, picked, onPick, nameOf, an
 
 /* A decision, where its question comes up: picking an option is the person's answer. Sap marks
    one that still needs them; once picked, the card goes quiet and a tick stays. */
-export function DecisionCard({ decision: d, n, of, open, disabled = false, picked, onPick, onComment, nameOf, answers }: {
+export function DecisionCard({ decision: d, n, of, open, canPick, disabled = false, picked, onPick, onComment, nameOf, answers, approver }: {
   decision: PlanDecisionDTO;
   /* Own answers (brindle/plan_answers.py): add one (it becomes the pick), reword or take back one's own.
      Without it the card offers none; answers already on the card still show and can be picked. */
@@ -336,6 +342,8 @@ export function DecisionCard({ decision: d, n, of, open, disabled = false, picke
   of: number;
   /* The plan still takes picks. */
   open: boolean;
+  canPick: boolean;
+  approver?: string;
   /* No pick for now (a teammate's vote is still being saved). */
   disabled?: boolean;
   /* The option chosen: the person's pick while open, the verdict's after. */
@@ -351,8 +359,8 @@ export function DecisionCard({ decision: d, n, of, open, disabled = false, picke
       className={`relative min-w-0 [overflow-wrap:anywhere] mb-1.5 mt-[26px] scroll-mt-16 rounded-md border border-l-2 font-sans transition-colors duration-200 ${waiting ? "border-[color-mix(in_srgb,var(--sap)_42%,transparent)] border-l-sap bg-[color-mix(in_srgb,var(--sap)_5%,transparent)]" : "border-line border-l-line-strong"}`}>
       <div className="flex flex-wrap items-center justify-between gap-3 px-4 pt-3">
         <p className="m-0 text-[11px] font-medium uppercase leading-[1.3] tracking-[0.08em] text-ink-3">{`Decision ${n} of ${of}`}</p>
-        {waiting ? <span className={`${pill} text-sap`}>Needs your pick</span>
-          : done ? <Tick>Decided{open && <span className="font-normal text-ink-3">· change it any time before you approve</span>}</Tick> : null}
+        {waiting ? <span className={`${pill} text-sap`}>{canPick ? "Needs your pick" : "Not decided yet"}</span>
+          : done ? <Tick>Decided{canPick && <span className="font-normal text-ink-3" data-testid="plan-decision-approval" data-approver={approver ?? "you"}>· change it any time before {approver ? `${approver} approves` : "you approve"}</span>}</Tick> : null}
       </div>
       <h3 id={`plan-q-${d.id}`} className="m-0 mt-1 px-4 text-base font-semibold leading-[1.35] tracking-[-0.01em] text-ink">{d.title}</h3>
       {/* Who picked what, saved as each pick is made: everyone on a shared plan sees the same. */}
@@ -364,8 +372,8 @@ export function DecisionCard({ decision: d, n, of, open, disabled = false, picke
           const cons = o.cons ?? [];
           return (
             <label key={o.id} data-testid="plan-option" data-option={o.id} data-chosen={chosen || undefined}
-              className={`relative grid grid-cols-[16px_minmax(0,1fr)] gap-x-3 border-t border-line px-4 pb-3 pt-[11px] transition-colors has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-branch ${open ? "cursor-pointer hover:bg-[color-mix(in_srgb,var(--ink)_4%,transparent)]" : ""}`}>
-              <input type="radio" name={`decision-${d.id}`} value={o.id} checked={chosen} disabled={!open || disabled} onChange={() => onPick(o.id)} className="absolute m-0 size-px opacity-0" />
+              className={`relative grid grid-cols-[16px_minmax(0,1fr)] gap-x-3 border-t border-line px-4 pb-3 pt-[11px] transition-colors has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-branch ${canPick ? "cursor-pointer hover:bg-[color-mix(in_srgb,var(--ink)_4%,transparent)]" : ""}`}>
+              <input type="radio" name={`decision-${d.id}`} value={o.id} checked={chosen} disabled={!canPick || disabled} onChange={() => onPick(o.id)} className="absolute m-0 size-px opacity-0" />
               <span aria-hidden className={`relative mt-[3px] size-[15px] rounded-full ${chosen ? "bg-pass-soft" : "shadow-[inset_0_0_0_1.5px_var(--line-strong)]"}`}>
                 {chosen && <span className="absolute left-[5px] top-[2.5px] h-2 w-1 rotate-45 border-b-[1.75px] border-r-[1.75px] border-solid border-pass" />}
               </span>
@@ -391,7 +399,7 @@ export function DecisionCard({ decision: d, n, of, open, disabled = false, picke
             </label>
           );
         })}
-        <OwnAnswerRows decision={d} open={open} disabled={disabled} picked={picked} onPick={onPick} nameOf={nameOf} answers={answers} />
+        <OwnAnswerRows decision={d} open={canPick} disabled={disabled} picked={picked} onPick={onPick} nameOf={nameOf} answers={answers} />
       </div>
       {(d.challenge || onComment) && (
         <div className="flex items-baseline justify-between gap-4 border-t border-line px-4 pb-[11px] pt-2.5">
@@ -422,14 +430,15 @@ export function MarginNote({ thread: t, busy, canJudge, canReply, canResolve, ac
   thread: PlanThreadDTO; busy: boolean; canJudge: boolean; canReply: boolean; canResolve: boolean; actions: ThreadActions; lit: boolean;
   supervisorReplying?: boolean;
 }) {
-  const [replying, setReplying] = useState(false);
-  const [text, setText] = useState("");
+  const [draft, setDraft, clearDraft] = usePlanDraft<string>(`reply:${t.id}`);
+  const [replying, setReplying] = useState(!!draft);
+  const text = draft ?? "";
   const setHovered = useContext(SetHoveredThread);
   const suggestion = t.kind === "suggestion";
   const send = async (e: FormEvent) => {
     e.preventDefault();
     if (!text.trim() || !(await actions.reply(t.id, text.trim()))) return;
-    setText("");
+    clearDraft();
     setReplying(false);
   };
   return (
@@ -453,9 +462,9 @@ export function MarginNote({ thread: t, busy, canJudge, canReply, canResolve, ac
         </div>
       ))}
       {supervisorReplying && <SupervisorReplying />}
-      {replying && (
+      {canReply && replying && (
         <form className="flex items-center gap-2 pl-[25px]" onSubmit={(e) => void send(e)}>
-          <input className={`${field} min-w-0 flex-1 text-[12.5px]`} aria-label="Reply" placeholder="Reply…" autoFocus value={text} onChange={(e) => setText(e.target.value)} />
+          <input className={`${field} min-w-0 flex-1 text-[12.5px]`} aria-label="Reply" placeholder="Reply…" autoFocus value={text} onChange={(e) => setDraft(e.target.value || null)} />
           <button type="submit" className={`${button} text-xs`} disabled={busy || !text.trim()}>Send</button>
         </form>
       )}
@@ -477,17 +486,17 @@ export function MarginNote({ thread: t, busy, canJudge, canReply, canResolve, ac
 const HoveredThread = createContext<number | null>(null);
 const SetHoveredThread = createContext<((id: number | null) => void) | null>(null);
 
-export const SectionText = memo(function SectionText({ section, body, marks, layout, onOpen }: {
-  section: string; body: string; marks: Mark[]; layout?: DocLayout; onOpen?(section: string): void;
+export const SectionText = memo(function SectionText({ section, body, marks, layout, approver, onOpen }: {
+  section: string; body: string; marks: Mark[]; layout?: DocLayout; approver?: string; onOpen?(section: string): void;
 }) {
   const hovered = useContext(HoveredThread);
   const shown = hovered === null ? marks : marks.map((mark) => mark.thread === hovered ? { ...mark, lit: true } : mark);
   return (
     <div data-section={section} className="grid gap-2.5" onClick={onOpen && (() => onOpen(section))}>
-      <DocText body={body} marks={shown} layout={layout} />
+      <DocText body={body} marks={shown} layout={layout} approver={approver} />
     </div>
   );
-}, (a, b) => a.section === b.section && a.body === b.body && a.layout === b.layout && a.onOpen === b.onOpen && sameMarks(a.marks, b.marks));
+}, (a, b) => a.section === b.section && a.body === b.body && a.layout === b.layout && a.approver === b.approver && a.onOpen === b.onOpen && sameMarks(a.marks, b.marks));
 
 /* Text with its notes in the margin beside it: each note level with the words it is on (`anchor`,
    a selector inside the text; none: the top), pushed down past the one above it. Under 1180px

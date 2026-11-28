@@ -151,7 +151,7 @@ const labelOnly = (b: Block) => b.kind === "p" && !!b.run && /^\*\*[^*]+\*\*:?$/
 const docLabel = "mb-1.5 font-sans text-[11px] font-medium uppercase leading-[1.3] tracking-[0.08em] text-ink-3";
 const dot = "relative pl-4 before:absolute before:left-0.5 before:top-[0.72em] before:size-1 before:rounded-full before:bg-ink-3 before:content-['']";
 
-function arrange(blocks: Block[], layout: DocLayout, leaf: Leaf): ReactNode[] {
+function arrange(blocks: Block[], layout: DocLayout, leaf: Leaf, approver?: string): ReactNode[] {
   const show = (b: Block): ReactNode => {
     if (labelOnly(b)) {
       const lead = boldLead(b.run!)!;
@@ -232,7 +232,10 @@ function arrange(blocks: Block[], layout: DocLayout, leaf: Leaf): ReactNode[] {
               </li>
             ))}
           </ul>
-          <p className="font-sans text-[12.5px] leading-[1.55] text-ink-3">When you approve, brindle splits this into tasks, runs them and checks each one. You follow progress in the session.</p>
+          <p className="font-sans text-[12.5px] leading-[1.55] text-ink-3" data-testid="plan-rollout-approval" data-approver={approver ?? "you"}>
+            When {approver ? `${approver} approves` : "you approve"}, brindle splits this into tasks, runs them and checks each one.
+            {!approver && <span data-testid="plan-rollout-session"> You follow progress in the session.</span>}
+          </p>
         </div>
       );
     }
@@ -240,7 +243,7 @@ function arrange(blocks: Block[], layout: DocLayout, leaf: Leaf): ReactNode[] {
   });
 }
 
-export const DocText = memo(function DocText({ body, marks = [], layout }: { body: string; marks?: Mark[]; layout?: DocLayout }) {
+export const DocText = memo(function DocText({ body, marks = [], layout, approver }: { body: string; marks?: Mark[]; layout?: DocLayout; approver?: string }) {
   const leaf = leaves(marks);
   const lines: { text: string; at: number }[] = [];
   let offset = 0;
@@ -368,8 +371,8 @@ export const DocText = memo(function DocText({ body, marks = [], layout }: { bod
     const run = joined(para);
     put((leaf) => <p key={k} className="max-w-[68ch]">{inline(run, leaf, k)}</p>, { kind: "p", run });
   }
-  return <>{layout ? arrange(blocks, layout, leaf) : blocks.map((b) => b.node(leaf))}</>;
-}, (a, b) => a.body === b.body && a.layout === b.layout && sameMarks(a.marks, b.marks));
+  return <>{layout ? arrange(blocks, layout, leaf, approver) : blocks.map((b) => b.node(leaf))}</>;
+}, (a, b) => a.body === b.body && a.layout === b.layout && a.approver === b.approver && sameMarks(a.marks, b.marks));
 
 /* The engine counts a section's text in code points (brindle/plan_docs.py is Python); the DOM
    and a JS string count UTF-16 units. The two part ways after any character outside the basic

@@ -11,6 +11,7 @@
    comments, decisions still to take) and opens it again. */
 
 import { useState, type FormEvent, type ReactNode } from "react";
+import { usePlanDraft } from "./planDrafts";
 import type { Plan, PlanAnchor } from "../../../api/client";
 import type { PlanThreadDTO } from "../../../api/schema";
 import { ago } from "../../../components/ProviderConnect";
@@ -118,16 +119,18 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
   judge?: string;
   supervisorReplying: boolean;
 }) {
-  const [replying, setReplying] = useState(false);
-  const [text, setText] = useState("");
+  const [draft, setDraft, clearDraft] = usePlanDraft<string>(`reply:${t.id}`);
+  const [replying, setReplying] = useState(!!draft);
+  const text = draft ?? "";
   const open = t.status === "open";
+  const canReply = open && (!limits || limits.reply);
   const suggestion = t.kind === "suggestion";
   const canJudge = !limits;
   const canResolve = !limits || limits.resolve(t);
   const send = async (e: FormEvent) => {
     e.preventDefault();
     if (!text.trim() || !(await actions.reply(t.id, text.trim()))) return;
-    setText("");
+    clearDraft();
     setReplying(false);
   };
   return (
@@ -164,16 +167,16 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
           {supervisorReplying && <SupervisorReplying />}
         </div>
       )}
-      {replying && (
+      {canReply && replying && (
         <form className="flex items-center gap-2" onSubmit={(e) => void send(e)}>
-          <input className={`${field} min-w-0 flex-1 text-[12.5px]`} aria-label="Reply" placeholder="Reply…" autoFocus value={text} onChange={(e) => setText(e.target.value)} />
+          <input className={`${field} min-w-0 flex-1 text-[12.5px]`} aria-label="Reply" placeholder="Reply…" autoFocus value={text} onChange={(e) => setDraft(e.target.value || null)} />
           <button type="submit" className={`${button} text-xs`} disabled={busy || !text.trim()}>Send</button>
         </form>
       )}
       <div className="mt-0.5 flex gap-3.5">
         {open && suggestion && canJudge && <button type="button" className={`${act} font-medium !text-pass`} disabled={busy || !can || t.anchor.state === "detached"} onClick={() => void actions.accept(t.id)}>Accept</button>}
         {open && suggestion && canJudge && <button type="button" className={act} disabled={busy} onClick={() => void actions.reject(t.id)}>Reject</button>}
-        {open && (!limits || limits.reply) && <button type="button" className={act} onClick={() => setReplying((r) => !r)}>Reply</button>}
+        {canReply && <button type="button" className={act} onClick={() => setReplying((r) => !r)}>Reply</button>}
         {open && suggestion && !canJudge && <span className="text-xs text-ink-3">{`${judge ?? "The author"} accepts or rejects`}</span>}
         {open && !suggestion && canResolve && <button type="button" className={act} disabled={busy} onClick={() => void actions.resolve(t.id, true)}>Resolve</button>}
         {t.status === "resolved" && canResolve && <button type="button" className={act} disabled={busy} onClick={() => void actions.resolve(t.id, false)}>Reopen</button>}
@@ -188,15 +191,15 @@ const draftWords = {
   suggest: { name: "Why (optional)", placeholder: "Why (optional)", send: "Send suggestion" },
 };
 
-export function DraftCard({ draft, number, stale, busy, onSend, onCancel, change, className = `${card} bg-canvas-2` }: {
+export function DraftCard({ draft, number, stale, busy, text, onText, onSend, onCancel, change, className = `${card} bg-canvas-2` }: {
   draft: Draft; number: number; stale: boolean; busy: boolean;
   /* Its box: a card in the column, or (the planning doc) a note in the margin. */
   className?: string;
+  text: string; onText(text: string): void;
   onSend(text: string): void; onCancel(): void;
   /* A suggestion's change as it is typed on the page (null: nothing changed yet). */
   change?: { before: string; after: string } | null;
 }) {
-  const [text, setText] = useState("");
   const words = draftWords[draft.kind];
   const hasChange = !!change && (!!change.before || !!change.after);
   const asComment = draft.kind === "suggest" && !hasChange && !!text.trim();
@@ -217,7 +220,7 @@ export function DraftCard({ draft, number, stale, busy, onSend, onCancel, change
       {draft.kind === "suggest" && (change && hasChange
         ? <Change before={change.before} after={change.after} />
         : <p className="font-medium text-ink">Type your change in the plan: what you delete is struck through, what you type is green.</p>)}
-      <textarea className={`${field} ${draft.kind === "suggest" ? "min-h-8" : "min-h-16"} w-full text-[12.5px]`} aria-label={words.name} placeholder={words.placeholder} autoFocus={draft.kind !== "suggest"} value={text} onChange={(e) => setText(e.target.value)} />
+      <textarea className={`${field} ${draft.kind === "suggest" ? "min-h-8" : "min-h-16"} w-full text-[12.5px]`} aria-label={words.name} placeholder={words.placeholder} autoFocus={draft.kind !== "suggest"} value={text} onChange={(e) => onText(e.target.value)} />
       {stale && <p role="alert" className="text-xs text-sap">This part of the plan changed in a newer revision. Cancel, and start again on the new text.</p>}
       <div className="flex items-center gap-1.5">
         <button type="submit" className={`${draft.kind === "suggest" ? main : button} text-xs`} disabled={!ready || busy}>{asComment ? "Send as comment" : words.send}</button>
@@ -231,7 +234,7 @@ export function DraftCard({ draft, number, stale, busy, onSend, onCancel, change
 
 const TABS: [ReviewTab, string][] = [["comments", "Comments"], ["decisions", "Decisions"], ["history", "History"], ["tasks", "Tasks"]];
 
-export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, draftStale, busy, onDraftSend, onDraftCancel, draftChange, actions, limits, onShow, shared, onCollapse, active, judge, sheet, history, historyRev, onHistoryPick, historyPanel, workItems, work, canLink }: {
+export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, draftStale, busy, draftText, onDraftText, onDraftSend, onDraftCancel, draftChange, actions, limits, onShow, shared, onCollapse, active, judge, sheet, history, historyRev, onHistoryPick, historyPanel, workItems, work, canLink }: {
   plan: Plan;
   /* The design's items in the tracker, with what can be done to them (WorkPanel); replaces `workItems`. */
   work?: Work;
@@ -246,6 +249,8 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
   /* A thread's place in the doc, in words. */
   where(thread: PlanThreadDTO): string;
   draft: Draft | null;
+  draftText: string;
+  onDraftText(text: string): void;
   /* What the draft is on changed in a newer revision: it can't be sent. */
   draftStale: boolean;
   busy: boolean;
@@ -316,7 +321,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
   } else {
     body = (
       <>
-        {draft && <DraftCard key={`${draft.kind}:${draft.where}`} draft={draft} number={nextNumber} stale={draftStale} busy={busy} onSend={onDraftSend} onCancel={onDraftCancel} change={draftChange} />}
+        {draft && <DraftCard key={`${draft.kind}:${draft.where}`} draft={draft} number={nextNumber} stale={draftStale} busy={busy} text={draftText} onText={onDraftText} onSend={onDraftSend} onCancel={onDraftCancel} change={draftChange} />}
         {open.map(thread)}
         {open.length === 0 && !draft && <p className="px-3.5 py-3 text-ink-3">No open comments. Highlight any text in the plan to comment on it.</p>}
         {answered.length > 0 && (
