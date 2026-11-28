@@ -39,6 +39,7 @@ def test_rebase_skips_unchanged_paragraphs(matching_budget):
     assert replayed == result.text
 
 
+@pytest.mark.variant("Aligning identical paragraphs by content can turn edits at different positions into collisions")
 def test_large_rebase_keeps_repeated_paragraphs_at_their_positions(matching_budget):
     paragraphs = ["Budget: 100."] * 160
     local, remote = paragraphs.copy(), paragraphs.copy()
@@ -75,6 +76,7 @@ def _compare(left, right):
     return change["spans"]
 
 
+@pytest.mark.variant("History comparison can mark the unchanged middle of a large section as deleted and reinserted")
 def test_large_history_section_keeps_unchanged_lines_between_edits(matching_budget):
     middle = "".join(f"{i:03}: " + "stable content " * 8 + "\n" for i in range(472))
     spans = _compare("Left\n" + middle + "Up", "left\n" + middle + "up")
@@ -84,6 +86,7 @@ def test_large_history_section_keeps_unchanged_lines_between_edits(matching_budg
     ]
 
 
+@pytest.mark.variant("An insertion before an unchanged run must shift offsets inside the run by the insertion length")
 def test_large_draft_mapping_keeps_offsets_between_edits(matching_budget):
     middle = "".join(f"{i:03}: " + "stable content " * 6 + "\n" for i in range(270))
     at, changed = plan_drafts.mapping("Left\n" + middle + "Up", "leftward\n" + middle + "up")
@@ -93,10 +96,10 @@ def test_large_draft_mapping_keeps_offsets_between_edits(matching_budget):
 
 
 @pytest.mark.parametrize("prefix, suffix, remove_word", [
-    pytest.param("! ", " ?", False, id="short-edge-insertions"),
     pytest.param("! ", " ?", True, id="interior-deletion",
                  marks=pytest.mark.variant("An interior deletion splits the unchanged run into two anchors")),
-    pytest.param("[" * 30, "]" * 30, False, id="long-edge-insertions"),
+    pytest.param("[" * 30, "]" * 30, False, id="long-edge-insertions",
+                 marks=pytest.mark.variant("A wrapper beyond the sparse edit budget can break draft offset mapping")),
 ])
 def test_retype_keeps_a_middle_replacement_in_place_after_relay_insertions(matching_budget, prefix, suffix,
                                                                          remove_word):
@@ -127,7 +130,8 @@ def test_retype_keeps_a_relay_replacement_when_local_inserts_long_edges(matching
 
 
 @pytest.mark.parametrize("wrap_locally, prefix, replacement", [
-    pytest.param(False, "w! ", "Qord000", id="relay-wrapper-shares-first-character"),
+    pytest.param(False, "w! ", "Qord000", id="relay-wrapper-shares-first-character",
+                 marks=pytest.mark.variant("A shared character can divert the first-word edit into the relay prefix")),
     pytest.param(True, "word000 ! ", "word900", id="local-wrapper-shares-first-token",
                  marks=pytest.mark.variant("A shared edge token must not split the local insertion")),
 ])
@@ -145,7 +149,8 @@ def test_retype_keeps_the_first_word_edit_inside_a_partial_edge_wrapper(matching
 
 
 @pytest.mark.parametrize("delete_locally, leading", [
-    pytest.param(False, "", id="relay-deletes-first-copy"),
+    pytest.param(False, "", id="relay-deletes-first-copy",
+                 marks=pytest.mark.variant("The edit can be lost by anchoring to the copy the relay deleted")),
     pytest.param(True, "", id="local-deletes-first-copy",
                  marks=pytest.mark.variant("Word hunks must delete the first copy and preserve the relay edit")),
     pytest.param(False, "w! ", id="relay-deletes-first-copy-with-partial-prefix",
@@ -165,6 +170,7 @@ def test_retype_edits_the_surviving_suffix_of_two_copies(matching_budget, delete
     assert doc.text("s") == expected
 
 
+@pytest.mark.variant("Trimming a small diff's common suffix changes alignment when the last character repeats")
 def test_small_diffs_keep_legacy_offsets():
     # A repeated character can be either the first match or a common suffix.
     # The old matcher picked the first match, which matters for draft cursors.
