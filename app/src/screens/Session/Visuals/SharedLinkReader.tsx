@@ -137,7 +137,7 @@ function LinkDoc({ client, token, id, lead, signedOut }: {
     me: doc.me,
     rights: { comment: false, suggest: false, signOff: false },
     signedOff: false,
-    author: null,
+    author: doc.author ?? null,
     directory: [],
   } : undefined;
   return (
