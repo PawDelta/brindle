@@ -10,13 +10,13 @@
    - the bottom bar's menus (Cancel planning, Request changes) and the toolbar's (mode, history).
    No worker split or file lists: brindle handles the split once the plan is approved. */
 
-import { useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { createContext, memo, useContext, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 import type { Plan } from "../../../api/client";
 import type { PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
 import { ago } from "../../../components/ProviderConnect";
 import { button, field, pill, quiet } from "../../../components/ui";
 import { SupervisorReplying, type ThreadActions } from "./DocReview";
-import type { DocLayout } from "./DocText";
+import { DocText, sameMarks, type DocLayout, type Mark } from "./DocText";
 import { Avatar, personName, picksLine } from "./PlanCards";
 import type { Mode, MODES } from "./PlanReader";
 
@@ -142,11 +142,26 @@ export function ModeMenu({ modes, current, allowed, onPick }: { modes: typeof MO
 
 /* "On this page": the numbered sections, each decision under its section with a dot while it
    waits for the person's pick and a tick once picked. */
-export function Outline({ parts, placed, isOpen, decided, total, current, footer }: {
-  parts: SpinePart[]; placed: Map<string, PlanDecisionDTO[]>; isOpen(d: PlanDecisionDTO): boolean; decided: number; total: number; current: string | null;
+export function Outline({ parts, placed, isOpen, decided, total, scrollPane, footer }: {
+  parts: SpinePart[]; placed: Map<string, PlanDecisionDTO[]>; isOpen(d: PlanDecisionDTO): boolean; decided: number; total: number; scrollPane: RefObject<HTMLDivElement | null>;
   /* Under the sections: a shared doc's sign-off sheet. */
   footer?: ReactNode;
 }) {
+  const [current, setCurrent] = useState<string | null>(null);
+  useEffect(() => {
+    const root = scrollPane.current;
+    if (!root) return;
+    const read = () => {
+      const top = root.getBoundingClientRect().top;
+      let at: string | null = null;
+      for (const el of root.querySelectorAll<HTMLElement>("[data-spine]")) {
+        if (el.getBoundingClientRect().top - top < 140) at = el.dataset.spine ?? null;
+      }
+      setCurrent(at);
+    };
+    root.addEventListener("scroll", read);
+    return () => root.removeEventListener("scroll", read);
+  }, [scrollPane]);
   const row = "flex items-baseline gap-2 rounded-md px-2 py-[3px] text-[12.5px] leading-[1.4] no-underline hover:bg-surface-2 hover:text-ink";
   const go = (id: string) => (e: { preventDefault(): void }) => {
     e.preventDefault();
@@ -403,12 +418,13 @@ function Who({ who, children }: { who: string; children?: ReactNode }) {
 }
 
 /* A comment or suggestion in the margin beside its text. Neutral until it is followed. */
-export function MarginNote({ thread: t, busy, canJudge, canReply, canResolve, actions, lit, onHover, supervisorReplying }: {
-  thread: PlanThreadDTO; busy: boolean; canJudge: boolean; canReply: boolean; canResolve: boolean; actions: ThreadActions; lit: boolean; onHover(on: boolean): void;
+export function MarginNote({ thread: t, busy, canJudge, canReply, canResolve, actions, lit, supervisorReplying }: {
+  thread: PlanThreadDTO; busy: boolean; canJudge: boolean; canReply: boolean; canResolve: boolean; actions: ThreadActions; lit: boolean;
   supervisorReplying?: boolean;
 }) {
   const [replying, setReplying] = useState(false);
   const [text, setText] = useState("");
+  const setHovered = useContext(SetHoveredThread);
   const suggestion = t.kind === "suggestion";
   const send = async (e: FormEvent) => {
     e.preventDefault();
@@ -417,9 +433,9 @@ export function MarginNote({ thread: t, busy, canJudge, canReply, canResolve, ac
     setReplying(false);
   };
   return (
-    <div className={`grid min-w-0 [overflow-wrap:anywhere] gap-[5px] border-l pb-0.5 pl-[13px] pt-px font-sans text-[12.5px] leading-normal text-ink-2 ${lit ? "border-branch" : "border-line-strong"}`}
+    <div className={`grid min-w-0 [overflow-wrap:anywhere] gap-[5px] border-l pb-0.5 pl-[13px] pt-px font-sans text-[12.5px] leading-normal text-ink-2 ${lit ? "border-branch" : "border-line-strong hover:border-branch"}`}
       data-testid={`thread-${t.id}`} data-status={t.status} data-kind={t.kind} data-question={t.question || undefined} aria-label={suggestion ? "Suggestion" : "Comment thread"} role="note"
-      onMouseEnter={() => onHover(true)} onMouseLeave={() => onHover(false)}>
+      onMouseEnter={() => setHovered?.(t.id)} onMouseLeave={() => setHovered?.(null)}>
       <Who who={t.author_name ?? (t.author.startsWith("teammate:") ? "A teammate" : t.author)}><span>{suggestion ? `suggests · ${ago(t.at)}` : ago(t.at)}</span></Who>
       {suggestion && (
         <div className="ml-[25px] whitespace-pre-wrap break-words rounded-sm bg-surface-2 px-2 py-[5px] font-serif text-[13.5px] leading-normal" data-testid="suggestion-change">
@@ -458,19 +474,37 @@ export function MarginNote({ thread: t, busy, canJudge, canReply, canResolve, ac
   );
 }
 
+const HoveredThread = createContext<number | null>(null);
+const SetHoveredThread = createContext<((id: number | null) => void) | null>(null);
+
+export const SectionText = memo(function SectionText({ section, body, marks, layout, onOpen }: {
+  section: string; body: string; marks: Mark[]; layout?: DocLayout; onOpen?(section: string): void;
+}) {
+  const hovered = useContext(HoveredThread);
+  const shown = hovered === null ? marks : marks.map((mark) => mark.thread === hovered ? { ...mark, lit: true } : mark);
+  return (
+    <div data-section={section} className="grid gap-2.5" onClick={onOpen && (() => onOpen(section))}>
+      <DocText body={body} marks={shown} layout={layout} />
+    </div>
+  );
+}, (a, b) => a.section === b.section && a.body === b.body && a.layout === b.layout && a.onOpen === b.onOpen && sameMarks(a.marks, b.marks));
+
 /* Text with its notes in the margin beside it: each note level with the words it is on (`anchor`,
    a selector inside the text; none: the top), pushed down past the one above it. Under 1180px
    wide the margin is gone and the notes follow the text. */
-export function Annotated({ children, notes, className = "" }: { children: ReactNode; notes: { key: string; anchor: string | null; node: ReactNode }[]; className?: string }) {
+export function Annotated({ children, notes, content, className = "" }: {
+  children: ReactNode; notes: { key: string; anchor: string | null; offset?: number | null; node: ReactNode }[]; content?: string; className?: string;
+}) {
   const box = useRef<HTMLDivElement>(null);
   const els = useRef<(HTMLElement | null)[]>([]);
   const [tops, setTops] = useState<number[]>([]);
+  const [hovered, setHovered] = useState<number | null>(null);
   const anchors = useRef(notes.map((n) => n.anchor));
   anchors.current = notes.map((n) => n.anchor);
   const measure = useRef(() => {});
   measure.current = () => {
     const root = box.current;
-    if (!root) return;
+    if (!root || !anchors.current.length) return;
     const origin = root.getBoundingClientRect().top;
     let floor = 0;
     const next = anchors.current.map((anchor, i) => {
@@ -481,11 +515,12 @@ export function Annotated({ children, notes, className = "" }: { children: React
     });
     setTops((now) => (next.join() === now.join() ? now : next));
   };
-  useLayoutEffect(() => measure.current());
+  const positions = JSON.stringify(notes.map(({ key, anchor, offset }) => [key, anchor, offset]));
+  useLayoutEffect(() => measure.current(), [positions, content]);
   // A note that grows (a reply opened under it) or text that reflows moves the notes below it.
   const keys = notes.map((n) => n.key).join();
   useEffect(() => {
-    if (typeof ResizeObserver === "undefined" || !box.current) return;
+    if (!keys || typeof ResizeObserver === "undefined" || !box.current) return;
     const watch = new ResizeObserver(() => measure.current());
     watch.observe(box.current);
     for (const el of els.current) if (el) watch.observe(el);
@@ -493,13 +528,13 @@ export function Annotated({ children, notes, className = "" }: { children: React
   }, [keys]);
   return (
     <div ref={box} className={`relative ${className}`}>
-      {children}
-      {notes.map((n, i) => (
+      <HoveredThread.Provider value={hovered}>{children}</HoveredThread.Provider>
+      <SetHoveredThread.Provider value={setHovered}>{notes.map((n, i) => (
         <aside key={n.key} ref={(el) => { els.current[i] = el; }} style={{ top: tops[i] ?? 0 }}
           className="absolute left-[calc(100%+36px)] w-[252px] max-[1180px]:static max-[1180px]:mb-1.5 max-[1180px]:mt-2.5 max-[1180px]:w-auto">
           {n.node}
         </aside>
-      ))}
+      ))}</SetHoveredThread.Provider>
     </div>
   );
 }

@@ -47,10 +47,11 @@ import base64
 import json
 import re
 import secrets
+import sqlite3
 import time
-from typing import Any
+from typing import Any, Callable
 
-from brindle import bus, visuals
+from brindle import bus, textdiff, visuals
 from brindle.db import DB
 from brindle.service.errors import ServiceError
 
@@ -851,24 +852,35 @@ def hand_over(db: DB, p: dict, replica) -> tuple[str, dict]:
     return base, cur
 
 
-def supervise(c, p: dict, replica, base: Any, was: dict, lede: str, sections: list[dict],
-              changed: list[str]) -> dict:
-    """The supervisor's revision of a shared plan with a live draft, in
-    transaction ``c``: each section's change since ``base`` (the text it was
-    handed) is set against what others wrote there since (plan_rebase). What
-    nobody else touched goes into the draft under the supervisor's own peer
-    id; a change to words someone else changed meanwhile never overwrites
-    them: it is filed as the supervisor's suggestion. A draft holds only text,
-    so what else it changed (``changed`` names its decisions, split or ask;
-    sections added, removed or retitled against ``was``) is named in one
-    comment. Returns what was applied, suggested and left out."""
-    from brindle import plan_rebase
+def supervise(db: DB, p: dict, replica, base: Any, was: dict, lede: str, sections: list[dict],
+              changed: list[str]) -> Callable[[sqlite3.Connection], dict]:
+    """Rebase the supervisor's edits against a snapshot of the live draft.
 
-    row = c.execute("SELECT texts FROM plan_draft_bases WHERE id=? AND plan_id=? AND doc_id=?",
-                    (base, p["id"], replica.doc_id)).fetchone() if isinstance(base, str) else None
-    if row is None:
-        raise ServiceError("stale_base", "that base isn't one brindle holds for this plan's live draft: "
-                           "read it again with read_plan and revise from what it gives", 409)
+    The returned writer checks that the draft still matches the snapshot,
+    applies independent edits under the supervisor's peer id, and files
+    overlapping edits as suggestions. It records changes a draft can't hold
+    (decisions, split, ask or section structure) in a comment.
+    """
+    from brindle import plan_rebase
+    from brindle.plan_drafts import DraftGone, StaleDraft
+
+    def stale_base() -> ServiceError:
+        return ServiceError("stale_base", "that base isn't one brindle holds for this plan's live draft: "
+                            "read it again with read_plan and revise from what it gives", 409)
+
+    def stale_draft() -> ServiceError:
+        return ServiceError("stale", "the live draft changed meanwhile; read it again with read_plan", 409)
+
+    base_key = (base, p["id"], replica.doc_id)
+    with db.snapshot() as c:
+        row = c.execute("SELECT texts FROM plan_draft_bases WHERE id=? AND plan_id=? AND doc_id=?",
+                        base_key).fetchone() if isinstance(base, str) else None
+        if row is None:
+            raise stale_base()
+        try:
+            seq, present = replica.supervisor_snapshot(c)
+        except DraftGone:
+            raise stale_draft() from None
     texts = json.loads(row["texts"])
     old = {s["id"]: s for s in was["sections"]}
     mine = {LEDE: lede, **{s["id"]: s["markdown"] for s in sections}}
@@ -886,42 +898,48 @@ def supervise(c, p: dict, replica, base: Any, was: dict, lede: str, sections: li
     missed += changed
     todo = [sid for sid in [LEDE, *old] if sid in mine and sid in texts and mine[sid] != texts[sid]]
     missed += [old[sid]["title"] for sid in old if sid in mine and sid not in texts]
-    applied, filed = 0, []
+    edits, filed = [], []
+    for sid in todo:
+        if sid not in present:
+            missed.append("the overview" if sid == LEDE else old[sid]["title"])
+            continue
+        result = plan_rebase.rebase(texts[sid], mine[sid], present[sid])
+        if len(result.text) > MAX_SECTION:
+            raise ServiceError("too_big", f"a section may be at most {MAX_SECTION // 1024} KB", 400)
+        edits.extend((sid, h) for h in sorted(result.applied, key=lambda h: h.start, reverse=True))
+        for collision in result.collisions:
+            result = plan_rebase.apply_resolution(result, collision.id, "suggestion")
+        filed.extend((sid, s) for s in result.suggestions if s.before != s.after)
+    missed = list(dict.fromkeys(missed))
 
     def change(doc) -> None:
-        nonlocal applied
-        present = doc.sections()
-        for sid in todo:
-            if sid not in present:
-                missed.append("the overview" if sid == LEDE else old[sid]["title"])
-                continue
-            result = plan_rebase.rebase(texts[sid], mine[sid], present[sid])
-            if len(result.text) > MAX_SECTION:
-                raise ServiceError("too_big", f"a section may be at most {MAX_SECTION // 1024} KB", 400)
-            for h in sorted(result.applied, key=lambda h: h.start, reverse=True):
-                doc.replace(sid, h.start, h.end - h.start, h.text)
-            applied += len(result.applied)
-            for collision in result.collisions:
-                result = plan_rebase.apply_resolution(result, collision.id, "suggestion")
-            filed.extend((sid, s) for s in result.suggestions if s.before != s.after)
+        for sid, h in edits:
+            doc.replace(sid, h.start, h.end - h.start, h.text)
 
-    replica.supervise(c, change)
-    for sid, s in filed:
-        anchor = {"kind": "text", "section": sid, "start": s.start, "end": s.end, "quote": s.before}
-        if not s.before:
-            anchor.update(_context(replica.text(sid), s.start))
-        tid = file_thread(c, p["id"], p["rev"], "suggestion", _with_cursor(replica, anchor), SUPERVISOR,
-                          SUPERVISED, after=s.after)
-        # Unlike its other threads, this goes up to the Library (shared_docs._unsent):
-        # teammates wrote the words it would change.
-        c.execute("UPDATE plan_threads SET from_supervisor=1 WHERE id=?", (tid,))
-    missed = list(dict.fromkeys(missed))
-    if missed:
-        note = ("The supervisor's revision also changed these, which a live draft can't hold, so they weren't "
-                f"applied: {', '.join(missed)}.")
-        file_thread(c, p["id"], p["rev"], "comment", {"kind": "section", "section": was["sections"][0]["id"]},
-                    SUPERVISOR, note[:visuals.MAX_NOTE])
-    return {"applied": applied, "suggested": len(filed), "not_applied": missed}
+    def write(c: sqlite3.Connection) -> dict:
+        if not c.execute("SELECT 1 FROM plan_draft_bases WHERE id=? AND plan_id=? AND doc_id=?", base_key).fetchone():
+            raise stale_base()
+        try:
+            replica.supervise(c, change, expected_seq=seq)
+        except (DraftGone, StaleDraft):
+            raise stale_draft() from None
+        for sid, s in filed:
+            anchor = {"kind": "text", "section": sid, "start": s.start, "end": s.end, "quote": s.before}
+            if not s.before:
+                anchor.update(_context(replica.text(sid), s.start))
+            tid = file_thread(c, p["id"], p["rev"], "suggestion", _with_cursor(replica, anchor), SUPERVISOR,
+                              SUPERVISED, after=s.after)
+            # These suggestions go up to the Library (shared_docs._unsent):
+            # teammates wrote the words they would change.
+            c.execute("UPDATE plan_threads SET from_supervisor=1 WHERE id=?", (tid,))
+        if missed:
+            note = ("The supervisor's revision also changed these, which a live draft can't hold, so they weren't "
+                    f"applied: {', '.join(missed)}.")
+            file_thread(c, p["id"], p["rev"], "comment", {"kind": "section", "section": was["sections"][0]["id"]},
+                        SUPERVISOR, note[:visuals.MAX_NOTE])
+        return {"applied": len(edits), "suggested": len(filed), "not_applied": missed}
+
+    return write
 
 
 # -- decisions ---------------------------------------------------------------------------
@@ -1105,8 +1123,6 @@ def comparison(db: DB, plan_id: str, rev: Any) -> dict:
 
 def compare_revisions(current: dict, previous: dict | None) -> dict:
     """Compare validated revisions from either the local plan or the Library."""
-    from difflib import SequenceMatcher
-
     n = current["rev"]
     baseline_available = previous is not None or n == 1
     before = {s["id"]: s for s in previous["sections"]} if previous else {}
@@ -1140,7 +1156,7 @@ def compare_revisions(current: dict, previous: dict | None) -> dict:
         left, right = (old or {}).get("markdown", ""), (new or {}).get("markdown", "")
         spans = [{"kind": kind, "before_start": a, "before_end": b, "start": x, "end": y,
                   "before": left[a:b], "after": right[x:y]}
-                 for kind, a, b, x, y in SequenceMatcher(None, left, right).get_opcodes()
+                 for kind, a, b, x, y in textdiff.opcodes(left, right, autojunk=True)
                  if kind != "equal"]
         changes.append({"section": sid, "before": old, "after": new, "spans": spans})
     return {"revision": current, "previous": previous, "changes": changes,

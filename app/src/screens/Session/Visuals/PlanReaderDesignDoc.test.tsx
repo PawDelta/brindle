@@ -372,7 +372,7 @@ it("moves the notes below a margin note that grows when a reply opens", () => {
   try {
     const actions = { reply: async () => true, resolve: async () => true, accept: async () => true, reject: async () => true };
     const note = (id: number) => ({ id, kind: "comment" as const, rev: 1, author: "person", text: "Why?", status: "open" as const, at: 1, anchor: { kind: "section" as const, section: "context", state: "current" as const } });
-    const notes = [1, 2].map((id) => ({ key: `t${id}`, anchor: null, node: <MarginNote thread={note(id)} busy={false} canJudge canReply canResolve actions={actions} lit={false} onHover={() => {}} /> }));
+    const notes = [1, 2].map((id) => ({ key: `t${id}`, anchor: null, node: <MarginNote thread={note(id)} busy={false} canJudge canReply canResolve actions={actions} lit={false} /> }));
     render(<Annotated notes={notes}><p>Text</p></Annotated>);
     const second = () => screen.getByTestId("thread-2").parentElement!;
     expect(second().style.top).toBe("52px");

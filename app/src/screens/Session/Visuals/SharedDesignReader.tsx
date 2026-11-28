@@ -22,6 +22,24 @@ import { AccessRequest } from "./AccessRequest";
 /* How often a design open here is read again: what teammates wrote, and whether it can still be opened. */
 const READ_EVERY_MS = 30_000;
 
+function observeVisibleReads(read: () => void) {
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const update = (event?: Event) => {
+    clearInterval(timer);
+    timer = undefined;
+    if (document.visibilityState === "hidden") return;
+    // Recheck permissions and review changes as soon as the reader returns to view.
+    if (event) read();
+    timer = setInterval(read, READ_EVERY_MS);
+  };
+  update();
+  document.addEventListener("visibilitychange", update);
+  return () => {
+    clearInterval(timer);
+    document.removeEventListener("visibilitychange", update);
+  };
+}
+
 const COLUMN_MODES = MODES.filter((m) => m.id !== "editing");
 
 /* Who wrote and voted, by name where the org's directory knows them. */
@@ -54,19 +72,14 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
 }) {
   useEscBack(onBack);
   const source = useMemo(() => sharedSource(client, docId, repo), [client, docId, repo]);
-  const [tick, setTick] = useState(0);
   const [mode, setMode] = useState<Mode>("viewing");
   const [directory, setDirectory] = useState<LibraryPerson[]>([]);
-  useEffect(() => {
-    const timer = setInterval(() => setTick((n) => n + 1), READ_EVERY_MS);
-    return () => clearInterval(timer);
-  }, []);
   useEffect(() => {
     let live = true;
     client.libraryPeople().then((got) => { if (live) setDirectory(got.people); }, () => {});
     return () => { live = false; };
   }, [client]);
-  const { doc, error, writes } = useDoc(source, tick);
+  const { doc, error, writes } = useDoc(source, undefined, undefined, observeVisibleReads);
   const shown = useMemo(() => doc && { ...named(doc, directory), title: title ?? doc.title }, [doc, directory, title]);
   const allowed = (m: Mode) => m === "viewing" || (!!shown?.can_suggest && m === "suggesting") || (m === "editing" && !!shown?.can_edit && !!client.visualLive);
   const current = allowed(mode) ? mode : "viewing";
