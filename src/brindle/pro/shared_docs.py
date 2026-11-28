@@ -114,6 +114,11 @@ _WORD = re.compile(r"\w")
 CONTEXT_WORDS = 2            # words either side a carried change must still have in the draft to be placed
 
 
+class CreateInFlight(RuntimeError):
+    """Another create of this plan's document holds its claim: it may yet
+    land, so a share in the background asks again later."""
+
+
 def link(db: DB, plan_id: str) -> dict | None:
     """The plan's row in ``plan_shares`` (``review`` decoded), or None."""
     row = db.conn.execute("SELECT * FROM plan_shares WHERE plan_id=?", (plan_id,)).fetchone()
@@ -141,8 +146,14 @@ def _shared(db: DB, plan_id: str, store) -> dict:
 
 
 def _own(share: dict, ent) -> None:
+    """Only the account that shared the plan, in the org it shared it from,
+    acts on its share: the same person in another org reaches another
+    Library. A share older than its org column is matched by account alone."""
     if share["owner"] != ent.sub:
         raise RuntimeError("this plan was shared from another brindle account: log in to that one")
+    if share["org_id"] is not None and share["org_id"] != ent.org_id:
+        raise RuntimeError(f"this plan was shared from your account in another organization: switch back to "
+                           f"{share['org_id']} to change its share")
 
 
 def _issued(client, store):
@@ -410,13 +421,14 @@ def _grant(db: DB, p: dict, doc_id: str, reviewers: list[dict], permissions: dic
     """Scope members start read-only, and ``PUT /permissions`` replaces the
     list: add to what is there, giving each reviewer the right to comment and
     suggest. A reviewer taken off the list keeps the grant."""
-    held = review_policies.ask(db, p, "GET", _path(doc_id), client=client, store=store).get("permissions") or {}
+    held = review_policies.ask(db, p, "GET", _path(doc_id), document=True, client=client,
+                               store=store).get("permissions") or {}
     grants = {**held, **(permissions or {})}
     for r in reviewers:
         grants[r["sub"]] = {"can_edit": False, **grants.get(r["sub"], {}), **REVIEWER_GRANT}
     if grants != held:
         review_policies.ask(db, p, "PUT", _path(doc_id, "/permissions"), {"permissions": grants},
-                            client=client, store=store)
+                            document=False, client=client, store=store)
 
 
 # -- sharing -----------------------------------------------------------------------------
@@ -481,7 +493,7 @@ def _create(db: DB, p: dict, claim: dict, cur: dict, content: dict, resumed: boo
     if found is not None:
         return _linked(db, claim, found, FIRST_REVISION, claim["local_rev"])
     if resumed is None:
-        raise RuntimeError("this plan is already being shared: its upload hasn't reached your Library yet")
+        raise CreateInFlight("this plan is already being shared: its upload hasn't reached your Library yet")
     sent = _payload(content, client)
     # The plan's own title: without it the Library names the doc by the text's first # heading, which a
     # plan's text (its lede and ## sections) seldom has, else by the plan's id.
@@ -519,7 +531,7 @@ def ensure_doc(db: DB, p: dict, team: str | None, folder: Any, *, client, store,
     with _creating_lock:
         # First: a share refused because this process's create is still out must not touch its claim.
         if p["id"] in _creating:
-            raise RuntimeError("this plan is already being shared")
+            raise CreateInFlight("this plan is already being shared")
         row, resumed = _claim_new(db, p["id"], ent.sub, ent.org_id, time.time() if now is None else now)
         _own(row, ent)
         if row["doc_id"]:
@@ -548,16 +560,17 @@ def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permission
     client, store = ad._session(client, store)
     people = None if reviewers is None else _reviewers(reviewers)
     doc_id = ensure_doc(db, p, team, folder, client=client, store=store, now=now)
-    review_policies.ask(db, p, "POST", ad._doc_path(doc_id, "/share"), {"scope": scope}, client=client, store=store)
+    review_policies.ask(db, p, "POST", ad._doc_path(doc_id, "/share"), {"scope": scope}, document=False,
+                        client=client, store=store)
     doc_templates.set_team(db, p["id"], team)       # its gates follow that team's format from now on
     if people or permissions:
         _grant(db, p, doc_id, people or [], permissions, client, store)
     if people is not None:
         _remember(db, p["id"], review_policies.ask(db, p, "PUT", _path(doc_id, "/reviewers"), {"reviewers": people},
-                                                   client=client, store=store))
+                                                   document=False, client=client, store=store))
     if folder is not None:
         _remember(db, p["id"], review_policies.ask(db, p, "PUT", _path(doc_id, "/folder"), {"folder": folder},
-                                                   client=client, store=store))
+                                                   document=False, client=client, store=store))
     return link(db, p["id"])
 
 
@@ -571,7 +584,8 @@ def set_reviewer(db: DB, plan_id: str, sub: str, required: bool | None, *, clien
     doc_id = _shared(db, p["id"], store)["doc_id"]
 
     def call(method: str, tail: str, body: dict | None = None) -> dict:
-        return review_policies.ask(db, p, method, _path(doc_id, tail), body, client=client, store=store)
+        return review_policies.ask(db, p, method, _path(doc_id, tail), body, document=(method, tail) == ("GET", ""),
+                                   client=client, store=store)
 
     view = (call("DELETE", f"/reviewers/{quote(sub, safe='')}") if required is None
             else ask_to_sign(call, sub, required))
@@ -618,7 +632,7 @@ def set_reviewers(db: DB, plan_id: str, reviewers: Any, *, client=None, store=No
     people = _reviewers(reviewers)
     _grant(db, p, share_["doc_id"], people, None, client, store)
     if _remember(db, p["id"], review_policies.ask(db, p, "PUT", _path(share_["doc_id"], "/reviewers"),
-                                                  {"reviewers": people}, client=client, store=store)):
+                                                  {"reviewers": people}, document=False, client=client, store=store)):
         plan_docs._changed(db, p, p["rev"])
     return link(db, p["id"])
 
@@ -924,7 +938,7 @@ class _Head:
             self.view, self.refused = resp, False
             review_policies.seen(self.db, self.p, resp)
         else:
-            review_policies.refused(self.db, self.p, resp, status)
+            review_policies.refused(self.db, self.p, resp, status, document=False)
             self.refused = (self.refused or resp.get("error") in review_policies.REFUSALS
                             or status in review_policies.ACCESS_REFUSED)
         return status, resp
@@ -1401,7 +1415,7 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
             if meta is not None:
                 access = {"shared": True, **share_access.summary(meta, view, names)}
         else:
-            view = review_policies.ask(db, p, "GET", _path(doc_id), client=client, store=store)
+            view = review_policies.ask(db, p, "GET", _path(doc_id), document=True, client=client, store=store)
     except RuntimeError as e:
         no_team = not isinstance(e, ad.Refused) or e.code == NO_FEATURE     # an outage or org rule says nothing of it
         if no_team and _note_ended(db, p, _issued(client, store)):
@@ -1469,7 +1483,8 @@ def sign_off(db: DB, plan_id: str, rev: Any, *, version: Any = None, client=None
         doc_templates.require(db, p["id"], doc_templates.SIGN_OFF,
                               plan_docs.revision(db, p["id"], share_["local_rev"])["sections"])
     if _remember(db, p["id"], review_policies.ask(db, p, "POST", _path(share_["doc_id"], "/sign-offs"),
-                                                  {"rev": share_["remote_rev"]}, client=client, store=store)):
+                                                  {"rev": share_["remote_rev"]}, document=False, client=client,
+                                                  store=store)):
         plan_docs._changed(db, p, p["rev"])
     return link(db, p["id"])
 
@@ -1559,7 +1574,8 @@ def may_stop(row, who: str | None) -> bool:
     there are no rules."""
     review = json.loads(row["review"])
     if row["access_refused"] == NOT_FOUND:
-        # The Library has no document for the owner's share, so no review is left to bypass.
+        # A read of the document itself found none (review_policies.refused records no other 404),
+        # so no review is left to bypass.
         return who == row["owner"]
     return (row["unconfirmed"] is not None and who == row["owner"] and not row["review_asked"]
             and row["access_refused"] is None and not review.get(review_policies.REFUSED)
