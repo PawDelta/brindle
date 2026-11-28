@@ -56,6 +56,7 @@ HINT = re.compile(r"(?i)\benter to (?:confirm|continue|select|proceed)\b|\bpress
 # A CLI's own input box and footer: the CLI is ready (or busy), not asking.
 INPUT_BOX = re.compile(r"\? for shortcuts|\d+% context left|esc to interrupt|⏵⏵|⏸"
                        r"|\S…\s*\((?:\d+m\s*)?\d+s\b", re.I)   # the last: a busy spinner, "✳ Clauding… (1m 37s)"
+CODEX_SHORTCUTS_FOOTER = re.compile(r"^\s*(?:← for agents\s*·\s*)?\? for shortcuts\b")
 # A turn under way: a spinner before its timer shows ("✻ Pondering…"), or a
 # tool call or reply ("⏺ Read(…)", "⎿ Running…"). No startup prompt has these.
 BUSY_SPINNER = re.compile(
@@ -267,8 +268,12 @@ def _past_brief(screen: str, brief: str) -> str:
     brief = _letters(brief)
     if not brief:
         return screen
+    lines = screen.rstrip().splitlines()
+    # Keep Codex's final shortcuts row, including any warning notice. A brief
+    # can quote it, and without it the composer and model row resemble a menu.
+    footer = lines.pop() if lines and CODEX_SHORTCUTS_FOOTER.match(plain(lines[-1])) else None
     keep, rest = [], ""
-    for line in screen.splitlines():
+    for line in lines:
         text = _letters(line)
         if rest and rest.startswith(text):
             rest = rest[len(text):]
@@ -277,6 +282,8 @@ def _past_brief(screen: str, brief: str) -> str:
         else:
             rest = ""
             keep.append(line)
+    if footer is not None:
+        keep.append(footer)
     return "\n".join(keep)
 
 
