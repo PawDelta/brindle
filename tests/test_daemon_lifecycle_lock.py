@@ -2,6 +2,8 @@
 
 import multiprocessing
 import stat
+import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -37,11 +39,12 @@ def test_existing_daemon_lock_permissions_are_restricted(brindle_home):
 
 @pytest.mark.variant("Exercises the concurrent startup race and verifies the first daemon's socket inode is preserved while startup is serialized.")
 @pytest.mark.slow("spawns two daemon starters and holds the first inside its socket bind")
-def test_second_daemon_cannot_replace_socket_during_startup(brindle_home, tmp_path):
+def test_second_daemon_cannot_replace_socket_during_startup(brindle_home):
     import daemon_lock_procs
 
     ctx = multiprocessing.get_context("spawn")
-    path = tmp_path / "d.sock"
+    socket_dir = tempfile.TemporaryDirectory(prefix="br-", dir="/tmp")
+    path = Path(socket_dir.name) / "d.sock"
     bound, release, first_done = ctx.Event(), ctx.Event(), ctx.Event()
     attempted, bind_attempted, second_done = ctx.Event(), ctx.Event(), ctx.Event()
     first_result, second_result = ctx.Queue(), ctx.Queue()
@@ -51,7 +54,9 @@ def test_second_daemon_cannot_replace_socket_during_startup(brindle_home, tmp_pa
                          args=(path, attempted, bind_attempted, second_done, second_result))
     try:
         first.start()
-        assert bound.wait(15), "first daemon did not reach the paused socket bind"
+        if not bound.wait(15):
+            detail = first_result.get(timeout=5) if first_done.is_set() else f"exitcode={first.exitcode}"
+            pytest.fail(f"first daemon did not reach the paused socket bind: {detail}")
         original_inode = path.stat().st_ino
 
         second.start()
@@ -75,16 +80,24 @@ def test_second_daemon_cannot_replace_socket_during_startup(brindle_home, tmp_pa
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert (brindle_home / "daemon.lock").exists()
     finally:
-        _finish((first, second), (release,))
+        try:
+            _finish((first, second), (release,))
+        finally:
+            socket_dir.cleanup()
 
 
 @pytest.mark.slow("spawns cleanup and replacement processes around a held ownership check")
-def test_cleanup_does_not_delete_replacement_daemon_files(brindle_home, tmp_path):
+def test_cleanup_does_not_delete_replacement_daemon_files(brindle_home):
     import daemon_lock_procs
 
     ctx = multiprocessing.get_context("spawn")
-    path = tmp_path / "d.sock"
-    owner_sockets, owner = lifecycle.prepare("owner-token", sock_path=path)
+    socket_dir = tempfile.TemporaryDirectory(prefix="br-", dir="/tmp")
+    path = Path(socket_dir.name) / "d.sock"
+    try:
+        owner_sockets, owner = lifecycle.prepare("owner-token", sock_path=path)
+    except BaseException:
+        socket_dir.cleanup()
+        raise
     original_inode = path.stat().st_ino
     checked, release, cleanup_done = ctx.Event(), ctx.Event(), ctx.Event()
     attempted, bind_attempted, replacement_done = ctx.Event(), ctx.Event(), ctx.Event()
@@ -117,8 +130,13 @@ def test_cleanup_does_not_delete_replacement_daemon_files(brindle_home, tmp_path
         assert path.exists() and stat.S_ISSOCK(path.stat().st_mode)
         assert (brindle_home / "daemon.lock").exists()
     finally:
-        _finish((cleanup, replacement), (release,))
-        for sock in owner_sockets:
-            sock.close()
-        if replacement_info is not None:
-            lifecycle.cleanup(replacement_info)
+        try:
+            _finish((cleanup, replacement), (release,))
+        finally:
+            try:
+                for sock in owner_sockets:
+                    sock.close()
+                if replacement_info is not None:
+                    lifecycle.cleanup(replacement_info)
+            finally:
+                socket_dir.cleanup()
