@@ -1268,19 +1268,25 @@ def _refers_to(dep: str, t: Task, from_repo: str | None = None) -> bool:
     return dep == t.branch and (from_repo is None or from_repo == t.repo_root)
 
 
-def _cancel(db: DB, task_id: str, reason: str) -> list[str]:
+def _cancel(db: DB, task_id: str, reason: str, *, spare_held: bool = False) -> list[str]:
     """Cancel a still-pending task and tell its caller, then cascade the
     cancellation to any pending task depending on it, recursively: a task
     waiting on one that can never merge can itself never merge. Re-fetches
     and checks state so cancelling the same task twice (reachable via more
     than one dependency path) is a no-op the second time. Returns the ids
-    cancelled, the task first."""
+    cancelled, the task first. ``spare_held``: an automatic start's refusal,
+    which leaves a task a plan's end held for the supervisor
+    (plan_cancel_holds) alone, checked in the cancelling write itself, so a
+    hold that landed after the start read the task still wins; the
+    supervisor's own cancel_task passes False."""
     t = db.get_task(task_id)
     if t is None or t.state not in QUEUED:
         return []
     # Only from the state just read: a start that claimed it meanwhile wins, and nothing is cancelled.
+    spare = " AND id NOT IN (SELECT task_id FROM plan_cancel_holds)" if spare_held else ""
     with db.tx() as c:
-        if not c.execute("UPDATE tasks SET state='cancelled' WHERE id=? AND state=?", (t.id, t.state)).rowcount:
+        if not c.execute(f"UPDATE tasks SET state='cancelled' WHERE id=? AND state=?{spare}",
+                         (t.id, t.state)).rowcount:
             return []
     cancelled = [t.id]
     bus.publish(db, "task.cancelled", repo_root=t.repo_root, task_id=t.id, reason=reason)
@@ -2106,7 +2112,7 @@ def _launch_overlap(db: DB, t: Task, caller_ws: Workspace) -> tuple[bool, str | 
     elif how == "block":
         outcome = "refused"
         _cancel(db, t.id, f"it {clash.warning}. Two workers editing the same files end in conflicts: "
-                "fold it into that worker's task (send_message), or requeue it with depends_on")
+                "fold it into that worker's task (send_message), or requeue it with depends_on", spare_held=True)
     else:
         outcome, proceed = "allowed to start with a warning", True
     if clash.cross_session and t.caller_id:
@@ -2138,7 +2144,7 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
                               dependent_task_id=t.id):
             return False
     except agents.AgentError as e:
-        _cancel(db, t.id, str(e))
+        _cancel(db, t.id, str(e), spare_held=True)
         return False
     why = task_wait(db, t) if check_room else None
     if why:
@@ -2152,7 +2158,7 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
         wait_for_room(db, t, turn)
         return False
     if refused:
-        _cancel(db, t.id, f"the repo's policy refused it: {refused}")
+        _cancel(db, t.id, f"the repo's policy refused it: {refused}", spare_held=True)
     if not claimed:
         return False
     try:
