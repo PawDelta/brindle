@@ -14,6 +14,7 @@ from brindle.service.errors import ServiceError
 from test_plans import AUTH, PLAN, TOKEN, session  # noqa: F401 - fixture
 
 EDIT = "Two workers, one per repo."
+CODE = "    brindle plan --dry-run\n    brindle plan"
 
 
 def _edit(client, pid: str, rev: int, sid: str, before: str, after: str) -> None:
@@ -29,25 +30,28 @@ def test_a_person_edit_survives_the_supervisors_next_revision(db, session):
         split = next(s for s in client.get(f"/v1/plans/{pid}").json()["sections"] if s["markdown"] == "Two workers.")
         _edit(client, pid, 1, split["id"], "Two workers.", EDIT)
         _edit(client, pid, 2, "context", "None.", "")      # a spine section the person cleared
-        client.post(f"/v1/plans/{pid}/decide", json={"rev": 3, "approved": False, "note": "Tighten it."})
+        _edit(client, pid, 3, "risks", "None.", CODE)       # leading spaces that make it a code block
+        _edit(client, pid, 4, "lede", "# Org presets", "    # Org presets")
+        client.post(f"/v1/plans/{pid}/decide", json={"rev": 5, "approved": False, "note": "Tighten it."})
 
-    # Revised from its own r1, the supervisor would drop the person's r2 and r3: refused, naming the sections.
+    # Revised from its own r1, the supervisor would drop the person's edits: refused, naming the sections.
     with pytest.raises(ServiceError) as stale:
         plans.propose(db, boss, PLAN + "\n\nRevised.", plan_id=pid)
     assert stale.value.code == "stale" and split["title"] in stale.value.message
     with pytest.raises(ToolError):
         mcp_server.propose_plan(PLAN + "\n\nRevised.", plan_id=pid)
-    assert plans.get(db, pid)["rev"] == 3
+    assert plans.get(db, pid)["rev"] == 5
 
-    # read_plan gives a solo plan's current text; revising that keeps both edits, the cleared section too.
+    # read_plan gives a solo plan's current text; revising that keeps every edit exactly, whitespace included.
     got = json.loads(mcp_server.read_plan(pid))
-    assert got["rev"] == 3
+    assert got["rev"] == 5
     sections = [{**s, "markdown": s["markdown"] + " Revised."} if s["id"] == "goals" else s
                 for s in got["sections"]]
     mcp_server.propose_plan(got["lede"], plan_id=pid, sections=sections, base=got["base"])
-    now = {s["id"]: s["markdown"] for s in plans.get(db, pid)["sections"]}
-    assert plans.get(db, pid)["rev"] == 4
-    assert (now[split["id"]], now["context"]) == (EDIT, "")
+    after = plans.get(db, pid)
+    now = {s["id"]: s["markdown"] for s in after["sections"]}
+    assert after["rev"] == 6 and after["lede"] == got["lede"] and after["lede"].startswith("    ")
+    assert (now[split["id"]], now["context"], now["risks"]) == (EDIT, "", CODE)
 
 
 def test_a_revision_published_meanwhile_never_becomes_the_base(db, session, monkeypatch):

@@ -767,13 +767,19 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         raise ServiceError("forbidden", "only the session's supervisor proposes a plan", 403)
     if sections is not None:
         parts = plan_docs.parse_sections(sections)
-        lede = plan_docs._body_text(markdown, "markdown", MAX_MARKDOWN).strip()
+        # The bodies as sent, before trimming: a section carried forward verbatim from read_plan
+        # (an indented code block, say) is recognised by its exact text (_keep_acknowledged).
+        sent = [{**s, "markdown": plan_docs._body_text(raw.get("markdown"), f"section {s['id']}",
+                                                       plan_docs.MAX_SECTION)} for s, raw in zip(parts, sections)]
+        sent_lede = plan_docs._body_text(markdown, "markdown", MAX_MARKDOWN)
+        lede = sent_lede.strip()
         markdown = plan_docs.render(lede, parts)
     elif not isinstance(markdown, str) or not markdown.strip():
         raise ServiceError("invalid", "markdown is required", 400)
     else:
         markdown = markdown.strip()
         lede, parts = plan_docs.from_markdown(markdown)
+        sent, sent_lede = parts, None
     # The empty draft opened when the person asked: the first proposal (with or without its id)
     # fills that plan instead of creating another.
     draft_row = db.conn.execute("SELECT id FROM plans WHERE root_id=? AND state=?", (root.id, WRITING)).fetchone()
@@ -797,7 +803,7 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
             acknowledged = plan_docs.revision(db, plan_id, _rev_base(base))
         except ServiceError:
             acknowledged = None
-    passed = plan_docs.design_doc(parts, map_only=True) if acknowledged else []
+    passed = plan_docs.design_doc(sent, map_only=True) if acknowledged else []
     if plan_id is None or on_spine:
         parts = plan_docs.design_doc(parts, force=not template, map_only=bool(template))
         markdown = plan_docs.render(lede, parts)
@@ -818,6 +824,8 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         restored = _keep_acknowledged(parts, passed, acknowledged)
         added = added or restored != parts
         parts = restored
+        if sent_lede is not None and sent_lede == acknowledged["lede"] and lede != sent_lede:
+            lede, added = sent_lede, True    # the lede carried forward verbatim, whitespace and all
     if added:
         markdown = plan_docs.render(lede, parts)
     if len(markdown.encode("utf-8")) > MAX_MARKDOWN:
