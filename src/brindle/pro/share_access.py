@@ -211,12 +211,14 @@ def plan_reads(db: DB, p: dict, doc_id: str, client, store, *, metadata_optional
 
 
 def plan_write(db: DB, plan_id: str, work: Callable[[Call], dict | None], *, first: bool = False,
-               notify: bool = True, client=None, store=None) -> dict | None:
+               revoking: bool = False, notify: bool = True, client=None, store=None) -> dict | None:
     """Run one write on the plan's Library doc and keep the review state it
     answered with. ``first``: the write may be its first share, which
-    uploads the plan. Queued invites publish once their queue entry is settled."""
+    uploads the plan. ``revoking`` allows access removal after review closes.
+    Queued invites publish once their queue entry is settled."""
     p = plan_docs._plan(db, plan_id)
-    sd._review_open(p)
+    if not revoking:
+        sd._review_open(p)
     client, store = ad._session(client, store)
     doc_id = (sd.ensure_doc(db, p, None, None, client=client, store=store) if first
               else sd._shared(db, p["id"], store)["doc_id"])

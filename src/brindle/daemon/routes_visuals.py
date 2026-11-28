@@ -638,10 +638,10 @@ def plan_invite_dismiss(db: DB, params: dict, body: dict) -> Any:
     return _plan_now(db, params["id"])
 
 
-def _access_write(db: DB, plan_id: str, work: Callable[[Any], Any], first: bool = False) -> Any:
+def _access_write(db: DB, plan_id: str, work: Callable[[Any], Any], *, revoking: bool = False) -> Any:
     from brindle.pro import share_access
 
-    return _library(db, plan_id, lambda sd: share_access.plan_write(db, plan_id, work, first=first))
+    return _library(db, plan_id, lambda sd: share_access.plan_write(db, plan_id, work, revoking=revoking))
 
 
 def _invite_out(db: DB, plan_id: str, row: dict) -> JSONResponse:
@@ -703,13 +703,14 @@ def plan_person_delete(db: DB, params: dict, body: dict) -> Any:
         return _invite_out(db, params["id"], row)
     if row == {}:
         return _plan_now(db, params["id"])              # never sent: nothing to take back
-    return _access_write(db, params["id"], lambda call: sa.revoke(call, params["sub"]))
+    return _access_write(db, params["id"], lambda call: sa.revoke(call, params["sub"]), revoking=True)
 
 
 def plan_scope_delete(db: DB, params: dict, body: dict) -> Any:
     from brindle.pro import share_access as sa
 
-    return _access_write(db, params["id"], lambda call: sa.revoke_scope(call, params["kind"], params["scope"]))
+    return _access_write(db, params["id"], lambda call: sa.revoke_scope(call, params["kind"], params["scope"]),
+                         revoking=True)
 
 
 def plan_unshare(db: DB, params: dict, body: dict) -> Any:
@@ -718,9 +719,15 @@ def plan_unshare(db: DB, params: dict, body: dict) -> Any:
     from brindle.pro import share_access as sa
     from brindle.pro import share_invites
 
-    with share_invites.held(params["id"]):
-        share_invites.drop_all(db, params["id"])
-        return _access_write(db, params["id"], sa.stop)
+    plan_id = params["id"]
+
+    def stop(call: sa.Call) -> dict:
+        design = sa.stop(call)
+        share_invites.drop_all(db, plan_id)
+        return design
+
+    with share_invites.held(plan_id):
+        return _access_write(db, plan_id, stop, revoking=True)
 
 
 @_json
