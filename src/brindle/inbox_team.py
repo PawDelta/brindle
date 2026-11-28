@@ -46,8 +46,12 @@ _seen: dict[str, list[dict]] = {}      # account sub -> the feed rows as last re
 _read_versions: dict[str, int] = {}   # acknowledgements since a feed request began
 
 
-def group(kind: str) -> str:
-    """The Inbox group a row of ``kind`` belongs in."""
+def group(kind: str, share_role: str | None = None) -> str:
+    """The Inbox group a row belongs in."""
+    # The share panel uses Comment to invite feedback. Reviewers have their
+    # own waiting row from the review queue, which clears when they act.
+    if kind == SHARED and share_role == "comment":
+        return NEEDS_YOU
     return FROM_TEAM if kind in TEAM_KINDS else NEEDS_YOU
 
 
@@ -87,6 +91,9 @@ def _rows(raw: object) -> list[dict]:
             row["sender"] = person(r.get("sender"))
             count = r.get("decision_count")
             row["decision_count"] = count if type(count) is int and count >= 0 else None
+            if r["kind"] == SHARED:
+                role = r.get("role")
+                row["share_role"] = role if role in ("view", "comment", "edit", "reviewer") else None
         elif r["kind"] == SIGNED:
             waiting = r.get("waiting")
             row.update(rev=_int(r.get("rev")), signer=person(r.get("signer")), signed=_int(r.get("signed")),
@@ -216,11 +223,12 @@ def items(sub: str | None) -> list[InboxItemDTO]:
     for r in rows:
         if r["kind"] in (SHARED, ACCESS):
             access = r["kind"] == ACCESS
+            share_role = r.get("share_role")
             out.append((r["created_at"], InboxItemDTO(
                 kind=r["kind"], reason=f"Asked to {r['role']}" if access else "Shared with you",
-                inbox_group=NEEDS_YOU if access else FROM_TEAM, doc=r["doc_id"], detail=r["title"],
+                inbox_group=group(r["kind"], share_role), doc=r["doc_id"], detail=r["title"],
                 from_person=r["requester"] if access else r["sender"], item_key=r["key"], read=r["read"],
-                access_role=r["role"] if access else None)))
+                access_role=r["role"] if access else None, share_role=share_role)))
             continue
         if r["kind"] != COMMENT:
             continue

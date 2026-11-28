@@ -15,7 +15,7 @@ import type { Plan } from "../../../api/client";
 import type { PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
 import { ago } from "../../../components/ProviderConnect";
 import { button, field, pill, quiet } from "../../../components/ui";
-import type { ThreadActions } from "./DocReview";
+import { SupervisorReplying, type ThreadActions } from "./DocReview";
 import type { DocLayout } from "./DocText";
 import { Avatar, personName, picksLine } from "./PlanCards";
 import type { Mode, MODES } from "./PlanReader";
@@ -403,8 +403,9 @@ function Who({ who, children }: { who: string; children?: ReactNode }) {
 }
 
 /* A comment or suggestion in the margin beside its text. Neutral until it is followed. */
-export function MarginNote({ thread: t, busy, canJudge, canReply, canResolve, actions, lit, onHover }: {
+export function MarginNote({ thread: t, busy, canJudge, canReply, canResolve, actions, lit, onHover, supervisorReplying }: {
   thread: PlanThreadDTO; busy: boolean; canJudge: boolean; canReply: boolean; canResolve: boolean; actions: ThreadActions; lit: boolean; onHover(on: boolean): void;
+  supervisorReplying?: boolean;
 }) {
   const [replying, setReplying] = useState(false);
   const [text, setText] = useState("");
@@ -435,6 +436,7 @@ export function MarginNote({ thread: t, busy, canJudge, canReply, canResolve, ac
           <p className="m-0 whitespace-pre-wrap break-words pl-[25px]">{r.text}</p>
         </div>
       ))}
+      {supervisorReplying && <SupervisorReplying />}
       {replying && (
         <form className="flex items-center gap-2 pl-[25px]" onSubmit={(e) => void send(e)}>
           <input className={`${field} min-w-0 flex-1 text-[12.5px]`} aria-label="Reply" placeholder="Reply…" autoFocus value={text} onChange={(e) => setText(e.target.value)} />

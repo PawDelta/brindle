@@ -211,19 +211,19 @@ it("keeps an approved plan board live from recorded worker events and drops stal
   view.unmount();
 });
 
-it("asks immediately in the thread without turning the question into a change request", async () => {
-  let plan = doc(1, "Workers run on your machine.");
+it.each(["summary", "context"])("asks immediately in the %s thread without turning the question into a change request", async (section) => {
+  const passage = "Workers run on your machine.";
+  let plan = doc(1, passage, { sections: [{ id: section, title: "Where workers run", markdown: passage }] });
+  const store = createAppStore();
   const client: PlansClient & PlanDocClient & VisualsClient = {
     ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan,
     commentPlan: async (_id, rev, anchor, text, question) => (plan = { ...plan, threads: [
       { id: 1, kind: "comment", rev, anchor: { ...anchor, state: "current" }, author: "person", text,
-        question, status: "open", at: 1, replies: [
-          { id: 2, author: "person", text: "On your own machine.", at: 2, from_supervisor: true },
-        ] },
+        question, status: "open", at: 1 },
     ] }),
   };
-  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
-  const text = (await screen.findByText("Workers run on your machine.")).firstChild!;
+  render(inTestStore(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />, store));
+  const text = (await screen.findByText(passage)).firstChild!;
   const range = document.createRange();
   range.setStart(text, 0);
   range.setEnd(text, 7);
@@ -235,8 +235,20 @@ it("asks immediately in the thread without turning the question into a change re
   await act(async () => fireEvent.submit(screen.getByTestId("thread-draft")));
   const thread = screen.getByTestId("thread-1");
   expect(thread.dataset.question).toBe("true");
+  expect(thread.querySelector('[data-state="supervisor-replying"]')).toBeTruthy();
+  plan = { ...plan, threads: [{ ...plan.threads![0], replies: [
+    { id: 2, author: "person", text: "On your own machine.", at: 2, from_supervisor: true },
+  ] }] };
+  await act(async () => store.dispatch({ type: "stream", message: { type: "event", id: 1, ts: 2, kind: "visual.plan_changed", root_id: "boss", repo_root: null, agent_id: null, workspace_id: null, task_id: null, payload: {} } }));
   expect(thread.querySelector('[data-from-supervisor="true"]')).toBeTruthy();
-  expect((screen.getByRole("button", { name: "Request changes" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(thread.querySelector('[data-state="supervisor-replying"]')).toBeNull();
+  const request = screen.getByRole<HTMLButtonElement>("button", { name: "Request changes" });
+  if (section === "context") {
+    fireEvent.click(request);
+    expect(screen.getByTestId<HTMLButtonElement>("plan-send-back").disabled).toBe(true);
+  } else {
+    expect(request.disabled).toBe(true);
+  }
   expect((screen.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
 });
 
@@ -438,9 +450,12 @@ it("design doc writes go one at a time, a read sent before one came back can't u
   // The read sent before the reply came back lands after it, without the reply: it is dropped.
   await act(async () => reads[1](base));
   expect(screen.getByTestId("thread-1").textContent).toContain("Yes, rented too.");
+  const supervisorReplying = () => screen.getByTestId("thread-1").querySelector('[data-state="supervisor-replying"]');
+  expect(supervisorReplying()).toBeNull();
   // The reply alone is something to send back to the supervisor.
   await act(async () => fireEvent.click(bar().getByRole("button", { name: "Request changes" })));
   expect(sent).toEqual([false]);
+  expect(supervisorReplying()).toBeTruthy();
   // That verdict delivered the reply. One more, written while the supervisor revises, is not
   // delivered by the revision that follows: after the reader is closed and opened again on
   // revision 2, it is still feedback to send.
@@ -449,9 +464,13 @@ it("design doc writes go one at a time, a read sent before one came back can't u
   fireEvent.change(within(screen.getByTestId("thread-1")).getByRole("textbox"), { target: { value: "And spot instances." } });
   fireEvent.click(within(screen.getByTestId("thread-1")).getByRole("button", { name: "Send" }));
   await act(async () => reply({ ...redirected, threads: [{ ...redirected.threads![0], replies: again }] }));
+  expect(supervisorReplying()).toBeNull();
   view.unmount();
   const second: Plan = { ...base, rev: 2, revisions: [...base.revisions!, { rev: 2, author: "supervisor", source: "proposal", at: 20 }], threads: [{ ...base.threads![0], replies: again }] };
   const reopened = render(reader({ ...visual, rev: 2 }));
+  await act(async () => reads[reads.length - 1]({ ...second, threads: redirected.threads }));
+  expect(supervisorReplying()).toBeNull();
+  reopened.rerender(reader({ ...visual, rev: 2, answer: { option: "x", note: "", at: 20 } }));
   await act(async () => reads[reads.length - 1](second));
   await act(async () => fireEvent.click(bar().getByRole("button", { name: "Request changes" })));
   expect(sent).toEqual([false, false]);

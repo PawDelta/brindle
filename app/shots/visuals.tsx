@@ -8,7 +8,7 @@ import App from "../src/App";
 import { PtyViewsProvider } from "../src/api/ptyView";
 import { THEME_KEY, applyTheme } from "../src/components/ThemeToggle";
 import { markOnboarded } from "../src/api/providers";
-import { DaemonError, type Plan, type PlanAnchor, type PlanChange, type PlanVerdict, type SharePerson, type VisualDTO } from "../src/api/client";
+import { DaemonError, toBase64, type Plan, type PlanAnchor, type PlanChange, type PlanVerdict, type SharePerson, type SharedDesign, type VisualDTO } from "../src/api/client";
 import { createAppStore } from "../src/store/store";
 import { startSync } from "../src/store/sync";
 import { FakeDaemon } from "../src/test/fakeDaemon";
@@ -140,6 +140,10 @@ if (params.get("doc") === "spine") {
         anchor: anchored("risks", RISKS, "7 days") },
     ],
   };
+  // ?replying=1: a question the person just asked, which their supervisor has yet to answer.
+  if (params.get("replying") === "1") plan.threads!.push({ id: 4, kind: "comment", question: true, rev: 2, author: "person", status: "open", at: now - 20,
+    text: "Do any of the three customers need missed events replayed after an outage?",
+    anchor: anchored("context", plan.sections[0].markdown, "Three customers have asked for push notifications") });
 }
 // Where each worker is once the plan is approved.
 const live: Partial<Plan["split"][number]>[] = [
@@ -208,12 +212,43 @@ if (params.get("share") === "1") {
   });
 }
 
+// ?doc=spine&shared=1: that plan as a teammate with comment access reads it (SharedDesignReader): not a
+// reviewer, so their sign-off is optional, on a version frozen with one required reviewer yet to sign.
+const shared = params.get("shared") === "1";
+if (shared) {
+  const me = "u_priya";
+  const author = "u_david";
+  const people = [[me, "Priya Raman"], [author, "David Chen"], ["u_maya", "Maya Okafor"]];
+  let design: SharedDesign = {
+    ...plan, session: "", me, author, queued: 0, split: [], threads: [], can_edit: false, can_comment: true, can_suggest: false,
+    can_sign_off: true, sign_off: "optional", signed_off: false,
+    teammate_names: Object.fromEntries(people),
+    decisions: plan.decisions.map((d) => ({ ...d, confirmed: d.mine, votes: { [d.mine!]: [author] } })),
+    gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["u_maya"], reviewers: [{ sub: "u_maya", required: true, status: "waiting" }] },
+  };
+  // The freeze banner prints the live state's author and writers as they are, so they are names here.
+  const writer = people[1][1];
+  const text = daemon.seedLive(design.id, Object.fromEntries(design.sections.map((s) => [s.id, s.markdown])), { author: writer, me });
+  const version = { id: design.rev, writers: [writer], signOffs: [] as string[], optionalSignOffs: [] as string[], snapshot: toBase64(text.export({ mode: "snapshot" })) };
+  daemon.setLiveState(design.id, { lock: "sign_off", version });
+  Object.assign(client, {
+    libraryDesignPlan: async () => Promise.reject(new DaemonError("not_found", "Not shared from this machine.", 404)),
+    sharedDesign: async () => design,
+    writeSharedDesign: async () => {
+      design = { ...design, can_sign_off: false, signed_off: true, sign_off: null, sign_offs: [{ sub: me, rev: design.rev, at: now, optional: true }] };
+      daemon.setLiveState(design.id, { version: { ...version, signOffs: [me], optionalSignOffs: [me] } });
+      return design;
+    },
+    libraryPeople: async () => ({ me, people: people.map(([sub, display_name]) => ({ sub, display_name, email: null })) }),
+  });
+}
+
 Object.assign(window, { fake: daemon });
 const store = createAppStore();
 const sync = startSync({ client, store, connect: daemon.connect });
 createRoot(document.getElementById("root")!).render(
   <PtyViewsProvider value={daemon.ptyViews()}>
-    <App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" }} pickFolder={() => Promise.resolve(null)} />
+    <App store={store} client={client} refresh={sync.refresh} initialRoute={shared ? { screen: "shared-design", doc: plan.id, title: plan.title } : { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" }} pickFolder={() => Promise.resolve(null)} />
   </PtyViewsProvider>,
 );
 void sync.idle().then(() => setTimeout(() => (document.documentElement.dataset.ready = "1"), 1500));

@@ -307,6 +307,7 @@ class InboxItemDTO(_DTO):
     excerpt: str | None = None     # a shared-doc comment's newest words
     signoff: SignoffDTO | None = None
     access_role: Literal["comment", "edit"] | None = None
+    share_role: Literal["view", "comment", "edit", "reviewer"] | None = None
     decision_count: int | None = None  # the requested plan's decisions, when known
     from_name: str | None = None       # an org notice's sender, when supplied
     file_count: int | None = None      # files changed against the session's PR base
@@ -754,11 +755,18 @@ class DesignAccessRequestDTO(_DTO):
     status: Literal["pending", "granted", "declined"]
 
 
+class DesignSignOffDTO(_DTO):
+    sub: str
+    rev: int
+    at: float
+    optional: bool | None = None
+
+
 class SharedDesignDTO(PlanDTO):
     """A design someone else shared, as the person reviewing it reads it
     (brindle.pro.shared_reader): ``id`` is its Library doc id and it has no
-    plan on this machine. ``can_*``: what the Library lets this account do,
-    ``can_sign_off`` false only when it can't be one of the signers.
+    plan on this machine. ``can_*``: what the Library lets this account do now.
+    ``sign_off``: whether this account's sign-off is required or optional.
     ``author``: who wrote it, ``person`` if that is this account."""
 
     me: str
@@ -766,6 +774,8 @@ class SharedDesignDTO(PlanDTO):
     can_comment: bool = False
     can_suggest: bool = False
     can_sign_off: bool = False
+    sign_off: Literal["required", "optional"] | None = None
+    sign_offs: list[DesignSignOffDTO] = []
     signed_off: bool = False
     access_request: DesignAccessRequestDTO | None = None
 
