@@ -10,6 +10,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from brindle import agents, bus, mcp_server, plans, spawn, visual_offers
+from brindle.approval_sources import PERSON_IN_APP
 from brindle.daemon.app import build_app
 from brindle.service.errors import ServiceError
 from test_plans import AUTH, DECISIONS, PLAN, TOKEN, messages, session, work  # noqa: F401 - fixture
@@ -89,7 +90,7 @@ def test_supervisor_revision_notifies_the_open_plan_reader(db, session):
     pid = mcp_server.propose_plan(PLAN).split()[2]
     cursor = db.conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
 
-    plans.decide(db, pid, 1, False, note="Please revise.", person=True)
+    plans.decide(db, pid, 1, False, note="Please revise.", approval=PERSON_IN_APP)
     mcp_server.propose_plan(PLAN + "\n\nRevised.", plan_id=pid)
 
     events = bus.tail(db, cursor, kinds=("visual.plan_changed",), root_id="boss")

@@ -18,7 +18,7 @@ import { DesignDoc, MODES, useDoc, type Mode, type Teammate } from "./PlanReader
 import type { Work } from "./WorkPanel";
 import { displayName } from "./PlanCards";
 import { AccessRequest } from "./AccessRequest";
-import { PlanDeliveryProvider, QueueCount, UnattachedSentNotes } from "./PlanDelivery";
+import { PlanDeliveryProvider, UnattachedSentNotes } from "./PlanDelivery";
 
 /* How often a design open here is read again: what teammates wrote, and whether it can still be opened. */
 const READ_EVERY_MS = 30_000;
@@ -124,7 +124,6 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
   const lead = (
     <>
       <BackButton onBack={onBack} label={backLabel} />
-      <QueueCount items={doc?.outbox} />
       <UnattachedSentNotes />
       <span className="mx-1 h-5 w-px bg-line" aria-hidden />
       <h2 title={title ?? shown?.title} className="min-w-0 truncate text-[13px] font-semibold">{title ?? shown?.title ?? "Plan"}</h2>

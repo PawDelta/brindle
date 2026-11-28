@@ -327,6 +327,7 @@ it("design doc reader", async () => {
   expect(screen.queryByTestId("thread-draft")).toBeNull();
   expect(screen.getByTestId("thread-2").getAttribute("data-kind")).toBe("comment");
   expect(doc.querySelectorAll('[data-thread="2"]').length).toBe(2);
+  expect(doc.querySelector('[data-thread="2"]')?.closest("p")?.nextElementSibling?.contains(screen.getByTestId("thread-2"))).toBe(true);
 
   // A suggestion shows its before and after, on its card and in the text; accepted, the text
   // is the new revision's and the card moves under Resolved.
@@ -708,7 +709,8 @@ it("keeps the Approve label when approval is held and withdrawn", async () => {
   let plan = doc(1, "Ready for review", { gate, decisions: [] });
   const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...docWrites(() => plan), plan: async () => plan,
     decidePlan: async (_id, verdict) => (plan = { ...plan, gate: { ...gate,
-      approval_held: verdict.approved ? { rev: plan.rev, waiting_on: ["Maya"] } : null } }) };
+      approval_held: verdict.approved ? { rev: plan.rev, waiting_on: ["Maya"] } : null } }),
+    withdrawPlanApproval: async () => (plan = { ...plan, gate }) };
   render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
   const approve = await screen.findByTestId("plan-build");
   expect(approve.textContent).toBe("Approve");

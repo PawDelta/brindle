@@ -5,6 +5,7 @@ draft as it is when they land (plans.propose with a base)."""
 import pytest
 
 from brindle import plan_rebase, plans, visuals
+from brindle.approval_sources import PERSON_IN_APP
 from brindle.plan_drafts import DraftReplica
 from brindle.pro import shared_docs as sd
 from brindle.service.errors import ServiceError
@@ -23,7 +24,7 @@ def sent_back(db, parts, session, monkeypatch):
     lib.open_draft()
     monkeypatch.setattr(sd, "relays", {DOC: Relay(lib)}, raising=False)
     sd.sync(db, pid, **net)
-    plans.decide(db, pid, 1, False, note="Say where workers run.", person=True)
+    plans.decide(db, pid, 1, False, note="Say where workers run.", approval=PERSON_IN_APP)
     read = plans.read_draft(db, session[0], pid)
     assert read["sections"][0]["markdown"] == SUMMARY
     return pid, lib, net, read["base"]

@@ -405,10 +405,11 @@ def plan(db: DB, request: Request) -> Any:
 def decide_plan(db: DB, params: dict, body: dict) -> Any:
     """The person's Approve or Redirect. The daemon serves the app and people,
     never agents (its Guard refuses an agent's process), so this is the person."""
-    from brindle import plans
+    from brindle import approval_sources, plans
 
     p = plans.decide(db, params["id"], body.get("rev"), _get(body, "approved", bool, required=True),
-                     body.get("picks"), body.get("comments"), _get(body, "note"), person=True,
+                     body.get("picks"), body.get("comments"), _get(body, "note"),
+                     approval=approval_sources.PERSON_IN_APP,
                      attachments=_get(body, "attachments", list), version=body.get("version"))
     return plans.to_dto(db, p)
 

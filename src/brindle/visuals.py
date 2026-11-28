@@ -255,9 +255,13 @@ def _unlocked(root_id: str) -> None:
 
 
 def for_session(db: DB, root_id: str) -> list[dict]:
-    """A session's visuals, newest first."""
-    rows = db.conn.execute("SELECT * FROM visuals WHERE root_id=? ORDER BY created_at DESC, id DESC",
-                           (root_id,)).fetchall()
+    """A session's visuals, most recently edited first."""
+    rows = db.conn.execute(
+        "SELECT v.* FROM visuals v WHERE v.root_id=?"
+        " ORDER BY MAX(v.updated_at, COALESCE((SELECT MAX(r.created_at) FROM plan_revisions r"
+        " WHERE v.kind='plan' AND r.plan_id=v.id), v.updated_at)) DESC, v.created_at DESC, v.id DESC",
+        (root_id,),
+    ).fetchall()
     return [_decode(r) for r in rows]
 
 

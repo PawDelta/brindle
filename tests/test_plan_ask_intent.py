@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from brindle import agents, cli, intent, mcp_server, plans, visual_offers
+from brindle.approval_sources import PERSON_IN_APP
 from brindle.daemon import holds
 from brindle.db import DB, Agent, Workspace
 from brindle.mcp_server import ToolError
@@ -264,7 +265,7 @@ def test_one_message_grants_one_plan(db, session, monkeypatch):
     say(db, session, "ok so lets test the plan, please make a test one")
     assert proposed()
     pid = plans.holding(db, "boss")["id"]
-    plans.decide(db, pid, 1, True, person=True)
+    plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
     assert not proposed()                                   # the message was spent on the first plan
     assert len(gullible.calls) == 1
 

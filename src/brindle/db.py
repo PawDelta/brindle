@@ -4860,10 +4860,14 @@ class DB:
 
     def claim_task(self, task_id: str) -> bool:
         """Move a pending task to 'starting', atomically: True for the one
-        caller that got it, so two sweeps or merges can't both start it."""
+        caller that got it, so two sweeps or merges can't both start it.
+        A task a plan's end left held for the supervisor (plan_cancel_holds)
+        is never claimed here, whatever its caller read before: only the
+        supervisor's start_now (claim_forced_task) starts it."""
         with self.tx() as c:
             return c.execute(
-                "UPDATE tasks SET state='starting' WHERE id=? AND state='pending'", (task_id,)
+                "UPDATE tasks SET state='starting' WHERE id=? AND state='pending'"
+                " AND id NOT IN (SELECT task_id FROM plan_cancel_holds)", (task_id,)
             ).rowcount == 1
 
     def claim_forced_task(self, task_id: str) -> bool:

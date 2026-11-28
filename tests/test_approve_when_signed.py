@@ -2,7 +2,7 @@
 import pytest
 from starlette.testclient import TestClient
 
-from brindle import plan_docs, plans
+from brindle import approval_sources, plan_docs, plans
 from brindle.daemon.app import build_app
 from brindle.pro import shared_docs
 from brindle.pro import analysis_docs as ad, auth
@@ -90,7 +90,7 @@ def test_stale_import_cannot_reopen_objection_after_new_revision_approval(db, pa
         library.threads[0] = {**thread, "status": "resolved"}
         plan_docs.edit(db, pid, 1, "summary", 0, "", "Revised. ")
         shared_docs.sync(db, pid, **net)
-        plans.decide(db, pid, 2, True, {"d1": "repo"}, person=True)
+        plans.decide(db, pid, 2, True, {"d1": "repo"}, approval=approval_sources.PERSON_IN_APP)
         return pull(db, p, share, view, **kwargs)
 
     monkeypatch.setattr(shared_docs, "_pull", pull_after_revision)
@@ -108,7 +108,7 @@ def test_imported_objection_withdraws_even_if_outbound_write_fails(db, parts, mo
     pid, library, net = parts
     monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
     shared_docs.share(db, pid, TEAM, reviewers=[{"sub": "u_a", "required": True}], **net)
-    plans.decide(db, pid, 1, True, {"d1": "repo"}, person=True)
+    plans.decide(db, pid, 1, True, {"d1": "repo"}, approval=approval_sources.PERSON_IN_APP)
     plan_docs.comment(db, pid, 1, {"kind": "section", "section": "summary"}, "A question?", question=True)
     library.threads.append({"id": 99, "kind": "comment", "rev": 1, "author": "u_a", "text": "Revise.",
                             "status": "open", "at": 5.0, "replies": [],

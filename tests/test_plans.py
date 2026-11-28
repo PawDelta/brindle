@@ -15,6 +15,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from starlette.testclient import TestClient
 
 from brindle import agents, mcp_server, plans, tasks, visual_offers
+from brindle.approval_sources import PERSON_IN_APP
 from brindle.daemon import holds
 from brindle.daemon.app import build_app
 from brindle.db import DB, Agent, Workspace
@@ -171,7 +172,7 @@ def test_plan_board_links_dispatch_and_reads_recorded_checks(db, session, monkey
         identity.setattr("brindle.autopilot.root_of", lambda db_, aid: "other")
         asyncio.run(mcp_server.assign("developer", "foreign", plan_worker=f"{pid}:schema"))
     assert len(db.list_tasks()) == 4
-    plans.decide(db, pid, 1, True, person=True)
+    plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
     first, second = board()
     assert len(started) == 2
     assert first["agent_id"] == db.get_task(first["task_id"]).agent_id
@@ -254,7 +255,7 @@ def test_approved_plan_goes_to_the_library(db, session, tmp_path, monkeypatch, b
              {"id": "w2", "title": "UI", "after": ["w1"]}]
     pid = mcp_server.propose_plan(PLAN, DECISIONS, split).split()[2]
     out = plans.decide(db, pid, 1, True, picks={"d1": "repo"},
-                       comments=[{"section": "s1", "text": "Keep it small."}], person=True)
+                       comments=[{"section": "s1", "text": "Keep it small."}], approval=PERSON_IN_APP)
     assert up.flush()
     [sent] = backend.docs                         # exactly one attempt, whatever the answer
     assert plans.get(db, pid)["state"] == "approved" and out["state"] == "approved"
@@ -264,8 +265,7 @@ def test_approved_plan_goes_to_the_library(db, session, tmp_path, monkeypatch, b
     assert "after: w1" in md and "src/brindle/db.py" in md and "tests/test_x.py::test_a" in md
 
 
-@pytest.mark.parametrize("app_connected", [0, 1])
-def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, monkeypatch, app_connected):
+def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, monkeypatch):
     boss, started = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
     # The reader's optional data: the restated ask, each option's trade-offs and files, each worker's files and test.
@@ -278,13 +278,7 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
     pid = out.split()[2]
     assert plans.sections(PLAN)[1][0]["title"] == "Goal" and len(plans.sections(PLAN)[1]) == 2
 
-    monkeypatch.setattr(holds, "app_connected", lambda: bool(app_connected))
     reply = asyncio.run(mcp_server.assign("developer", "build the preset schema", **work(db)))
-    if not app_connected:
-        plans.decide(db, pid, 1, False, note="Revise the split.", person=True)
-        asyncio.run(mcp_server.assign("developer", "build the UI"))
-        assert started == ["build the preset schema", "build the UI"]
-        return
     assert "behind plan" in reply and started == []
     assert tasks.sweep(db) == 0 and started == []      # nothing wakes a held task
 
@@ -330,7 +324,7 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
             raise sqlite3.OperationalError("database is locked")
         monkeypatch.setattr(plans, "_queue_message", fail)
         with pytest.raises(sqlite3.OperationalError):
-            plans.decide(db, pid, 2, True, person=True)
+            plans.decide(db, pid, 2, True, approval=PERSON_IN_APP)
         assert swept == [0] and started == [] and plans.get(db, pid)["state"] == "open"
         monkeypatch.setattr(plans, "_queue_message", queue)
 
@@ -553,7 +547,7 @@ def test_answered_plan_offer_is_not_asked_again_as_the_goal_grows(how, db, sessi
         plans.answer_offer(db, "boss", offer.request_id, how == "approved")
     if how != "declined":
         pid = mcp_server.propose_plan(PLAN).split()[2]
-        plans.decide(db, pid, 1, True, person=True)
+        plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
 
     mcp_server.set_goal("Organization-wide presets and their admin screens", items(8))
     mcp_server.set_goal("Presets: admin screens and audit log", items(9))
@@ -587,7 +581,7 @@ def test_a_failed_verdict_leaves_nothing_behind_and_a_failed_push_loses_nothing(
     pid = mcp_server.propose_plan(PLAN, DECISIONS).split()[2]
     asyncio.run(mcp_server.assign("developer", "build the preset schema", **work(db)))
     before = messages(db)
-    redirect ={"comments": [{"section": "s1", "text": "Repo file first."}], "person": True}
+    redirect ={"comments": [{"section": "s1", "text": "Repo file first."}], "approval": PERSON_IN_APP}
     grants = lambda: [r["remaining"] for r in db.conn.execute("SELECT remaining FROM visual_scoped_grants")]  # noqa: E731
 
     # One failure inside the verdict's transaction: none of it lands, and the
@@ -612,10 +606,10 @@ def test_a_failed_verdict_leaves_nothing_behind_and_a_failed_push_loses_nothing(
     [verdict] = messages(db)[len(before):]
     assert "Repo file first." in verdict
     with pytest.raises(ServiceError, match="already decided"):
-        plans.decide(db, pid, 1, True, person=True)
+        plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
 
     mcp_server.propose_plan(PLAN + "\n\nRevised.", DECISIONS, plan_id=pid)
-    assert plans.decide(db, pid, 2, True, person=True)["state"] == "approved"
+    assert plans.decide(db, pid, 2, True, approval=PERSON_IN_APP)["state"] == "approved"
     assert started == ["build the preset schema"]
 
 
@@ -632,7 +626,7 @@ def test_design_doc_round_trip_comment_reply_and_next_revision(db, session):
     before = messages(db)
     tid = plan_docs.comment(db, pid, 1, {"kind": "text", "section": "goal", "quote": "per org"}, "Which orgs?")
     sid = plan_docs.suggest(db, pid, 1, "goal", 0, "Presets", "Rules", "clearer")
-    plans.decide(db, pid, 1, False, person=True)
+    plans.decide(db, pid, 1, False, approval=PERSON_IN_APP)
     [msg] = messages(db)[len(before):]                     # one message for the batch, naming the thread
     with pytest.raises(ToolError):                        # a suggestion can't be resolved ...
         mcp_server.reply_plan_thread(pid, sid, "no", resolve=True)
@@ -718,7 +712,7 @@ def test_required_reviewers_gate(db, session, library, monkeypatch, review, loca
         monkeypatch.setattr(holds, "app_connected", lambda: False)
         asyncio.run(mcp_server.assign("developer", "build it", **work(db)))
         assert started == [] and tasks.sweep(db) == 0 and started == []
-        assert plans.decide(db, pid, 1, True, person=True)["state"] == "approved" and started == ["build it"]
+        assert plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)["state"] == "approved" and started == ["build it"]
         assert plans.gate(db, plans.get(db, pid))["state"] == "closed"
         return
     # Refused outright, even with no app connected: teammates sign off from their own machines.
@@ -727,11 +721,11 @@ def test_required_reviewers_gate(db, session, library, monkeypatch, review, loca
     assert db.list_tasks() == [] and started == []
     before = messages(db)
     if state == "waiting" and local_rev == 1 and review.get("reviewers") and not review.get("policy_reviewers"):
-        plans.decide(db, pid, 1, True, person=True)
+        plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
         assert plans.gate(db, plans.get(db, pid))["approval_held"] and started == []
         return
     with pytest.raises(ServiceError) as e:
-        plans.decide(db, pid, 1, True, person=True)
+        plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
     assert e.value.code == "gate_closed" and plans.get(db, pid)["state"] == "open" and messages(db) == before
 
 
@@ -743,7 +737,7 @@ def test_required_reviewers_request_changes_blocks_and_building_closes_the_revie
     asyncio.run(mcp_server.assign("developer", "queued before it was blocked", **work(db)))
 
     # Request changes works with reviewers still out, and holds the build whatever was signed.
-    assert plans.decide(db, pid, 1, False, note="Rework it.", person=True)["state"] == "redirected"
+    assert plans.decide(db, pid, 1, False, note="Rework it.", approval=PERSON_IN_APP)["state"] == "redirected"
     assert plans.gate(db, plans.get(db, pid))["state"] == "changes_requested"
     assert tasks.sweep(db) == 0 and started == []
 
@@ -752,7 +746,7 @@ def test_required_reviewers_request_changes_blocks_and_building_closes_the_revie
     _shared(db, pid, {"rev": 2, "reviewers": ONE, "sign_offs": _signed_off("a", rev=1)}, local_rev=2, remote_rev=2)
     assert plans.gate(db, plans.get(db, pid))["state"] == "waiting"
     _shared(db, pid, {"rev": 2, "reviewers": ONE, "sign_offs": _signed_off("a", rev=2)}, local_rev=2, remote_rev=2)
-    assert plans.decide(db, pid, 2, True, person=True)["state"] == "approved"
+    assert plans.decide(db, pid, 2, True, approval=PERSON_IN_APP)["state"] == "approved"
     assert started == ["queued before it was blocked"]
 
     assert plans.gate(db, plans.get(db, pid))["state"] == "closed"
@@ -778,7 +772,7 @@ def test_required_reviewers_approval_needs_the_library(db, session, library, mon
         raise RuntimeError("the Library can't be reached")
     monkeypatch.setattr(library, "sync", offline)
     with pytest.raises(ServiceError) as e:
-        plans.decide(db, pid, 1, True, person=True)
+        plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
     assert e.value.code == "gate_unverified" and plans.get(db, pid)["state"] == "open"
 
 
@@ -1002,13 +996,13 @@ def test_plan_is_ready_when_the_person_asks_and_the_first_proposal_fills_it(db, 
     assert (draft["state"], draft["rev"], draft["sections"]) == ("writing", 0, [])
     assert "behind plan" in asyncio.run(mcp_server.assign("developer", "anything", **work(db))) and started == []
     with pytest.raises(ServiceError) as e:
-        plans.decide(db, pid, 0, True, person=True)     # nothing to approve yet
+        plans.decide(db, pid, 0, True, approval=PERSON_IN_APP)     # nothing to approve yet
     assert e.value.code == "writing"
 
     assert mcp_server.propose_plan(PLAN).split()[2] == pid      # the same plan, now its first revision
     filled = plans.get(db, pid)
     assert (filled["state"], filled["rev"]) == ("open", 1) and filled["sections"]
-    assert plans.decide(db, pid, 1, True, person=True)["state"] == "approved"
+    assert plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)["state"] == "approved"
     assert started == ["anything"]
 
 
@@ -1039,7 +1033,7 @@ def test_only_the_person_decides_and_only_when_they_asked(db, session):
     before = messages(db)
     assert mcp_server.approve_plan(pid).startswith("Not decided")
     with pytest.raises(ServiceError) as e:
-        plans.decide(db, pid, 1, True, person=False)
+        plans.decide(db, pid, 1, True, approval=None)
     assert e.value.code == "forbidden"
     assert plans.get(db, pid)["state"] == "open" and messages(db) == before
     assert "behind plan" in asyncio.run(mcp_server.assign("developer", "anything", **work(db))) and started == []
