@@ -272,6 +272,7 @@ function OwnAnswerRows({ decision: d, open, disabled, picked, onPick, nameOf, an
   const editActions = (answer: PlanAnswerDTO) => open && answer.author === "person" && !answer.locked ? answers : undefined;
   const editTarget = own.find((answer) => answer.id === typing);
   const blockedDraft = draft && typing !== "new" && (!editTarget || !editActions(editTarget)) ? draft : null;
+  const canStartDraft = !disabled && !blockedDraft;
   const named = (who: string) => (who === "person" ? "You" : nameOf?.(who) ?? personName(who));
   const done = !!picked;
   const run = async (work: () => Promise<boolean>) => {
@@ -313,7 +314,7 @@ function OwnAnswerRows({ decision: d, open, disabled, picked, onPick, nameOf, an
                 {edit && (
                   <>
                     <span aria-hidden>·</span>
-                    <button type="button" className={link} disabled={disabled || saving} onClick={(e) => { e.preventDefault(); setDraft({ id: a.id, text: a.text }); }}>Edit</button>
+                    <button type="button" className={link} disabled={!canStartDraft || saving} onClick={(e) => { e.preventDefault(); setDraft({ id: a.id, text: a.text }); }}>Edit</button>
                   </>
                 )}
               </span>
@@ -323,7 +324,7 @@ function OwnAnswerRows({ decision: d, open, disabled, picked, onPick, nameOf, an
       })}
       {blockedDraft && (
         <div className="grid gap-2 border-t border-line px-4 py-3" data-testid="plan-answer-unsent">
-          <p className="m-0 text-xs text-ink-3">This answer can no longer be edited. You can copy your unsent text.</p>
+          <p className="m-0 text-xs text-ink-3">This answer can no longer be edited. You can copy your unsent text before discarding the draft to start another answer.</p>
           <textarea aria-label="Unsent answer edit" readOnly value={blockedDraft.text} className="min-h-16 w-full rounded-md border border-line bg-field p-2 text-[13px]" />
           <button type="button" className={`${link} justify-self-start`} onClick={clearDraft}>Discard draft</button>
         </div>
@@ -333,7 +334,7 @@ function OwnAnswerRows({ decision: d, open, disabled, picked, onPick, nameOf, an
       )}
       {open && answers && typing !== "new" && mine < 5 && own.length < 20 && (
         <div className="border-t border-dashed border-line px-4 py-2.5">
-          <button type="button" data-testid="plan-add-answer" disabled={disabled} onClick={() => setDraft({ id: "new", text: "" })}
+          <button type="button" data-testid="plan-add-answer" disabled={!canStartDraft} onClick={() => setDraft({ id: "new", text: "" })}
             className="inline-flex cursor-pointer items-center gap-2 border-0 bg-transparent p-0 font-sans text-[13px] text-ink-3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45">
             <span aria-hidden className="grid size-[15px] place-items-center rounded-full font-mono text-[12px] leading-none shadow-[inset_0_0_0_1.5px_var(--line)]">+</span>
             Your own answer

@@ -121,17 +121,18 @@ it.each(["comment", "reply", "own answer", "request changes"] as const)("restore
 
 it("keeps an unsent answer edit recoverable when a teammate picks the answer before reopen", async () => {
   const answer = { id: "own-1", author: "person", text: "Use a staged queue." };
+  const otherAnswer = { id: "own-2", author: "person", text: "Use the shared queue." };
   const doc = { ...plan, me: "u_reader", author: "teammate:u_author", can_comment: true };
   const store = createAppStore();
   const open = (locked: boolean) => {
     const decisions = doc.decisions.map((d) => ({
-      ...d, answers: [{ ...answer, locked }], votes: locked ? { [answer.id]: [doc.author] } : {},
+      ...d, answers: [{ ...answer, locked }, otherAnswer], votes: locked ? { [answer.id]: [doc.author] } : {},
     }));
     const client = teammateClient({ ...doc, decisions });
     return render(inTestStore(<SharedDesignReader client={client} docId={doc.id} onBack={() => reader.unmount()} />, store));
   };
   let reader = open(false);
-  fireEvent.click(within(await screen.findByTestId("plan-answer")).getByRole("button", { name: "Edit" }));
+  fireEvent.click(within((await screen.findAllByTestId("plan-answer"))[0]).getByRole("button", { name: "Edit" }));
   const form = screen.getByTestId("plan-answer-field");
   const text = "Use a dedicated queue for this rollout.";
   fireEvent.change(within(form).getByRole("textbox"), { target: { value: text } });
@@ -145,4 +146,17 @@ it("keeps an unsent answer edit recoverable when a teammate picks the answer bef
   const box = within(draft).getByRole<HTMLTextAreaElement>("textbox");
   expect(box.readOnly).toBe(true);
   expect(box.value).toBe(text);
+
+  const add = within(lockedAnswer).getByTestId<HTMLButtonElement>("plan-add-answer");
+  const editOther = within(lockedAnswer).getByRole<HTMLButtonElement>("button", { name: "Edit" });
+  expect([add.disabled, editOther.disabled]).toEqual([true, true]);
+  for (const action of [add, editOther]) {
+    fireEvent.click(action);
+    expect(within(draft).getByRole<HTMLTextAreaElement>("textbox").value).toBe(text);
+    expect(within(lockedAnswer).queryByTestId("plan-answer-field")).toBeNull();
+  }
+
+  fireEvent.click(within(draft).getByRole("button", { name: "Discard draft" }));
+  expect(within(lockedAnswer).queryByTestId("plan-answer-unsent")).toBeNull();
+  expect([add.disabled, editOther.disabled]).toEqual([false, false]);
 });
