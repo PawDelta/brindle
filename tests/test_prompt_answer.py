@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from brindle import agents, cull, prompt_answer, tmux, workspaces
+from brindle import agents, cull, prompt_answer, tmux, worker_prompts, workspaces
 from brindle.config import worktrees_dir
 from brindle.db import Agent
 
@@ -230,6 +230,21 @@ def test_sweep_leaves_codex_to_its_inflight_startup_helper(db, launch, monkeypat
     assert prompt_answer.pending(db)
     assert len(cull.settle_startups(db, launch.clock[0] + 161, {})) == 1
     assert prompt_answer.pending(db) == []
+
+
+@pytest.mark.variant("a Codex warning footer quoted in the brief still identifies the idle composer")
+def test_codex_idle_warning_footer_is_not_a_prompt(db, launch, monkeypatch):
+    footer = "← for agents · ? for shortcuts … ⚠ 1 warning · f2 to view"
+    screen = f"› Ask Codex to do anything\n\n  GPT-6.2-Sol default · <cwd> · …\n  {footer}\n"
+    brief = f"Check the Codex footer: {footer}"
+    pane, _ = launch("", [], {}, provider="codex", status="idle")
+    db.update_agent("w1", task=brief)
+    monkeypatch.setattr(pane, "render", lambda: screen)
+
+    assert not prompt_answer.at_turn_end(db, db.get_agent("w1"))
+    assert worker_prompts.classify("codex", screen, brief) is None
+    assert db.get_agent("w1").status == "idle"
+    assert db.pending_count("boss") == 0
 
 
 def test_model_calls_are_capped_per_launch_across_sweeps(db, launch):
