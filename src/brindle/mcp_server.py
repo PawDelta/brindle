@@ -2119,7 +2119,8 @@ def _session(db: DB) -> tuple[str, Workspace] | str:
 
 @mcp.tool()
 def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = None,
-             summary: str | None = None, new_goal: bool = False) -> str:
+             summary: str | None = None, new_goal: bool = False,
+             drop: list[str] | None = None) -> str:
     """Autopilot: record what we're building. Rewording the goal or adding
     milestones never asks the person about planning again once they have
     answered; pass new_goal=true only when replacing it with an unrelated goal. milestones is an ordered list of
@@ -2133,8 +2134,9 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
     alias as "repo", or write the check as "@<alias>: <command>". The optional
     "phase" names the phase a milestone belongs to; the app folds consecutive
     milestones of one phase together.
-    Replaces any earlier goal; milestones that keep their title and check keep
-    their last result. For a big goal brindle may ask the person whether to
+    Milestones you don't send are kept (after the ones you send); to remove
+    one, name its exact title in drop. Milestones that keep their title and
+    check keep their last result. For a big goal brindle may ask the person whether to
     plan it first; the reply says so, and workers you assign queue until
     they answer."""
     try:
@@ -2144,8 +2146,11 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
             return found
         root_id, _ = found
         items = autopilot.milestone_items(db, root_id, milestones)
-        autopilot.set_goal(db, root_id, goal, items, detail, summary=summary, replace=new_goal)
+        dropped = autopilot.set_goal(db, root_id, goal, items, detail, summary=summary,
+                                     replace=new_goal, drop=drop)
         text = autopilot.progress(db, root_id)
+        if dropped:
+            text += "\n\nDropped: " + ", ".join(dropped)
         from brindle import plans
 
         if plans.open_offer_id((plans.holding(db, root_id) or {}).get("offer")):   # not an accepted one: nothing new was asked

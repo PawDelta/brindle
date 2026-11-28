@@ -1034,3 +1034,17 @@ def test_only_the_person_decides_and_only_when_they_asked(db, session):
     assert e.value.code == "forbidden"
     assert plans.get(db, pid)["state"] == "open" and messages(db) == []
     assert "behind plan" in asyncio.run(mcp_server.assign("developer", "anything", **work(db))) and started == []
+
+
+def test_set_goal_tool_keeps_omitted_and_drops_named(db, session, monkeypatch):
+    from brindle import autopilot
+
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    db.add_autopilot("boss")
+    mcp_server.set_goal("Org presets", [{"title": "A", "check": "true"}, {"title": "B", "check": "true"}])
+
+    mcp_server.set_goal("Org presets", [{"title": "C", "check": "true"}])
+    assert [m.title for m in db.milestones("boss")] == ["C", "A", "B"]
+
+    mcp_server.set_goal("Org presets", [{"title": "C", "check": "true"}], drop=["A"])
+    assert [m.title for m in db.milestones("boss")] == ["C", "B"]
