@@ -34,6 +34,10 @@ const plan: Plan = {
   markdown: "Deliver signed events.", lede: "", sections: [{ id: "context", title: "Context", markdown: "Teams poll today." }],
   decisions: [], split: [], queued: 0, created_at: 1,
 };
+const thread: NonNullable<Plan["threads"]>[number] = {
+  id: 1, rev: plan.rev, kind: "comment", author: "u_author", text: "Can we phase this in?", status: "open", at: 2,
+  anchor: { kind: "section", section: "context", state: "current" },
+};
 const back = () => {};
 
 function seededDaemon() {
@@ -63,6 +67,33 @@ it("reads again for a change to this plan, without reading on unrelated inbox an
   expect(reads()).toBe(initial);
 
   await act(async () => { daemon.publish("visual.plan_changed", { root_id: visual.session, payload: { visual: plan.id } }); });
+  expect(reads()).toBe(initial + 1);
+});
+
+it("recovers same-revision threads when the reconnect cannot replay the plan change", async () => {
+  vi.useFakeTimers();
+  const daemon = seededDaemon();
+  const { client, store, sync } = connectDaemon(daemon);
+  const reads = () => daemon.requests.filter(({ method, path }) => method === "GET" && path === `/plans/${plan.id}`).length;
+  await act(async () => { render(inTestStore(<PlanReader client={client} visual={visual} onBack={back} onChanged={back} />, store)); });
+  await act(async () => { daemon.publish("inbox.changed"); });
+  await act(async () => sync.idle());
+  expect(screen.queryByTestId("thread-1")).toBeNull();
+  const initial = reads();
+
+  await act(async () => daemon.drop());
+  daemon.seedLive(plan.id, {}, { plan: { ...plan, threads: [thread] } });
+  daemon.publish("visual.plan_changed", { root_id: visual.session, payload: { visual: plan.id } });
+  const retained = daemon.publish("inbox.changed");
+  daemon.events = [retained];
+
+  await act(async () => { await vi.advanceTimersToNextTimerAsync(); });
+  await act(async () => sync.idle());
+  expect(screen.queryByTestId("thread-1")?.dataset.status).toBe("open");
+  expect(reads()).toBe(initial + 1);
+
+  await act(async () => { daemon.send({ type: "resnapshot", reason: "events_lost" }); });
+  await act(async () => sync.idle());
   expect(reads()).toBe(initial + 1);
 });
 
@@ -118,10 +149,7 @@ it("keeps the document stable on an unchanged shared read and pauses reads while
   expect(reads()).toBe(3);
   expect(docCommit).toHaveBeenCalledTimes(initial);
 
-  daemon.seedLive(plan.id, {}, { plan: { ...plan, threads: [{
-    id: 1, rev: plan.rev, kind: "comment", author: "u_author", text: "Can we phase this in?", status: "open", at: 2,
-    anchor: { kind: "section", section: "context", state: "current" },
-  }] } });
+  daemon.seedLive(plan.id, {}, { plan: { ...plan, threads: [thread] } });
   await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
   expect(screen.getByTestId("thread-1").dataset.status).toBe("open");
 });

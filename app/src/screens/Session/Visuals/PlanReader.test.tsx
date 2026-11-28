@@ -556,7 +556,11 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
 /* A reader whose first verdict fails offline; `landed`: that verdict reached the Library anyway;
    `design`: a design doc, whose Request changes is confirmed in a menu. Reads wait while `hold` is on. */
 const offlineVerdict = (landed: boolean, design = false) => {
-  let plan = doc(1, "Workers run on your machine.", design ? { sections: [{ id: "context", title: "Context", markdown: "Workers run on your machine." }] } : {});
+  let plan = doc(1, "Workers run on your machine.", design ? {
+    sections: [{ id: "context", title: "Context", markdown: "Workers run on your machine." }],
+    threads: [{ id: 1, kind: "comment", rev: 1, author: "supervisor", text: "Keep the API small.", status: "open", at: 1,
+      anchor: { kind: "text", section: "context", start: 0, end: 7, quote: "Workers", state: "current" } }],
+  } : {});
   const sent: { rev: number; approved: boolean; note: string }[] = [];
   const held: ((ok: boolean) => void)[] = [];
   const reads = { hold: false };
@@ -619,7 +623,18 @@ it("Try again for a Request changes confirmed in a menu opens that menu, where t
   render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
   const trigger = await screen.findByRole("button", { name: "Request changes" });
   fireEvent.click(trigger);
-  fireEvent.change(screen.getByRole("textbox", { name: "Note for the supervisor" }), { target: { value: "Split the API." } });
+  const passage = screen.getByTestId("plan-doc").querySelector('[data-section="context"]')!.parentElement!;
+  const measure = vi.spyOn(passage, "getBoundingClientRect");
+  try {
+    const note = screen.getByRole("textbox", { name: "Note for the supervisor" });
+    const text = "Split the API.";
+    for (let i = 1; i <= text.length; i++) {
+      await act(async () => fireEvent.change(note, { target: { value: text.slice(0, i) } }));
+    }
+    expect(measure).not.toHaveBeenCalled();
+  } finally {
+    measure.mockRestore();
+  }
   await act(async () => fireEvent.click(screen.getByTestId("plan-send-back")));
   const again = await within(screen.getByTestId("library-network")).findByRole("button", { name: "Try again" });
   // A real press: the mousedown outside the menu closes it before the click lands.

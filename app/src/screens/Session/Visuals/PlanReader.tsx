@@ -291,7 +291,8 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
     let cursor = 0;
     let changed = 0;
     return () => {
-      const events = store?.getState().recent ?? [];
+      const state = store?.getState();
+      const events = state?.recent ?? [];
       const plan = currentPlan.current?.id === visual.id ? currentPlan.current : null;
       for (let i = events.length - 1; i >= 0 && events[i].id > cursor; i--) {
         const event = events[i];
@@ -315,7 +316,7 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
       }
       // Retain the last invalidation even after its event leaves the bounded list.
       cursor = Math.max(cursor, events.at(-1)?.id ?? 0);
-      return changed;
+      return `${state?.eventLossGeneration ?? ""}:${changed}`;
     };
   }, [store, visual.session, visual.id]);
   const updates = useSyncExternalStore(store?.subscribe ?? noSubscribe, planUpdates);
