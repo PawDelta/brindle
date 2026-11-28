@@ -34,7 +34,7 @@ NATIVE_SUBAGENT_PRUNE_AFTER = 3600
 # SQLite user_version: 0 identifies databases written before version tracking.
 # Bump for incompatible SCHEMA or _migrate changes so older engines refuse the result.
 # Additive tables stay compatible with installed helpers launched from worktrees.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 1
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -1161,6 +1161,12 @@ CREATE TABLE IF NOT EXISTS visual_offers (
     changed_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS visual_grants (
+    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    remaining INTEGER NOT NULL,
+    explicit INTEGER NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'visual'
+);
+CREATE TABLE IF NOT EXISTS visual_scoped_grants (
     root_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     remaining INTEGER NOT NULL,
     explicit INTEGER NOT NULL,
@@ -1988,6 +1994,22 @@ def migration_incompatibility() -> str | None:
 _set_up: dict[str, int] = {}
 
 
+def adopt_visual_grants(c: sqlite3.Connection, root: str | None = None) -> None:
+    """Move legacy grants into the scoped table, in the caller's write transaction."""
+    # Keep the legacy table available to installed helpers that use the same database.
+    where, params = ("WHERE root_id=?", (root,)) if root is not None else ("", ())
+    rows = c.execute(f"DELETE FROM visual_grants {where} RETURNING root_id, remaining, explicit, scope", params)
+    for row in rows.fetchall():
+        if row["remaining"] <= 0:
+            continue
+        source = f"grant:{row['scope']}"
+        c.execute("UPDATE visual_person_words SET source=NULL WHERE root_id=? AND source=?", (row["root_id"], source))
+        c.execute("INSERT INTO visual_scoped_grants (root_id, remaining, explicit, scope) VALUES (?,?,?,?) "
+                  "ON CONFLICT(root_id, scope) DO UPDATE SET remaining=excluded.remaining, explicit=excluded.explicit",
+                  tuple(row))
+        c.execute("UPDATE visual_person_words SET source=? WHERE root_id=? AND source='grant'", (source, row["root_id"]))
+
+
 class DB:
     def __init__(self, path: str | None = None) -> None:
         p = str(path) if path is not None else str(db_path())
@@ -2262,28 +2284,17 @@ class DB:
             pass
 
     def _migrate_visual_grants(self) -> None:
-        def columns():
-            return {row["name"]: row["pk"] for row in self.conn.execute("PRAGMA table_info(visual_grants)")}
+        def has_scope() -> bool:
+            return any(row["name"] == "scope" for row in self.conn.execute("PRAGMA table_info(visual_grants)"))
 
-        if columns().get("scope") == 2:
+        if has_scope() and self.conn.execute("SELECT 1 FROM visual_grants LIMIT 1").fetchone() is None:
             return
         with self.tx() as c:
-            old = columns()
-            if old.get("scope") == 2:
-                return
-            c.execute("CREATE TABLE visual_grants_scoped ("
-                      "root_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE, "
-                      "remaining INTEGER NOT NULL, explicit INTEGER NOT NULL, "
-                      "scope TEXT NOT NULL DEFAULT 'visual', PRIMARY KEY (root_id, scope))")
-            if "scope" in old:
-                c.execute("INSERT INTO visual_grants_scoped SELECT root_id, remaining, explicit, scope FROM visual_grants")
-                c.execute("UPDATE visual_person_words AS w SET source='grant:' || ("
-                          "SELECT g.scope FROM visual_grants g WHERE g.root_id=w.root_id) "
-                          "WHERE w.source='grant' AND EXISTS (SELECT 1 FROM visual_grants g "
-                          "WHERE g.root_id=w.root_id AND g.remaining>0)")
-            # Grants from before scopes were tracked are revoked.
-            c.execute("DROP TABLE visual_grants")
-            c.execute("ALTER TABLE visual_grants_scoped RENAME TO visual_grants")
+            if not has_scope():
+                # Grants from before scopes were tracked are revoked.
+                c.execute("ALTER TABLE visual_grants ADD COLUMN scope TEXT NOT NULL DEFAULT 'visual'")
+                c.execute("DELETE FROM visual_grants")
+            adopt_visual_grants(c)
 
     def _has_schema_object(self, name: str) -> bool:
         """Whether table or index ``name`` exists, asked by a read: a CREATE ... IF NOT

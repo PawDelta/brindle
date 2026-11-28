@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
 from concurrent.futures import Future
@@ -228,13 +229,14 @@ def prefetch(turn: Turn, messages: list[str], kinds: list[str]) -> list[Future[i
 def prefetch_from_hook(turn: Turn, kinds: list[str]) -> None:
     """A CLI hook exits after delivering input, so its model calls need a detached helper."""
     from brindle import spawn
-    from brindle.providers import brindle_invocation
 
     if turn.path == ":memory:":
         return
     try:
         with spawn.starts_at_once():
-            spawn.detach([*brindle_invocation(), "_prefetch-intent", turn.root, str(turn.number), ",".join(kinds)],
+            # This short-lived helper uses the same engine as its hook.
+            spawn.detach([sys.executable, "-P", "-m", "brindle", "_prefetch-intent",
+                          turn.root, str(turn.number), ",".join(kinds)],
                          write=False)
     except (OSError, spawn.Busy) as exc:
         log.warning("intent prefetch could not start: %s", type(exc).__name__)

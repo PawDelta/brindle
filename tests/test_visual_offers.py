@@ -415,10 +415,9 @@ def test_legacy_unscoped_grants_are_revoked(db, session):
     boss, _ = session
     agents.send_message(db, boss.id, "Make a visual", person=True)
     observer = offers.begin_input(db, boss)
-    db.conn.execute("CREATE TABLE old_visual_grants (root_id TEXT PRIMARY KEY, remaining INTEGER, explicit INTEGER)")
-    db.conn.execute("INSERT INTO old_visual_grants SELECT root_id, remaining, explicit FROM visual_grants")
-    db.conn.execute("DROP TABLE visual_grants")
-    db.conn.execute("ALTER TABLE old_visual_grants RENAME TO visual_grants")
+    db.conn.execute("ALTER TABLE visual_grants DROP COLUMN scope")
+    db.conn.execute("INSERT INTO visual_grants SELECT root_id, remaining, explicit FROM visual_scoped_grants")
+    db.conn.execute("DROP TABLE visual_scoped_grants")
     db.conn.execute("ALTER TABLE visual_input_state DROP COLUMN observer")
     db.conn.execute("ALTER TABLE visual_input_state DROP COLUMN invalidated_at")
     reopened = DB(db.path)
@@ -440,12 +439,8 @@ def test_visual_ask_preserves_the_unspent_plan_ask(db, session, monkeypatch, cas
     boss, _ = session
     offers.person_spoke(db, boss, "Make a planning doc.", typed=True)
     if case == "legacy":
-        db.conn.execute("CREATE TABLE old_visual_grants (root_id TEXT PRIMARY KEY, remaining INTEGER, "
-                        "explicit INTEGER, scope TEXT)")
-        db.conn.execute("INSERT INTO old_visual_grants SELECT root_id, remaining, explicit, scope FROM visual_grants")
-        db.conn.execute("DROP TABLE visual_grants")
-        db.conn.execute("ALTER TABLE old_visual_grants RENAME TO visual_grants")
-        db.conn.execute("PRAGMA user_version=1")
+        db.conn.execute("INSERT INTO visual_grants SELECT root_id, remaining, explicit, scope FROM visual_scoped_grants")
+        db.conn.execute("DROP TABLE visual_scoped_grants")
         db.conn.close()
         db = DB(db.path)
     text = "would you perhaps show me that diagram?" if case == "model" else "show me a visual"

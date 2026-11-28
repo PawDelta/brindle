@@ -14,7 +14,7 @@ import time
 import unicodedata
 
 from brindle import bus, config, debuglog, intent, visuals
-from brindle.db import DB, Agent
+from brindle.db import DB, Agent, adopt_visual_grants
 from brindle.service.errors import ServiceError
 
 log = logging.getLogger(__name__)
@@ -140,8 +140,9 @@ def _link(c, root: str, text: str, source: str) -> None:
 
 
 def _grant(c, root: str, scope: str = "visual") -> None:
+    adopt_visual_grants(c, root)
     _unlink(c, root, f"grant:{scope}")
-    c.execute("INSERT INTO visual_grants (root_id, remaining, explicit, scope) VALUES (?,1,0,?) "
+    c.execute("INSERT INTO visual_scoped_grants (root_id, remaining, explicit, scope) VALUES (?,1,0,?) "
               "ON CONFLICT(root_id, scope) DO UPDATE SET remaining=1", (root, scope))
 
 
@@ -393,13 +394,14 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
             closed_prompts = visuals.answered_in_chat(c, root.id, message_at, text)
         cancelled = not fold_only and _cancels(text)
         if cancelled:
+            adopt_visual_grants(c, root.id)
             names_plan = bool(re.search(r"\bplan|think\b", text, re.I))
             names_visual = bool(_NOT_THE_PLAN.search(text))
             spare = "visual" if names_plan and not names_visual else "plan" if names_visual and not names_plan else ""
             cancels_plan = names_plan or (not spare and c.execute(
-                "SELECT 1 FROM visual_grants WHERE root_id=? AND scope='plan' AND remaining>0", (root.id,)
+                "SELECT 1 FROM visual_scoped_grants WHERE root_id=? AND scope='plan' AND remaining>0", (root.id,)
             ).fetchone() is not None)
-            c.execute("DELETE FROM visual_grants WHERE root_id=? AND scope!=?", (root.id, spare))
+            c.execute("DELETE FROM visual_scoped_grants WHERE root_id=? AND scope!=?", (root.id, spare))
             cutoff = time.time() if said_at is None else min(said_at, time.time())
             c.execute("DELETE FROM visual_person_words WHERE root_id=? AND created_at<=? "
                       "AND (source IS NULL OR source!=?)", (root.id, cutoff, f"grant:{spare}"))
@@ -596,7 +598,7 @@ def _spend_visual_quote(c, root: str, row) -> None:
                            "(their request is still unspent)", 409)
     c.execute("DELETE FROM visual_person_words WHERE id=?", (row["id"],))
     if row["source"] == "grant:visual":
-        c.execute("DELETE FROM visual_grants WHERE root_id=? AND scope='visual'", (root,))
+        c.execute("DELETE FROM visual_scoped_grants WHERE root_id=? AND scope='visual'", (root,))
 
 
 def _spend_quote(c, root: str, asked: str, now: float) -> bool:
@@ -658,8 +660,10 @@ def authorize(c, root: str, kind: str, *, supervisor: bool, asked: str | None = 
             return True
         if answered and now - json.loads(answered)["at"] < FOLD:
             return False
-        if asked is not None and _spend_quote(c, root, asked, now):
-            return True
+        if asked is not None:
+            adopt_visual_grants(c, root)
+            if _spend_quote(c, root, asked, now):
+                return True
         if decision:
             return False
     if kind == "plan" and supervisor and visual_id and c.execute(
@@ -667,7 +671,8 @@ def authorize(c, root: str, kind: str, *, supervisor: bool, asked: str | None = 
             (visual_id, root)).fetchone():
         # A revision of the supervisor's own open plan is not a new doc: it needs no fresh ask.
         # It still spends one the person left for it (a Redirect, or asking again).
-        if c.execute("UPDATE visual_grants SET remaining=remaining-1 WHERE root_id=? AND remaining>0 "
+        adopt_visual_grants(c, root)
+        if c.execute("UPDATE visual_scoped_grants SET remaining=remaining-1 WHERE root_id=? AND remaining>0 "
                      "AND scope='plan'", (root,)).rowcount:
             c.execute("DELETE FROM visual_person_words WHERE root_id=? AND source='grant:plan'", (root,))
         return True
@@ -676,10 +681,11 @@ def authorize(c, root: str, kind: str, *, supervisor: bool, asked: str | None = 
 
 
 def consume(c, root: str, kind: str = "visual") -> None:
-    changed = c.execute("UPDATE visual_grants SET remaining=remaining-1 WHERE root_id=? AND remaining>0 "
+    adopt_visual_grants(c, root)
+    changed = c.execute("UPDATE visual_scoped_grants SET remaining=remaining-1 WHERE root_id=? AND remaining>0 "
                         "AND scope=?", (root, kind)).rowcount
     if not changed:
-        if kind == "visual" and c.execute("SELECT 1 FROM visual_grants WHERE root_id=? AND remaining>0 AND scope='plan'",
+        if kind == "visual" and c.execute("SELECT 1 FROM visual_scoped_grants WHERE root_id=? AND remaining>0 AND scope='plan'",
                                           (root,)).fetchone():
             raise ServiceError("plan_requested", "the person asked for a plan, not a visual: call propose_plan "
                                "(their request is still unspent)", 409)
