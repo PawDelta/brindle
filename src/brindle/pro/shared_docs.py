@@ -91,7 +91,9 @@ TITLE_MAX = 200                         # the longest title the Library takes
 LAPSE_GOOD_FOR = 300.0       # seconds the server's word that a Team plan ended lets work go with no gate
 LAPSE_CHECK_AFTER = 120.0    # the background pass asks again once that word is this old
 SCOPE_KINDS = ("group", "org")
-NOT_FOUND = "not_found"      # the Library's answer when the share's document is gone (plan_shares.access_refused)
+# plan_shares.access_refused once reading the share's design found no document. A "not_found" an
+# older client kept (from any 404) doesn't match: it stays refused until a read here answers again.
+NOT_FOUND = review_policies.DESIGN_GONE
 CLAIM_FOR = 60.0             # seconds a create or push in flight holds the plan; then it is presumed dead
 # The plans whose create is running in this process now: a share of one of them
 # waits for its answer, and never looks for the doc it is still making.
@@ -421,7 +423,7 @@ def _grant(db: DB, p: dict, doc_id: str, reviewers: list[dict], permissions: dic
     """Scope members start read-only, and ``PUT /permissions`` replaces the
     list: add to what is there, giving each reviewer the right to comment and
     suggest. A reviewer taken off the list keeps the grant."""
-    held = review_policies.ask(db, p, "GET", _path(doc_id), document=True, client=client,
+    held = review_policies.ask(db, p, "GET", _path(doc_id), document=True, design=True, client=client,
                                store=store).get("permissions") or {}
     grants = {**held, **(permissions or {})}
     for r in reviewers:
@@ -584,7 +586,8 @@ def set_reviewer(db: DB, plan_id: str, sub: str, required: bool | None, *, clien
     doc_id = _shared(db, p["id"], store)["doc_id"]
 
     def call(method: str, tail: str, body: dict | None = None) -> dict:
-        return review_policies.ask(db, p, method, _path(doc_id, tail), body, document=(method, tail) == ("GET", ""),
+        read = (method, tail) == ("GET", "")             # of the design itself
+        return review_policies.ask(db, p, method, _path(doc_id, tail), body, document=read, design=read,
                                    client=client, store=store)
 
     view = (call("DELETE", f"/reviewers/{quote(sub, safe='')}") if required is None
@@ -1415,7 +1418,8 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
             if meta is not None:
                 access = {"shared": True, **share_access.summary(meta, view, names)}
         else:
-            view = review_policies.ask(db, p, "GET", _path(doc_id), document=True, client=client, store=store)
+            view = review_policies.ask(db, p, "GET", _path(doc_id), document=True, design=True, client=client,
+                                       store=store)
     except RuntimeError as e:
         no_team = not isinstance(e, ad.Refused) or e.code == NO_FEATURE     # an outage or org rule says nothing of it
         if no_team and _note_ended(db, p, _issued(client, store)):
@@ -1574,8 +1578,8 @@ def may_stop(row, who: str | None) -> bool:
     there are no rules."""
     review = json.loads(row["review"])
     if row["access_refused"] == NOT_FOUND:
-        # A read of the document itself found none (review_policies.refused records no other 404),
-        # so no review is left to bypass.
+        # Reading its design found no document (review_policies.refused keeps this for nothing
+        # else), so no review is left to bypass.
         return who == row["owner"]
     return (row["unconfirmed"] is not None and who == row["owner"] and not row["review_asked"]
             and row["access_refused"] is None and not review.get(review_policies.REFUSED)

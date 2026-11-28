@@ -167,7 +167,7 @@ def _plan_call(db: DB, p: dict, doc_id: str, client, store) -> Call:
         # a write under it (a person already removed) is about that one thing.
         document = method == "GET" and tail in DOCUMENT_READS
         return review_policies.ask(db, p, method, ad._doc_path(doc_id, tail), body, document=document,
-                                   client=client, store=store)
+                                   design=document and tail == "/design", client=client, store=store)
     return call
 
 
@@ -197,7 +197,7 @@ def plan_reads(db: DB, p: dict, doc_id: str, client, store, *, metadata_optional
         directory = pool.submit(copy_context().run, sd.member_names, doc_id, client=client, store=store)
         if metadata_optional:
             # Sync depends on the design. Metadata is only needed for the access summary.
-            view = review_policies.checked(db, p, design.result(), document=True)
+            view = review_policies.checked(db, p, design.result(), document=True, design=True)
             try:
                 result = meta.result()
             except (RuntimeError, auth.AuthError, credentials.CredentialError):
@@ -206,7 +206,7 @@ def plan_reads(db: DB, p: dict, doc_id: str, client, store, *, metadata_optional
                        if result is not None and result[0] == 200 else None)
             return checked, view, directory.result()
         result = review_policies.checked(db, p, meta.result(), document=True)
-        view = review_policies.checked(db, p, design.result(), document=True)
+        view = review_policies.checked(db, p, design.result(), document=True, design=True)
         return result, view, directory.result()
 
 
