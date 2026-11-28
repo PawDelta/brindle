@@ -1152,7 +1152,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const buildSentence = held ? `Your plan builds when ${signature}.`
     : gate?.state === "waiting" && waitingNames.length ? `The build starts once you approve and ${signature}.`
     : gate && gate.state !== "ready" ? gateWhy || summary : "Approve starts the build.";
-  const railProps = { sheet, plan, rows: sheetRows, settled, chosen, held, reviewing, jump, alongside, workItem, folded: railWidth.folded };
+  const signOffsCurrent = held || reviewing || (gateHolds && gate?.state === "waiting");
+  const railProps = { sheet, plan, rows: sheetRows, settled, chosen, held, signOffsCurrent, jump, alongside, workItem, folded: railWidth.folded };
   const compactReview = railWidth.folded && <div className="my-3 grid gap-1 border-y border-line py-2 font-sans text-xs" data-testid="review-summary">
     <span>Sign-offs · {gate?.signed ?? 0} of {gate?.required ?? 0} required{waitingNames.length > 0 && ` · waiting on ${waitingNames.join(" and ")}`}</span>
     <span>Decisions · {decided} of {plan.decisions.length} decided</span>

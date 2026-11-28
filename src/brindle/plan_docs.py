@@ -300,11 +300,11 @@ def _spine(parts: list[dict]) -> list[dict]:
 
 def insert_revision(c, plan_id: str, rev: int, author: str, source: str, lede: str, sections: list[dict],
                     markdown: str, decisions: list, split: list, ask: str | None, changed: list[str],
-                    at: float) -> None:
+                    at: float, *, title: str | None = None) -> None:
     c.execute("INSERT INTO plan_revisions (plan_id, rev, author, source, lede, sections, markdown, decisions,"
-              " split, ask, changed, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+              " split, ask, changed, created_at, title) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
               (plan_id, rev, author, source, lede, json.dumps(sections), markdown, json.dumps(decisions),
-               json.dumps(split), ask, json.dumps(changed), at))
+               json.dumps(split), ask, json.dumps(changed), at, title))
 
 
 def revision(db: DB, plan_id: str, rev: int | None = None) -> dict:
@@ -786,7 +786,7 @@ def _apply(db: DB, p: dict, cur: dict, sid: str, pos: int, before: str, after: s
         if claimed:
             keep(c, cur)
             insert_revision(c, p["id"], rev, PERSON, source, lede, sections, markdown, cur["decisions"],
-                            cur["split"], cur["ask"], [sid], now)
+                            cur["split"], cur["ask"], [sid], now, title=cur.get("title"))
             if thread_id is not None and not c.execute(
                     "UPDATE plan_threads SET status='accepted', updated_at=? WHERE id=? AND status='open'",
                     (now, thread_id)).rowcount:
@@ -1083,8 +1083,10 @@ def _thread_dto(t: dict, cur: dict, replies: list[dict], replica=None) -> dict:
 
 
 def _revision_dto(r: dict) -> dict:
+    from brindle.plans import _title
+
     return {"rev": r["rev"], "author": r["author"], "source": r["source"], "changed": r["changed"],
-            "at": r["created_at"]}
+            "at": r["created_at"], "title": r.get("title") or _title(r["markdown"])}
 
 
 def record_event(c, plan_id: str, key: str, kind: str, actor: str, at: float,

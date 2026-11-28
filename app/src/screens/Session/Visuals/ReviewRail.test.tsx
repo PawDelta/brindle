@@ -70,6 +70,8 @@ it("fills the sign-off track from the left when the second reviewer signs first"
   await waitFor(() => expect(within(rail).getByTestId("signoff-bob").dataset.state).toBe("signed"));
   const segments = rail.querySelectorAll(":scope > div > span:nth-child(2) > span[aria-hidden] > i");
   expect(Array.from(segments, segment => segment.classList.contains("bg-pass"))).toEqual([true, false]);
+  expect(segments[0].parentElement?.parentElement?.getAttribute("aria-current")).toBe("step");
+  expect(within(rail).getByTestId("plan-build")).toHaveProperty("disabled", true);
 });
 
 it("withdraws approval and keeps the current revision waiting for its signer", async () => {

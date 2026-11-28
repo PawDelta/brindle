@@ -190,8 +190,12 @@ def test_the_person_reviews_a_design_doc_through_the_routes(db, session, tmp_pat
         assert started == []
 
         # The supervisor's next revision; approving it releases the held assign.
-        plans.propose(db, boss, "# Cloud workers", plan_id=pid, base="r3", sections=[
+        plans.propose(db, boss, "# Cloud workers", title="Cloud workers with quotas", plan_id=pid, base="r3", sections=[
             {"id": "summary", "title": "Summary", "markdown": got["sections"][0]["markdown"]}])
+        history = client.get(f"/v1/plans/{pid}").json()["revisions"]
+        assert [(r["rev"], r["title"]) for r in history] == [
+            (1, "Cloud workers"), (2, "Cloud workers"), (3, "Cloud workers"), (4, "Cloud workers with quotas"),
+        ]
         assert post("/decide", rev=4, approved=True).json()["state"] == "approved"
     assert started == ["build it"]
 
@@ -211,7 +215,7 @@ def test_a_plan_from_before_revisions_stays_readable_and_keeps_its_history(db, s
         assert [s["id"] for s in got["sections"]][:2] == ["s1", "s2"] and [r["rev"] for r in got["revisions"]] == [1]
         got = client.post(f"/v1/plans/{pid}/edit", json={"rev": 1, "section": "s2", "before": "Two workers.",
                                                            "after": "Three workers."}).json()
-        assert [r["rev"] for r in got["revisions"]] == [1, 2]
+        assert [(r["rev"], r["title"]) for r in got["revisions"]] == [(1, "Org presets"), (2, "Org presets")]
         assert (section(1, 1), section(2, 1)) == ("Two workers.", "Three workers.")
 
         db.conn.execute("DELETE FROM plan_revisions")      # legacy again, now at r2

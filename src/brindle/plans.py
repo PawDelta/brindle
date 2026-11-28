@@ -924,7 +924,8 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
                 raise ServiceError("approved", "that plan is approved; propose a new plan instead", 409)
             plan_docs.keep(c, replaced)
         plan_docs.insert_revision(c, vid, rev, plan_docs.SUPERVISOR, "proposal", lede, parts, markdown, decisions,
-                                  split, ask, [s["id"] for s in parts if previous.get(s["id"]) != s], now)
+                                  split, ask, [s["id"] for s in parts if previous.get(s["id"]) != s], now,
+                                  title=title)
 
     try:
         if replica is not None:

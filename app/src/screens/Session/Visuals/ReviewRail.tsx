@@ -62,16 +62,16 @@ export function ReviewRevisions({ plan, compact = false }: { plan: Plan; compact
   </section>;
 }
 
-export function ReviewRail({ children, sheet, plan, settled, chosen, jump, alongside, workItem, folded, rows, held, reviewing }: {
+export function ReviewRail({ children, sheet, plan, settled, chosen, jump, alongside, workItem, folded, rows, held, signOffsCurrent }: {
   children: ReactNode; sheet: ReactNode; plan: Plan; settled(d: Plan["decisions"][number]): boolean;
   jump(id: string): void; alongside?: ReactNode; folded: boolean; rows: SignOffRow[];
   workItem?: Pick<TrackerLink, "display" | "title" | "state" | "done" | "stale"> | null;
-  chosen(d: Plan["decisions"][number]): string | null; held: boolean; reviewing: boolean;
+  chosen(d: Plan["decisions"][number]): string | null; held: boolean; signOffsCurrent: boolean;
 }) {
   const picks = plan.decisions.map(settled);
   const signatures = rows.filter(r => r.required).map(r => r.state === "signed" || r.state === "waived");
   const current = plan.state !== "open" ? null : picks.some(done => !done) ? "Decide"
-    : held || reviewing ? "Sign-offs" : "Approve";
+    : signOffsCurrent ? "Sign-offs" : "Approve";
   const steps = [
     { name: "Decide", segments: picks }, { name: "Sign-offs", segments: signatures },
     { name: "Approve", segments: [held || plan.state === "approved"] },
