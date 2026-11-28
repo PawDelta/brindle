@@ -1,6 +1,8 @@
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
 import type { Plan, SharedDesign, VisualDTO } from "../../../api/client";
+import { createAppStore } from "../../../store/store";
+import { inTestStore } from "../../../test/harness";
 import { PlanReader } from "./PlanReader";
 import { SharedDesignReader } from "./SharedDesignReader";
 import { SharedLinkReader } from "./SharedLinkReader";
@@ -59,7 +61,8 @@ it("renders the author's approval for a teammate and omits session guidance", as
 
 it.each(["comment", "reply", "own answer", "request changes"] as const)("restores an unsent %s after leaving and reopening the plan", async (kind) => {
   let reader: ReturnType<typeof render>;
-  const open = (entry = visual) => render(<PlanReader client={readerClient} visual={entry} onBack={() => reader.unmount()} onChanged={() => {}} />);
+  const store = createAppStore();
+  const open = (entry = visual, app = store) => render(inTestStore(<PlanReader client={readerClient} visual={entry} onBack={() => reader.unmount()} onChanged={() => {}} />, app));
   reader = open();
   const decision = await screen.findByTestId("plan-decision");
   const start = {
@@ -93,6 +96,11 @@ it.each(["comment", "reply", "own answer", "request changes"] as const)("restore
     await screen.findByTestId("plan-decision");
     expect(screen.queryByTestId("thread-draft")).toBeNull();
     other.unmount();
+
+    const otherApp = open(visual, createAppStore());
+    await screen.findByTestId("plan-decision");
+    expect(screen.queryByTestId("thread-draft")).toBeNull();
+    otherApp.unmount();
   }
 
   reader = open();

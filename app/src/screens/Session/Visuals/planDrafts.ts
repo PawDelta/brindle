@@ -1,9 +1,12 @@
 import { createContext, useContext, useState, useSyncExternalStore } from "react";
+import type { AppStore } from "../../../store/store";
+import { StoreContext } from "../../../store/useStore";
 
 // Reader navigation unmounts the form. Keep unsent text in this app window, scoped to the doc
 // and reader identity, without writing it to disk or sending it to the Library.
 export const PlanDraftScope = createContext<string | null>(null);
-const drafts = new Map<string, unknown>();
+const standaloneDrafts = new Map<string, unknown>();
+const appDrafts = new WeakMap<AppStore, Map<string, unknown>>();
 const listeners = new Set<() => void>();
 const scopedKey = (scope: string, field: string) => JSON.stringify([scope, field]);
 const subscribe = (listener: () => void) => {
@@ -11,20 +14,37 @@ const subscribe = (listener: () => void) => {
   return () => { listeners.delete(listener); };
 };
 
-export function readPlanDraft<T>(scope: string | null, field: string): T | null {
-  return scope === null ? null : (drafts.get(scopedKey(scope, field)) as T | undefined) ?? null;
+type Scope = { app: AppStore | null; doc: string } | null;
+
+export function usePlanDraftScope(): Scope {
+  const app = useContext(StoreContext);
+  const doc = useContext(PlanDraftScope);
+  return doc === null ? null : { app, doc };
 }
 
-export function savePlanDraft(scope: string | null, field: string, value: unknown): void {
-  if (scope === null) return;
-  const key = scopedKey(scope, field);
+export function readPlanDraft<T>(scope: Scope, field: string): T | null {
+  if (!scope) return null;
+  const drafts = scope.app ? appDrafts.get(scope.app) : standaloneDrafts;
+  return (drafts?.get(scopedKey(scope.doc, field)) as T | undefined) ?? null;
+}
+
+export function savePlanDraft(scope: Scope, field: string, value: unknown): void {
+  if (!scope) return;
+  let drafts = scope.app ? appDrafts.get(scope.app) : standaloneDrafts;
+  if (!drafts && scope.app && value !== null) {
+    drafts = new Map();
+    appDrafts.set(scope.app, drafts);
+  }
+  if (!drafts) return;
+  const key = scopedKey(scope.doc, field);
+  if ((drafts.get(key) ?? null) === value) return;
   if (value === null) drafts.delete(key);
   else drafts.set(key, value);
   listeners.forEach((listener) => listener());
 }
 
 export function usePlanDraft<T>(field: string) {
-  const scope = useContext(PlanDraftScope);
+  const scope = usePlanDraftScope();
   const [local, setLocal] = useState<T | null>(null);
   const saved = useSyncExternalStore(subscribe, () => readPlanDraft<T>(scope, field));
   const value = scope === null ? local : saved;

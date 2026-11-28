@@ -61,7 +61,7 @@ import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
 import { LibraryNetworkNote, SlowConnectionNote, libraryNetwork, useSlowPending, type LibraryNetwork } from "./LibraryNetwork";
 import { StoreContext } from "../../../store/useStore";
-import { PlanDraftScope, readPlanDraft, savePlanDraft, usePlanDraft } from "./planDrafts";
+import { PlanDraftScope, readPlanDraft, savePlanDraft, usePlanDraft, usePlanDraftScope } from "./planDrafts";
 
 type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach" | "cancelPlan" | "stopAlongside">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient>;
 
@@ -528,7 +528,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const threads = useMemo(() => plan.threads ?? [], [plan.threads]);
   const sharedFiles = useMemo(() => overlaps(plan), [plan]);
   const [picks, setPicks] = useState<Record<string, string>>({});
-  const draftScope = useContext(PlanDraftScope);
+  const draftScope = usePlanDraftScope();
   const [attached, setAttached] = useState<string[]>([]);
   const [uploading, setUploading] = useState(0);
   const [sending, setSending] = useState<"approve" | "changes" | "cancel" | null>(null);
