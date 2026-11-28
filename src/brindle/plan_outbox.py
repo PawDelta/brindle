@@ -155,8 +155,9 @@ def deliver(db, owner, doc, send, load, *, item=None, read=False, legacy=False):
                         already_saved = bool(candidates)
                     if keyed:
                         if feature not in features:
-                            # A previously keyed POST cannot safely be repeated on an older server.
-                            conn.execute("UPDATE plan_outbox SET state='unconfirmed' WHERE seq=?", (row["seq"],))
+                            # Resume in order once the Library accepts the original key again.
+                            if row["state"] == "waiting":
+                                break
                             continue
                         body["idempotency_key"] = row["client_id"]
                 elif row["attempted"] and tail == "/sign-offs":

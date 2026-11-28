@@ -14,13 +14,28 @@ def test_offline_comment_sent_once(app, lib, db):
     login_as(lib.calls, analysis_docs._session()[1], features=("analysis_docs",))
     route = f"POST {DESIGN}/comments"
     send = lib.calls.routes[route]
-    lib.calls.routes[route] = [TransportError("offline", network="offline")]
+    features = ["comment_idempotency"]
+    lib.calls.routes[f"GET {DESIGN}"] = lambda *_: (200, {**lib.view(), "features": features})
     body = {"client_id": "comment-one", "rev": 1, "anchor": SECTION, "text": "Which VM?"}
+    offline = True
+
+    def library_write(form, headers):
+        if not features or form.get("idempotency_key") != body["client_id"]:
+            return 422, {"error": "invalid_key"}
+        if offline:
+            raise TransportError("offline", network="offline")
+        return send(form, headers)
+
+    lib.calls.routes[route] = library_write
     waiting = app.post(f"{ROUTE}/comments", json=body)
     assert waiting.is_success
     assert waiting.json()["outbox"][0]["state"] == "waiting"
 
-    lib.calls.routes[route] = send
+    offline = False
+    features.clear()
+    shared_docs.sync_open(db)
+    assert not lib.threads
+    features.append("comment_idempotency")
     shared_docs.sync_open(db)
     assert len(lib.threads) == 1
     delivered = app.get(ROUTE).json()

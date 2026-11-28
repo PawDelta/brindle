@@ -11,6 +11,16 @@ export function QueueCount({ items = [] }: { items?: PlanChange[] }) {
   return count ? <span className="text-xs text-ink-3">Offline · {count} waiting to send</span> : null;
 }
 
+export function UnattachedSentNotes() {
+  const notes = useContext(PlanDelivery).filter(item => item.state === "sent" && item.body.thread_item === undefined &&
+    (item.tail === "/comments" || item.tail === "/suggestions"));
+  return notes.map(item => <span key={item.client_id} data-client-id={item.client_id} role="status"
+    className="inline-flex items-center gap-1 text-xs text-ink-3">
+    {item.tail === "/suggestions" ? "Suggestion" : item.body.parent !== undefined ? "Reply" : "Comment"}
+    <DeliveryStatus item={item} />
+  </span>);
+}
+
 const PlanRevision = createContext<number | undefined>(undefined);
 
 export function PlanDeliveryProvider({ items, rev, children }: { items: PlanChange[]; rev?: number; children: ReactNode }) {
