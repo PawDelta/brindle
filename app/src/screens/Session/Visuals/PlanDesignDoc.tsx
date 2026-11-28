@@ -15,7 +15,7 @@ import { createPortal } from "react-dom";
 import { usePlanDraft } from "./planDrafts";
 import type { Plan } from "../../../api/client";
 import type { PlanAnswerDTO, PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
-import { DeliveryStatus, NoteStatus, NoteText, PendingReplies, useQueuedPick } from "./PlanDelivery";
+import { DeliveryStatus, NoteStatus, NoteText, PendingReplies, RefusalDetails, useQueuedPick } from "./PlanDelivery";
 import { ago } from "../../../components/ProviderConnect";
 import { button, field, pill, quiet } from "../../../components/ui";
 import { SupervisorReplying, type ThreadActions } from "./DocReview";
@@ -378,13 +378,17 @@ export function DecisionCard({ decision: d, n, of, open, canPick, disabled = fal
       className={`relative min-w-0 [overflow-wrap:anywhere] mb-1.5 mt-[26px] scroll-mt-16 rounded-md border border-l-2 font-sans transition-colors duration-200 ${needsPick ? "border-[color-mix(in_srgb,var(--sap)_42%,transparent)] border-l-sap bg-[color-mix(in_srgb,var(--sap)_5%,transparent)]" : "border-line border-l-line-strong"}`}>
       <div className="flex flex-wrap items-center justify-between gap-3 px-4 pt-3">
         <p className="m-0 text-[11px] font-medium uppercase leading-[1.3] tracking-[0.08em] text-ink-3">{`Decision ${n} of ${of}`}</p>
-        {delivery ? <DeliveryStatus item={delivery} /> : needsPick ? <span className={`${pill} text-sap`}>Needs your pick</span>
+        {delivery?.state === "refused" ? <span data-state="refused" className="text-xs font-semibold text-ink-2">Not sent</span>
+          : delivery ? <DeliveryStatus item={delivery} /> : needsPick ? <span className={`${pill} text-sap`}>Needs your pick</span>
           : waiting ? <span className="text-xs text-ink-3" data-testid="plan-decision-status" data-state="waiting-on-author">Not decided yet · {approver ?? "the author"} picks</span>
           : done ? <Tick>Decided{canPick
             ? <span className="font-normal text-ink-3" data-testid="plan-decision-approval" data-approver={approver ?? "you"}>· change it any time before {approver ? `${approver} approves` : "you approve"}</span>
             : open && approver && <span className="font-normal text-ink-3" data-testid="plan-decision-status" data-state="author-chose">· {approver} chose</span>}</Tick> : null}
       </div>
       <h3 id={`plan-q-${d.id}`} className="m-0 mt-1 px-4 text-base font-semibold leading-[1.35] tracking-[-0.01em] text-ink">{d.title}</h3>
+      {delivery?.state === "refused" && <div data-testid="plan-refusal-details" className="mt-2 grid gap-1 px-4 text-xs text-ink-2">
+        <RefusalDetails code={delivery.code} />
+      </div>}
       {/* Who picked what, saved as each pick is made: everyone on a shared plan sees the same. */}
       {whoPicked && <p data-testid="plan-picks" className="m-0 mt-1 px-4 text-[12.5px] leading-normal text-ink-3">{whoPicked}</p>}
       <div className="mt-3">
