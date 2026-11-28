@@ -149,10 +149,13 @@ describe("visuals", () => {
   it("shows a checked inline option with a border and without a selection outline", async () => {
     const doc = await openInlineChoices(dockChoices);
     const option = doc.querySelector<HTMLButtonElement>('[data-choice="dock"] [data-option="one"]')!;
+    const view = doc.defaultView!;
+    const unselectedOutline = view.getComputedStyle(option).outline;
     fireEvent.click(option);
+    const selectedStyle = view.getComputedStyle(option);
     expect(option.getAttribute("aria-checked")).toBe("true");
-    expect(option.style.outline).toBe("");
-    expect(doc.defaultView!.getComputedStyle(option).borderWidth).toBe("2px");
+    expect(selectedStyle.outline).toBe(unselectedOutline);
+    expect(selectedStyle.borderWidth).toBe("2px");
   });
 
   it("selects both published inline choices under older WebKit's event policy", async () => {
