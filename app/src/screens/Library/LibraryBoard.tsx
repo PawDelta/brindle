@@ -107,7 +107,7 @@ function Card({ doc, record, queue, folder, onOpen }: { doc: AnalysisDoc; record
 export function LibraryBoard({ docs, queue, records, folderOf, onOpen }: { docs: AnalysisDoc[]; queue: Queue; records: Map<string, DesignRecord>; folderOf(id: string): { label: string; private: boolean } | undefined; onOpen(id: string): void }) {
   const sorted = newestFirst(docs);
   return (
-    <div className="grid min-h-0 flex-1 grid-cols-5 overflow-auto border-t border-line" data-testid="library-board">
+    <div className="grid min-h-0 min-w-0 flex-1 grid-cols-[repeat(5,minmax(244px,1fr))] overflow-auto border-t border-line" data-testid="library-board">
       {BOARD_STAGES.map((column) => {
         const cards = sorted.filter((d) => stageOf(d.id, queue, records.get(d.id)) === column.id);
         return (
