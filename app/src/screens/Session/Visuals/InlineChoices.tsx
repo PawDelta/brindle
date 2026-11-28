@@ -19,9 +19,9 @@ function resetOptionAppearance(button: HTMLButtonElement) {
   style.setProperty("background-color", "Canvas", "important");
   style.setProperty("background-image", "none", "important");
   style.setProperty("background-clip", "border-box", "important");
-  style.setProperty("border", "2px solid GrayText", "important");
+  style.setProperty("border", "1px solid GrayText", "important");
   style.setProperty("border-image", "none", "important");
-  style.setProperty("border-radius", ".4em", "important");
+  style.setProperty("border-radius", "4px", "important");
   style.setProperty("box-shadow", "none", "important");
   style.setProperty("outline", "revert", "important"); // Keep the browser's keyboard focus indicator.
   style.setProperty("outline-offset", "revert", "important");
@@ -55,10 +55,13 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
       if (attribute === "href" || attribute?.endsWith(":href")) animation.remove();
     }
     // Reserve the state hooks for the choice controls the app inserts below.
-    for (const el of doc.querySelectorAll("fieldset[data-choice] :is([data-choice-mark], [data-choice-status], [data-needs-answer], button[data-option][data-selected])")) {
+    for (const el of doc.querySelectorAll("fieldset[data-choice] :is([data-choice-mark], [data-choice-tick], [data-choice-status], [data-choice-dot], [data-needs-answer], [data-choice-state], button[data-option][data-selected])")) {
       el.removeAttribute("data-choice-mark");
+      el.removeAttribute("data-choice-tick");
       el.removeAttribute("data-choice-status");
+      el.removeAttribute("data-choice-dot");
       el.removeAttribute("data-needs-answer");
+      el.removeAttribute("data-choice-state");
       if (el.matches("button[data-option]")) el.removeAttribute("data-selected");
     }
     for (const group of visual.choices ?? []) {
@@ -78,13 +81,19 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
       }
       const status = doc.createElement("span");
       status.setAttribute("data-choice-status", "");
-      status.textContent = "Needs an answer";
       status.style.cssText = `
-        all: initial !important; display: none !important; margin-inline-start: .65em !important;
-        padding: .1em .4em !important; border: 1px solid currentColor !important;
-        border-radius: .3em !important; font: 600 .75em/1.4 system-ui !important;
-        color: var(--brindle-choice-required, CanvasText) !important; background: Canvas !important;
+        all: initial !important; display: none !important; align-items: center !important; gap: 6px !important;
+        margin-inline-start: 12px !important; vertical-align: 1px !important; white-space: nowrap !important;
+        font-family: inherit !important; font-size: 12px !important; font-weight: 500 !important; line-height: 1.4 !important;
       `;
+      const dot = doc.createElement("span");
+      dot.setAttribute("data-choice-dot", "");
+      dot.setAttribute("aria-hidden", "true");
+      dot.style.cssText = `
+        all: initial !important; display: inline-block !important; box-sizing: border-box !important;
+        flex: none !important; width: 7px !important; height: 7px !important; border-radius: 50% !important;
+      `;
+      status.append(dot, "Needs an answer");
       heading.append(status);
       const buttons = choiceButtons(field);
       for (const option of group.options) {
@@ -100,12 +109,19 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
         mark.setAttribute("aria-hidden", "true");
         // Inline priority keeps page rules for button children from changing the radio mark.
         mark.style.cssText = `
-          all: initial !important; display: inline-block !important; box-sizing: border-box !important;
-          width: 1em !important; height: 1em !important; flex: none !important;
-          margin-inline-end: .5em !important; vertical-align: -.12em !important;
-          font-size: 1em !important; color: transparent !important;
-          border: 2px solid GrayText !important; border-radius: 50% !important;
+          all: initial !important; display: inline-block !important; position: relative !important; box-sizing: border-box !important;
+          width: 15px !important; height: 15px !important; flex: none !important;
+          margin-inline-end: 9px !important; vertical-align: -2.5px !important; border-radius: 50% !important;
         `;
+        const tick = doc.createElement("span");
+        tick.setAttribute("data-choice-tick", "");
+        tick.style.cssText = `
+          all: initial !important; display: block !important; position: absolute !important; box-sizing: content-box !important;
+          left: 5px !important; top: 2.5px !important; width: 4px !important; height: 8px !important;
+          border-style: solid !important; border-width: 0 1.75px 1.75px 0 !important;
+          transform: rotate(45deg) !important;
+        `;
+        mark.append(tick);
         item.prepend(mark);
       }
     }
@@ -119,11 +135,16 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
     if (!doc?.body) return;
     doc.documentElement.style.setProperty("zoom", String(current.current.zoom));
     const theme = getComputedStyle(document.documentElement);
-    const accent = theme.getPropertyValue("--branch").trim() || "Highlight";
-    const fill = theme.getPropertyValue("--branch-soft").trim() || "color-mix(in srgb, Highlight 12%, transparent)";
-    const selectedBackground = `linear-gradient(${fill}, ${fill})`;
-    const neutral = theme.getPropertyValue("--ink-3").trim() || "GrayText";
-    doc.documentElement.style.setProperty("--brindle-choice-required", theme.getPropertyValue("--sap"));
+    const token = (name: string, fallback: string) => theme.getPropertyValue(name).trim() || fallback;
+    const ground = token("--canvas", "Canvas");
+    const ink = token("--ink", "CanvasText");
+    const muted = token("--ink-3", "GrayText");
+    const line = token("--line", "GrayText");
+    const ring = token("--line-strong", line);
+    const pass = token("--pass", "Highlight");
+    const passSoft = token("--pass-soft", "color-mix(in srgb, Highlight 12%, transparent)");
+    const passLine = `color-mix(in srgb, ${pass} 40%, transparent)`;
+    const wash = `color-mix(in srgb, ${pass} 7%, transparent)`;
     const { visual: row, picks: selected } = current.current;
     const closed = !!row.answer || !!row.answered_in_chat;
     for (const group of row.choices ?? []) {
@@ -137,7 +158,10 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
       if (status) {
         const needsAnswer = !closed && !group.options.some(option => option.id === pick);
         status.parentElement?.toggleAttribute("data-needs-answer", needsAnswer);
-        status.style.setProperty("display", needsAnswer ? "inline-block" : "none", "important");
+        status.style.setProperty("display", needsAnswer ? "inline-flex" : "none", "important");
+        status.style.setProperty("color", muted, "important");
+        status.querySelector<HTMLElement>(":scope > [data-choice-dot]")?.style
+          .setProperty("border", `1.5px solid ${muted}`, "important");
       }
       for (const item of choiceButtons(field)) {
         const id = item.dataset.option!;
@@ -148,14 +172,19 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
         const checked = !!option && pick === id;
         item.setAttribute("aria-checked", String(checked));
         item.toggleAttribute("data-selected", checked);
-        item.style.setProperty("border-color", checked ? accent : neutral, "important");
-        item.style.setProperty("background-image", checked ? selectedBackground : "none", "important");
-        item.style.setProperty("color", item.disabled ? "GrayText" : "CanvasText", "important");
+        if (checked) item.dataset.choiceState = "soft-tint";
+        else delete item.dataset.choiceState;
+        item.style.setProperty("background-color", ground, "important");
+        item.style.setProperty("border-color", checked ? passLine : line, "important");
+        item.style.setProperty("background-image", checked ? `linear-gradient(${wash}, ${wash})` : "none", "important");
+        item.style.setProperty("color", item.disabled && !checked ? muted : ink, "important");
         const mark = item.querySelector<HTMLElement>(":scope > [data-choice-mark]");
         if (mark) {
           mark.dataset.choiceMark = checked ? "selected" : "empty";
-          mark.style.setProperty("border-color", checked ? accent : neutral, "important");
-          mark.style.setProperty("background-color", checked ? accent : "Canvas", "important");
+          mark.style.setProperty("background-color", checked ? passSoft : "transparent", "important");
+          mark.style.setProperty("box-shadow", checked ? "none" : `inset 0 0 0 1.5px ${ring}`, "important");
+          mark.querySelector<HTMLElement>(":scope > [data-choice-tick]")?.style
+            .setProperty("border-color", checked ? pass : "transparent", "important");
         }
         // Read rendered text after loading so hidden preview text doesn't replace the label.
         if (loaded && option && !(item.innerText ?? item.textContent)?.trim()) {
