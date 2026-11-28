@@ -180,10 +180,15 @@ it("a teammate signs off through the Library, keeps a draft across a stale write
   let reply!: (d: SharedDesign) => void;
   answer = () => new Promise<SharedDesign>((resolve) => { reply = resolve; });
   await act(async () => fireEvent.click(within(screen.getByTestId("thread-draft")).getByRole("button", { name: "Comment" })));
-  reading = async () => { throw new DaemonError("forbidden", "no access", 403); };
+  reading = async () => {
+    const lost = new DaemonError("forbidden", "no access", 403);
+    lost.refusedChanges = [{ client_id: "comment", tail: "/comments", rev: 2 }];
+    throw lost;
+  };
   await nextRead();
   expect(screen.queryByText("Workers run here.")).toBeNull();
   expect(screen.getByRole("alert")).toBeTruthy();
+  expect(screen.getByText("Not sent").closest('[data-state="refused"]')).toBeTruthy();
 
   let granted!: (d: SharedDesign) => void;
   reading = () => new Promise<SharedDesign>((resolve) => { granted = resolve; });

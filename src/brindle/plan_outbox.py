@@ -10,11 +10,17 @@ from uuid import uuid4
 from brindle import airgap, config
 from brindle.db import DB
 from brindle.pro.analysis_docs import Refused
-from brindle.redact import mask
+from brindle.redact import mask, mask_data
 from brindle.service.errors import ServiceError, network_error
 
 current = ContextVar("plan_outbox", default=None)
 _locks = [threading.Lock() for _ in range(64)]
+
+
+class AccessLost(Refused):
+    def __init__(self, refusal, receipts):
+        super().__init__(str(refusal), refusal.status, refusal.code)
+        self.receipts = receipts
 
 
 @contextmanager
@@ -79,14 +85,27 @@ def deliver(db, owner, doc, send, load, *, item=None, read=False, legacy=False):
         conn.execute(
             "INSERT INTO plan_outbox(owner,doc,client_id,tail,payload,repo) VALUES(?,?,?,?,?,?) "
             "ON CONFLICT(owner,doc,client_id) DO NOTHING",
-            (owner, doc, client_id, tail, json.dumps(body), repo),
+            (owner, doc, client_id, tail, json.dumps(mask_data(body)), repo),
         )
     with _locks[hash((db.path, owner, doc)) % len(_locks)]:
-        view = load() if read else None
+        try:
+            view = load() if read else None
+        except Refused as exc:
+            if exc.code == "key_unavailable" or not (exc.status == 404 or (exc.status == 403 and exc.code)):
+                raise
+            with db.tx() as tx:
+                tx.execute("UPDATE plan_outbox SET state='refused', code='forbidden' "
+                           "WHERE owner=? AND doc=? AND state='waiting'", (owner, doc))
+                receipts = [dict(r) for r in tx.execute(
+                    "SELECT client_id,tail,json_extract(payload,'$.rev') AS rev FROM plan_outbox "
+                    "WHERE owner=? AND doc=? AND state='refused' ORDER BY seq", (owner, doc))]
+            if receipts:
+                raise AccessLost(exc, receipts) from exc
+            raise
         features = view.get("features", []) if view is not None else None
         for row in conn.execute("SELECT * FROM plan_outbox WHERE owner=? AND doc=? AND state='waiting' ORDER BY seq",
                                 (owner, doc)).fetchall():
-            body = json.loads(row["payload"])
+            body = mask_data(json.loads(row["payload"]))
             if row["repo"]:
                 config.load_repo_config(row["repo"])
             if airgap.enabled():
@@ -126,8 +145,8 @@ def deliver(db, owner, doc, send, load, *, item=None, read=False, legacy=False):
                 if tail in ("/votes", "/sign-offs"):
                     conn.execute("UPDATE plan_outbox SET state='sent',sent_at=0,payload='{}' "
                                  "WHERE owner=? AND doc=? AND tail=? AND seq<? AND state='refused' "
-                                 "AND json_extract(payload,'$.decision') IS ?",
-                                 (owner, doc, tail, row["seq"], body.get("decision")))
+                                 "AND json_extract(payload,'$.decision') IS ? AND json_extract(payload,'$.rev') IS ?",
+                                 (owner, doc, tail, row["seq"], body.get("decision"), body.get("rev")))
                 conn.execute("UPDATE plan_outbox SET state='sent', sent_at=?, payload=? WHERE seq=?",
                              (time.time(), json.dumps(target), row["seq"]))
         rows = conn.execute("SELECT * FROM plan_outbox WHERE owner=? AND doc=? AND "

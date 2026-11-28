@@ -11,15 +11,18 @@ export function QueueCount({ items = [] }: { items?: PlanChange[] }) {
   return count ? <span className="text-xs text-ink-3">Offline · {count} waiting to send</span> : null;
 }
 
-export function PlanDeliveryProvider({ items, children }: { items: PlanChange[]; children: ReactNode }) {
+const PlanRevision = createContext<number | undefined>(undefined);
+
+export function PlanDeliveryProvider({ items, rev, children }: { items: PlanChange[]; rev?: number; children: ReactNode }) {
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
   return <PlanDelivery.Provider value={items.filter(item => !dismissed.has(item.client_id))}>
-    <DismissSent.Provider value={id => setDismissed(old => new Set([...old, id]))}>{children}</DismissSent.Provider>
+    <PlanRevision.Provider value={rev}><DismissSent.Provider value={id => setDismissed(old => new Set([...old, id]))}>{children}</DismissSent.Provider></PlanRevision.Provider>
   </PlanDelivery.Provider>;
 }
 
 export function useQueuedPick(decision: string) {
-  return useContext(PlanDelivery).filter(item => item.tail === "/votes" && item.body.decision === decision).at(-1);
+  const rev = useContext(PlanRevision);
+  return useContext(PlanDelivery).filter(item => item.tail === "/votes" && item.body.rev === rev && item.body.decision === decision).at(-1);
 }
 
 export function DeliveryStatus({ item }: { item: PlanChange }) {
@@ -57,6 +60,16 @@ export function NoteText({ id, parent, children }: { id: number; parent?: number
 export function SignOffDelivery({ rev }: { rev: number }) {
   const item = useContext(PlanDelivery).filter(item => item.tail === "/sign-offs" && item.body.rev === rev).at(-1);
   return item ? <DeliveryStatus item={item} /> : null;
+}
+
+export function EarlierRefusals({ rev, signOffVersion }: { rev: number; signOffVersion: number }) {
+  const earlier = useContext(PlanDelivery).filter(item => item.state === "refused" &&
+    ((item.tail === "/votes" && item.body.rev !== rev) ||
+     (item.tail === "/sign-offs" && item.body.rev !== signOffVersion)));
+  return earlier.map(item => <div key={item.client_id} className="px-4 py-2 text-xs text-ink-2">
+    {item.tail === "/votes" ? "Pick" : "Sign-off"} · Revision {item.body.rev}
+    <DeliveryStatus item={item} />
+  </div>);
 }
 
 export function usePendingNotes() {

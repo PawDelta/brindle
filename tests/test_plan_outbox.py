@@ -2,13 +2,16 @@
 
 import pytest
 
-from brindle.pro import shared_docs
+from brindle.pro import analysis_docs, shared_docs
+from brindle.redact import mask_data
+from test_pro_remote_learning import login_as
 from brindle.pro.auth import TransportError
 from pro_fixtures import backend, pro_env, signing_key  # noqa: F401
 from test_shared_reader import DESIGN, ROUTE, SECTION, app, lib  # noqa: F401
 
 
 def test_offline_comment_sent_once(app, lib, db):
+    login_as(lib.calls, analysis_docs._session()[1], features=("analysis_docs",))
     route = f"POST {DESIGN}/comments"
     send = lib.calls.routes[route]
     lib.calls.routes[route] = [TransportError("offline", network="offline")]
@@ -74,12 +77,25 @@ def test_lost_response_after_save(app, lib, supported, tail):
     lib.calls.routes[route] = library_write
     content = {"anchor": SECTION} if tail == "comments" else {
         "section": "summary", "start": 0, "before": "Workers", "after": "Hosts"}
-    body = {"rev": 1, "text": "Review this", **content}
+    sensitive = "ghp_" + "a" * 36
+    body = {"rev": 1, "text": sensitive, **content}
+    if tail == "suggestions":
+        body["after"] = sensitive
     # An identical earlier change must not suppress the new one.
-    save(body, {})
+    save(mask_data(body), {})
     waiting = app.post(f"{ROUTE}/{tail}", json={**body, "client_id": "lost-response"}).json()
     assert waiting["outbox"][0]["state"] == "waiting"
     sent = app.get(ROUTE).json()
     assert len(sent["threads"]) == 2
     assert sent["outbox"][0]["state"] == "sent"
     assert keys == ({"lost-response"} if supported else {None})
+
+
+def test_revoked_reader_gets_own_receipt_without_document(app, lib):
+    lib.calls.routes[f"POST {DESIGN}/votes"] = [TransportError("offline", network="offline")]
+    body = {"client_id": "vote", "rev": 1, "decision": "d1", "option": "b"}
+    assert app.post(f"{ROUTE}/votes", json=body).is_success
+    lib.calls.routes[f"GET {DESIGN}"] = lambda *_: (403, {"error": "forbidden"})
+    response = app.get(ROUTE)
+    assert response.status_code == 403 and "threads" not in response.json()
+    assert response.json()["error"]["refused_changes"] == [{"client_id": "vote", "tail": "/votes", "rev": 1}]

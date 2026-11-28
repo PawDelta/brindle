@@ -60,7 +60,7 @@ import { Annotated, DecisionCard, type OwnAnswers, MarginNote, Menu, ModeMenu, O
 import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
 import { LibraryNetworkNote, SlowConnectionNote, libraryNetwork, useSlowPending, type LibraryNetwork } from "./LibraryNetwork";
-import { PendingNote, PlanDeliveryProvider, QueueCount, ShowPlanChanges, SignOffDelivery, usePendingNotes } from "./PlanDelivery";
+import { EarlierRefusals, PendingNote, PlanDeliveryProvider, QueueCount, ShowPlanChanges, SignOffDelivery, usePendingNotes } from "./PlanDelivery";
 import { StoreContext } from "../../../store/useStore";
 import { PlanDraftScope, readPlanDraft, savePlanDraft, usePlanDraft, usePlanDraftScope } from "./planDrafts";
 
@@ -1520,10 +1520,12 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       </>
     );
   }
-  if (designDoc) return <ShowPlanChanges.Provider value={() => setHistoryOpen(true)}>{planningDoc()}</ShowPlanChanges.Provider>;
+  const earlierRefusals = <EarlierRefusals rev={plan.rev} signOffVersion={reviewVersion ?? plan.rev} />;
+  if (designDoc) return <ShowPlanChanges.Provider value={() => setHistoryOpen(true)}>{earlierRefusals}{planningDoc()}</ShowPlanChanges.Provider>;
 
   return (
     <ShowPlanChanges.Provider value={() => { collapse(false); setTab("history"); }}>
+      {earlierRefusals}
       {chrome && (
         <ReaderBar lead={chrome.lead} badges={chrome.badges} actions={chrome.actions}
           version={<span className="whitespace-nowrap text-xs text-ink-3" title={`${plan.id} · rendered by brindle from the plan's own text${frozen ? ` · rev ${plan.rev}` : ""}`} data-testid="plan-rev">{versionLabel}</span>}

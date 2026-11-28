@@ -7,6 +7,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { LibraryPerson, PlanDeliveryItem, SharedDesign } from "../../../api/client";
+import { DaemonError } from "../../../api/client";
 import type { ShareLinkClient, SharedDesignClient } from "./client";
 import { designLinkTarget } from "./ShareLink";
 import type { LiveClient } from "./DocEditor";
@@ -57,7 +58,7 @@ function named(doc: SharedDesign, directory: LibraryPerson[]): SharedDesign {
     ...doc,
     signed_off: doc.signed_off || doc.outbox?.some(item => item.state === "waiting" && item.tail === "/sign-offs" && item.body.rev === doc.rev),
     decisions: doc.decisions.map(d => {
-      const pick = doc.outbox?.filter(item => item.tail === "/votes" && item.body.decision === d.id).at(-1);
+      const pick = doc.outbox?.filter(item => item.tail === "/votes" && item.body.rev === doc.rev && item.body.decision === d.id).at(-1);
       if (!pick || pick.state === "sent") return d;
       return { ...d, confirmed: pick.state === "refused" ? null : pick.body.option };
     }),
@@ -92,7 +93,10 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
     client.libraryPeople().then((got) => { if (live) setDirectory(got.people); }, () => {});
     return () => { live = false; };
   }, [client]);
-  const { doc, error, writes } = useDoc(source, undefined, undefined, observeVisibleReads);
+  const [failure, setFailure] = useState<{ source: typeof source; error: DaemonError } | null>(null);
+  const { doc, error, writes } = useDoc(source, undefined, e => {
+    setFailure(e instanceof DaemonError ? { source, error: e } : null);
+  }, observeVisibleReads);
   account.current = doc?.me;
   const shown = useMemo(() => {
     if (!doc) return null;
@@ -122,7 +126,7 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="shared-design-reader">
       {doc && shown && teammate ? (
-        <PlanDeliveryProvider key={shown.id} items={shown.outbox ?? []}><DesignDoc source={source} teammate={teammate} plan={shown} mode={current} writes={writes} work={work}
+        <PlanDeliveryProvider key={shown.id} rev={shown.rev} items={shown.outbox ?? []}><DesignDoc source={source} teammate={teammate} plan={shown} mode={current} writes={writes} work={work}
           top={<AccessRequest key={docId} client={client} doc={doc} repo={repo} />}
           shareLink={shown.can_edit ? designLinkTarget(client, docId, repo) : undefined}
           liveClient={client.visualLive ? client as LiveClient : undefined}
@@ -130,6 +134,10 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
       ) : (
         <>
           <ReaderBar lead={lead} />
+          {error && failure?.source === source && failure.error.refusedChanges?.map(item =>
+            <p key={item.client_id} data-state="refused" className="px-s3 text-sm text-ink-2">
+              <strong>Not sent</strong> · {({ "/votes": "Pick", "/comments": "Comment", "/suggestions": "Suggestion", "/sign-offs": "Sign-off" } as Record<string, string>)[item.tail]} · Revision {item.rev}
+            </p>)}
           <p className="p-s3 text-sm text-ink-3" role={error ? "alert" : undefined}>{error ?? "Loading…"}</p>
         </>
       )}

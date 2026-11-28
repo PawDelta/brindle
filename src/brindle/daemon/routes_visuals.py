@@ -879,7 +879,7 @@ def review_policies_impact(db: DB, params: dict, body: dict) -> Any:
 def _shared_design(repo: str | None, work: Callable[[Any], Any], *, require_entitlement: bool = True) -> Any:
     from pydantic import ValidationError
 
-    from brindle import airgap, config, keystore
+    from brindle import airgap, config, keystore, plan_outbox
     from brindle.daemon import routes_actions as actions
     from brindle.pro import analysis_docs, auth, shared_reader
 
@@ -890,7 +890,10 @@ def _shared_design(repo: str | None, work: Callable[[Any], Any], *, require_enti
             actions._docs_entitlement(repo, None if airgap.enabled() else analysis_docs._session()[1])
         return work(shared_reader)
     except (RuntimeError, auth.AuthError, keystore.KeychainReadBlocked, ValidationError) as e:
-        raise actions.upstream_error(e) from e
+        error = actions.upstream_error(e)
+        if isinstance(e, plan_outbox.AccessLost):
+            error.extra["refused_changes"] = e.receipts
+        raise error from e
 
 
 @_json

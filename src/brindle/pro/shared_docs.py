@@ -1740,17 +1740,26 @@ def _note_lapses(db: DB, client, store) -> None:
 def sync_open(db: DB, *, client=None, store=None) -> int:
     """Sync every shared plan still in review, for the daemon's background
     pass (a building plan's review is closed). One plan's failure doesn't
-    stop the rest. Without Team nothing is synced. With it, a plan whose Team
+    stop the rest. Library members can send their review changes. With Team, a plan whose Team
     plan had ended picks its document back up. An approval held for the
     Library is settled once it has answered. Returns how many synced."""
+    from brindle.pro import shared_reader
+
     client, store = ad._session(client, store)
+    unavailable = None
     try:
-        ent = _require_team(store)
-    except Exception as e:  # noqa: BLE001 - logged out, air-gapped or no Team plan: nothing to bring back
+        ent = ad.require_entitlement(store)
+    except Exception as e:  # noqa: BLE001 - logged out or air-gapped
+        unavailable = e
+    else:
+        shared_reader.drain_pending(db, ent.sub, client, store)
+        if TEAM_FEATURE not in ent.features:
+            unavailable = ad.NotEntitled("Sharing a plan requires a Team plan.")
+    if unavailable is not None:
         _note_lapses(db, client, store)
         for row in db.conn.execute("SELECT plan_id FROM plan_shares WHERE unconfirmed IS NOT NULL"
                                    " OR approve_wanted IS NOT NULL").fetchall():
-            _note_unconfirmed(db, row["plan_id"], e, store)
+            _note_unconfirmed(db, row["plan_id"], unavailable, store)
         return 0
     _send_unshares(db, ent.sub, client, store)
     done = 0
@@ -1767,7 +1776,4 @@ def sync_open(db: DB, *, client=None, store=None) -> int:
             plans.settle_held_approval(db, row["plan_id"])
         except Exception:  # noqa: BLE001 - it stays held: the next pass looks again
             log.warning("brindle: couldn't settle plan %s's held approval", row["plan_id"], exc_info=True)
-    from brindle.pro import shared_reader
-
-    shared_reader.drain_pending(db, ent.sub, client, store)
     return done
