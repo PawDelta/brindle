@@ -152,11 +152,14 @@ def _dto(doc_id: str, view: dict, me: str, *, review: bool = True, names: dict |
     sign_offs = [{"sub": s["sub"], "rev": s["rev"], "at": _at(s.get("at")), "optional": s.get("optional")}
                  for s in (raw_sign_offs or []) if isinstance(s, dict)
                  and isinstance(s.get("sub"), str) and isinstance(s.get("rev"), int)]
+    reference = view.get("reference")
     return SharedDesignDTO(
         id=doc_id, session="", title=view.get("title") or UNTITLED, rev=view["rev"], state="open", ask=content["ask"],
         markdown=content["markdown"], lede=content["lede"], sections=content["sections"], decisions=decisions,
         split=[], queued=0, created_at=_at(history[0].get("at")) if history else 0.0,
+        reference=mask(reference) if isinstance(reference, str) else None,
         revisions=[{"rev": r["rev"], "author": _who(r.get("author"), me), "source": r["source"],
+                    "title": mask(r["title"]) if isinstance(r.get("title"), str) else None,
                     "changed": r.get("changed") or [], "at": _at(r.get("at"))} for r in history],
         threads=threads, teammate_names=names or {},
         gate=_gate(view, me) if review else None, me=me,

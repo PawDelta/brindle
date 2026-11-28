@@ -1284,6 +1284,7 @@ CREATE TABLE IF NOT EXISTS plan_revisions (
     rev INTEGER NOT NULL,
     author TEXT NOT NULL,          -- supervisor | person | teammate:<sub> (from the Library)
     source TEXT NOT NULL,          -- proposal | edit | suggestion
+    title TEXT,
     lede TEXT NOT NULL,
     sections TEXT NOT NULL,        -- JSON [{id, title, kind, markdown, caption}]
     markdown TEXT NOT NULL,
@@ -2156,6 +2157,8 @@ class DB:
         for col in ("ask", "approval_notice"):
             if col not in plan_cols:
                 self.conn.execute(f"ALTER TABLE plans ADD COLUMN {col} TEXT")
+        if "title" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_revisions)")}:
+            self.conn.execute("ALTER TABLE plan_revisions ADD COLUMN title TEXT")
         share_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_shares)")}
         for col, kind in (("org_id", "TEXT"), ("lapsed_at", "REAL"), ("unconfirmed", "TEXT"),
                           ("approve_wanted", "TEXT"), ("approve_refused", "TEXT"), ("access_refused", "TEXT"),

@@ -42,7 +42,7 @@ import type { ExportClient } from "../../Knowledge/ExportMenu";
 import type { PlanDocClient, PlanShareLinkClient, PlanSharingClient, PlansClient, VisualsClient } from "./client";
 import { BackButton, KeepButton, fileAttachment, fileName, message, useEscBack } from "./chrome";
 import { ReaderBar } from "./DocBar";
-import { ReviewRail, useRailWidth } from "./ReviewRail";
+import { ReviewRail, ReviewRevisions, useRailWidth } from "./ReviewRail";
 import { Diagram } from "./DocDiagram";
 import { FormatBar, FormatProvider, textareaTarget, useFormatTarget } from "./DocFormat";
 import { DocumentHistory, DocHistoryComparison, type HistoryEvent, type WorkItem } from "./DocHistory";
@@ -333,12 +333,12 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
     </span>
   );
   const actions = (
-    <>
+    <div className="flex max-w-full shrink-0 items-center gap-2">
       <KeepButton client={client} visual={visual} onKept={onChanged} />
       {exportClient && shown && (
         <ExportButton key={`${shown.id}:${shown.rev}`} client={exportClient} repo={repo} open={exporting} onOpenChange={setExporting} source={{ kind: "plan", id: shown.id, rev: shown.rev, markdown: shown.markdown }} />
       )}
-    </>
+    </div>
   );
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="plan-reader">
@@ -452,9 +452,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   workItem: WorkItem | null;
 }) {
   const client = author?.client;
-  // The design's own item sits in the status line with its state as last read.
-  const epic = work?.state?.epic;
-  const workItem: WorkItem | null = epic ? { key: epic.display, title: epic.display, state: epic.state ?? "linked", done: epic.done, active: !!epic.state && !epic.done, url: epic.url ?? undefined } : receivedWorkItem;
+  const workItem = work?.state?.epic ?? (receivedWorkItem && { ...receivedWorkItem, display: receivedWorkItem.key });
   const docLive =liveClient ?? (receivedPlan.gate && client?.visualLive ? (client as LiveClient) : null);
   const [liveState, setLiveState] = useState<LiveDocState | null>(null);
   const [liveCapability, setLiveCapability] = useState<LiveCapability>("unknown");
@@ -1097,13 +1095,21 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const reviewerNames = signers.filter((r) => r.required).map((r) => (r.sub ? firstName(r.sub) : r.name ?? "")).filter(Boolean);
 
   // The status line.
+  const reviewed = !!gate || !!teammate;
+  const held = gate?.approval_held?.rev === plan.rev;
+  const reviewing = !!teammate?.rights.signOff && !teammate.signedOff;
   const closed = plan.state === "cancelled" || plan.state === "closed";
+  const inReview = open && !held && !policyHeld && (!useLiveReview || !!frozen) && gate?.state === "waiting";
   const stage = plan.state === "closed" ? "Closed" : plan.state === "writing" ? "Being written" : plan.state === "superseded" ? "Superseded" : closed ? "Cancelled"
     : !open && !teammate ?(plan.state === "approved" ? (gate ? "Review closed" : "Signed off") : "Changes requested")
+    : inReview ? (reviewing ? "Needs your sign-off" : "In review")
     : frozen ? "Locked for sign-off"
     : gate ? (gate.state === "ready" ? "Ready to build" : gate.state === "changes_requested" ? "Changes requested" : policyHeld ? "Blocked by org policy" : "In team review") : "Needs your sign-off";
   const accessLine = plan.can_edit ? "You can edit" : canComment ? "You can comment" : "You can view";
-  const statusLine = teammate ? accessLine : plan.state === "writing" ? "The supervisor is writing this plan"
+  const fullAuthorName = teammate?.author ? personName(nameOf(teammate.author)) : "The author";
+  const buildIntent = teammate ? `${fullAuthorName} wants to build this` : "You and your supervisor want to build this";
+  const statusLine = inReview && (!teammate || reviewing) ? buildIntent
+    : teammate ? accessLine : plan.state === "writing" ? "The supervisor is writing this plan"
     : plan.state === "closed" ? "Closed: its session ended"
     : plan.state === "superseded" ? "You asked for a newer plan; this one is closed"
     : plan.state === "cancelled" ? "Closed without approval; the tasks it held wait for the supervisor"
@@ -1112,7 +1118,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     : !open ? (plan.state === "approved" ? "Its workers are building it" : "The supervisor is revising it")
     : gate ? "Build starts when every required reviewer signs off" : "Nothing is built until you sign off";
   const changedAt = Math.max(plan.created_at, ...(plan.revisions ?? []).map((r) => r.at));
-  const byline = `by ${teammate ? (teammate.author ? personName(nameOf(teammate.author)) : "its author") : "you and your supervisor"} · changed ${ago(changedAt)}`;
+  const byline = `${versionLabel} · changed ${ago(changedAt)}`;
 
   // The sign-off sheet, under the decisions: once a version is frozen (or for a doc reviewed without live text).
   const sheetRows: SignOffRow[] = signers.map((r) => ({
@@ -1134,23 +1140,24 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   if (teammate?.me && teammate.signOff === "optional" && sheetRev === plan.rev && !listed.has(teammate.me)) {
     sheetRows.push({ key: teammate.me, who: "person", name: "You", required: false, state: teammate.signedOff ? "signed" : "waiting" });
   }
-  const sheet = <SignOffSheet version={frozen ? `version ${frozen.id}` : `rev ${plan.rev}`} rows={sheetRows} />;
+  const sheet = <SignOffSheet version={frozen ? `version ${frozen.id}` : `rev ${plan.rev}`} rows={sheetRows} count={gate} />;
   const alongside = <Alongside rows={plan.alongside ?? []} onStop={chrome?.onStopAlongside} />;
-  const held = gate?.approval_held?.rev === plan.rev;
   const gateHolds = !!gate && gate.state !== "ready" && !gate.can_hold_approval;
   const withdraw = held && !teammate && client?.withdrawPlanApproval && <button type="button" className="cursor-pointer text-xs font-normal text-ink-2 underline disabled:opacity-50" disabled={busy || !!historical}
     onClick={() => void send(() => client.withdrawPlanApproval!(plan.id, plan.rev))}>Withdraw</button>;
   const waitingRows = sheetRows.filter(r => r.required && r.state === "waiting");
-  const waitingNames = waitingRows.map(r => r.name).join(" and ");
-  const signersLeft = held && gate?.approval_held?.waiting_on.length ? gate.approval_held.waiting_on.map(firstName) : waitingRows.map(r => r.name);
+  const waitingNames = waitingRows.map(r => firstName(r.key));
+  const signersLeft = held && gate?.approval_held?.waiting_on.length ? gate.approval_held.waiting_on.map(firstName) : waitingNames;
   const signature = `${signersLeft.join(" and ") || "the last required reviewer"} ${signersLeft.length > 1 ? "sign" : "signs"} off`;
   const buildSentence = held ? `Your plan builds when ${signature}.`
-    : gate?.state === "waiting" && waitingNames ? `The build starts once you approve and ${signature}.`
+    : gate?.state === "waiting" && waitingNames.length ? `The build starts once you approve and ${signature}.`
     : gate && gate.state !== "ready" ? gateWhy || summary : "Approve starts the build.";
-  const railProps = { sheet, plan, rows: sheetRows, settled, chosen, held, jump, alongside, workItem, folded: railWidth.folded };
+  const signOffsCurrent = held || reviewing || (gateHolds && gate?.state === "waiting");
+  const railProps = { sheet, plan, rows: sheetRows, settled, chosen, held, signOffsCurrent, jump, alongside, workItem, folded: railWidth.folded };
   const compactReview = railWidth.folded && <div className="my-3 grid gap-1 border-y border-line py-2 font-sans text-xs" data-testid="review-summary">
-    <span>Sign-offs · {gate?.signed ?? 0} of {gate?.required ?? 0} required{waitingNames && ` · waiting on ${waitingNames}`}</span>
+    <span>Sign-offs · {gate?.signed ?? 0} of {gate?.required ?? 0} required{waitingNames.length > 0 && ` · waiting on ${waitingNames.join(" and ")}`}</span>
     <span>Decisions · {decided} of {plan.decisions.length} decided</span>
+    <ReviewRevisions plan={plan} compact />
     {alongside}
   </div>;
   const railDraft = draft?.kind === "comment" && draft.rail;
@@ -1320,7 +1327,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       const here = editing?.section === s.id;
       return (here || mode === "editing") && <span className={`${aside} ml-3`}>{here ? (live ? "You are writing here · live" : "You are editing") : s.kind !== "mermaid" && s.kind !== "svg" && editControl(s.id, s.title)}</span>;
     };
-    const lineFor = plan.state === "open" ? "Nothing is built until you approve" : plan.state === "approved" ? "brindle is building it" : statusLine;
+    const lineFor = plan.state === "open" ? buildIntent : plan.state === "approved" ? "brindle is building it" : statusLine;
     const stageTone = plan.state === "open" ? "text-sap" : plan.state === "approved" ? "text-pass" : "text-ink-3";
     // The bottom bar while decisions are open: how many, and the next one.
     const nextUp = left.length > 0 && (
@@ -1332,20 +1339,18 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         </span>
       </>
     );
-    // In team review the status line says what sign-off waits for.
-    const reviewed = !!gate || !!teammate;
     const status = reviewed ? (
       <div className="mt-3.5 grid gap-1.5">
         <DocStatus stage={stage} presentation={closed ? "closed" : undefined} tone={frozen ? "branch" : plan.state === "approved" || gate?.state === "ready" ? "pass" : "sap"} line={statusLine}
-          byline={byline} workItem={workItem} state={plan.state} held={policyHeld ? "policy" : undefined} />
+          byline={byline} reference={plan.reference} state={plan.state} held={policyHeld ? "policy" : undefined} />
         {gateNotes}
       </div>
     ) : (
       <div className="mt-3.5 flex flex-wrap items-center gap-x-4 gap-y-1.5 font-sans text-[12.5px] leading-[1.4] text-ink-2" data-testid="plan-status" data-state={plan.state} data-presentation={closed ? "closed" : undefined}>
         <span className={`${pill} text-xs ${stageTone}`}>{stage}</span>
         <span>{lineFor}</span>
-        {plan.reference && <span className="text-ink-3" data-testid="doc-reference">{plan.reference}</span>}
         <span className="text-ink-3">{byline}</span>
+        <DocReference reference={plan.reference} />
       </div>
     );
     const teammateBar = teammate && (
@@ -1552,11 +1557,11 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           {historical ? <DocHistoryComparison key={historical.comparison.revision.rev} comparison={historical.comparison} onClose={historical.close} /> : <article className="flex flex-col gap-5 pb-10 pl-14 pr-12 pt-7 font-serif text-[15px] leading-[1.65] text-ink-2">
             <div className="grid gap-3 font-sans">
               <h1 className="m-0 min-w-0 [overflow-wrap:anywhere] font-serif text-[28px] font-semibold leading-[1.2] tracking-[-0.01em] text-ink">
-                {plan.title} <DocReference reference={plan.reference} className="ml-1 font-sans" />
+                {plan.title} {!reviewed && <DocReference reference={plan.reference} className="ml-1 font-sans" />}
               </h1>
               {compactReview}
               <DocStatus stage={stage} presentation={closed ? "closed" : undefined} tone={frozen ? "branch" : plan.state === "approved" || gate?.state === "ready" ? "pass" : "sap"} line={statusLine}
-                byline={byline} workItem={workItem}
+                byline={byline} reference={reviewed ? plan.reference : undefined}
                 brief={!!plan.ask} briefOpen={briefOpen} onBrief={() => setBriefOpen((o) => !o)}
                 state={plan.state} held={policyHeld ? "policy" : undefined} />
               {plan.team_ended && <p className="m-0 text-[12.5px] text-ink-2" data-testid="plan-team-ended">Your Team plan ended, so this is now a personal plan.</p>}

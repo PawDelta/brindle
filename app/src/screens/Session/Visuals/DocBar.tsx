@@ -64,9 +64,11 @@ export function ReaderBar({ lead, version, badges, presence, markdown, queue, mo
 }) {
   return (
     <header className="flex min-h-[45px] flex-wrap items-center gap-x-2 gap-y-1 border-b border-line px-s2 py-2">
-      {lead}
-      {version}
-      {badges}
+      <div className="flex min-w-[min(230px,100%)] flex-1 items-center gap-2">
+        {lead}
+        {version}
+        {badges}
+      </div>
       {(presence || markdown || queue || modes || share || actions) && (
         <div data-testid="plan-toolbar-trailing" className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-x-2 gap-y-1">
           {presence}
