@@ -15,7 +15,8 @@ function resetOptionAppearance(button: HTMLButtonElement) {
       style.removeProperty(property);
     }
   }
-  style.setProperty("background-color", "transparent", "important");
+  // Pair CanvasText with an opaque Canvas even when the page uses a custom background.
+  style.setProperty("background-color", "Canvas", "important");
   style.setProperty("background-image", "none", "important");
   style.setProperty("background-clip", "border-box", "important");
   style.setProperty("border", "2px solid GrayText", "important");
@@ -120,6 +121,7 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
     const theme = getComputedStyle(document.documentElement);
     const accent = theme.getPropertyValue("--branch").trim() || "Highlight";
     const fill = theme.getPropertyValue("--branch-soft").trim() || "color-mix(in srgb, Highlight 12%, transparent)";
+    const selectedBackground = `linear-gradient(${fill}, ${fill})`;
     const neutral = theme.getPropertyValue("--ink-3").trim() || "GrayText";
     doc.documentElement.style.setProperty("--brindle-choice-required", theme.getPropertyValue("--sap"));
     const { visual: row, picks: selected } = current.current;
@@ -147,7 +149,8 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
         item.setAttribute("aria-checked", String(checked));
         item.toggleAttribute("data-selected", checked);
         item.style.setProperty("border-color", checked ? accent : neutral, "important");
-        item.style.setProperty("background-color", checked ? fill : "transparent", "important");
+        item.style.setProperty("background-image", checked ? selectedBackground : "none", "important");
+        item.style.setProperty("color", item.disabled ? "GrayText" : "CanvasText", "important");
         const mark = item.querySelector<HTMLElement>(":scope > [data-choice-mark]");
         if (mark) {
           mark.dataset.choiceMark = checked ? "selected" : "empty";

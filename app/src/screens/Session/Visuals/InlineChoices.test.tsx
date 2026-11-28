@@ -10,6 +10,7 @@ const visual: VisualDTO = {
   title: "Two choices", answer: null, kept: false, unread: false, created_at: 0,
   inline_html: `
     <style>
+      body { background: #18181a; }
       #recommendation {
         border: 2px solid purple !important;
         background: lavender linear-gradient(lavender, purple) !important;
@@ -77,9 +78,11 @@ it("marks only the user's pick when the page highlights a different option", () 
 
   expect(Array.from(doc.querySelectorAll("button[data-selected]"))).toEqual([picked]);
   expect(chrome(recommended)).toEqual(chrome(neutral));
+  expect(chrome(neutral).background).not.toBe("rgba(0, 0, 0, 0)");
   expect(chrome(picked)).toEqual(selectedChrome);
   expect(selectedChrome.border).not.toEqual(chrome(neutral).border);
-  expect(selectedChrome.background).not.toBe(chrome(neutral).background);
+  expect(selectedChrome.background).toBe(chrome(neutral).background);
+  expect(selectedChrome.backgroundImage).not.toBe(chrome(neutral).backgroundImage);
   const note = recommended.querySelector("small")!;
   expect(doc.defaultView!.getComputedStyle(note).color).not.toBe(chrome(recommended).color);
   const filled = picked.querySelector('[data-choice-mark="selected"]')!;
