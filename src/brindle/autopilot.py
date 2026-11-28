@@ -499,8 +499,14 @@ def reload_goals_file(db: DB, root_id: str) -> None:
         if path is None or not path.is_file() or not db.get_autopilot(root_id):
             return
         plan = parse_goals(path.read_bytes().decode("utf-8"))
-        if plan is not None and plan != _db_plan(db, root_id):
-            set_goal(db, root_id, plan.goal, plan.milestones, plan.detail)
+        if plan is None:
+            return
+        current = _db_plan(db, root_id)
+        if plan != current:
+            # The edited file supplies the entire list, so omissions are removals.
+            titles = {m[0] for m in plan.milestones}
+            drop = [m[0] for m in current.milestones if m[0] not in titles] if current else []
+            set_goal(db, root_id, plan.goal, plan.milestones, plan.detail, drop=drop)
     except Exception:  # noqa: BLE001
         log.exception("brindle: couldn't reload the session's goal file")
 
