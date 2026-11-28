@@ -43,6 +43,30 @@ def with_goal(db, checks=("test -f api.txt", "test -f ui.txt")):
                        [(f"Milestone {i}", c, None) for i, c in enumerate(checks, start=1)])
 
 
+@pytest.mark.variant("only test asserting omitted milestones survive and drop removes them; "
+                     "handover and goals-file tests run these lines without checking them")
+def test_set_goal_keeps_omitted_milestones(db, root):
+    kept = ("API", "api-check", "Implement the API", "developer", None, "Backend")
+    unchanged = ("UI", "ui-check", None)
+    autopilot.set_goal(db, "boss", "Settings page", [kept, unchanged, ("Docs", "docs-check", None)])
+    for milestone in db.milestones("boss"):
+        db.record_check(milestone.id, True, "passed", "head")
+
+    autopilot.set_goal(db, "boss", "Updated settings page", [("Docs", "new-docs-check", None)])
+
+    docs, api, ui = db.milestones("boss")
+    assert [(m.title, m.status) for m in (docs, api, ui)] == [
+        ("Docs", "pending"), ("API", "passed"), ("UI", "passed"),
+    ]
+    assert (api.title, api.check_cmd, api.detail, api.profile, api.repo, api.phase_name) == kept
+    assert (api.output, api.passed_sha) == ("passed", "head")
+
+    dropped = autopilot.set_goal(db, "boss", "Updated settings page", [("Docs", "new-docs-check", None)],
+                                 drop=["Missing", "UI", "UI"])
+    assert dropped == ["UI"]
+    assert [m.title for m in db.milestones("boss")] == ["Docs", "API"]
+
+
 def test_legacy_off_session_still_drives_and_cannot_be_disabled(db, root, monkeypatch):
     agent, _ = root
     with_goal(db)
@@ -416,7 +440,9 @@ def test_phase_landing_once_per_completed_phase(db, phase_landing_session, monke
 
         monkeypatch.setattr(autopilot, "_commit", sweep_during_replacement)
         monkeypatch.setattr(other, "set_milestones", observe_replacement)
-        autopilot.set_goal(other, "boss", "replacement", [("d", "d", None, None, None, "API")])
+        dropped = autopilot.set_goal(other, "boss", "replacement", [("d", "d", None, None, None, "API")],
+                                     replace=True)
+        assert dropped == ["a", "b", "c"]
         assert db.pending_count("boss") == 4
         assert db.milestones("boss")[0].status == "pending"
         passing.add("d")
@@ -650,7 +676,7 @@ def test_passing_milestones_wait_for_the_completion_audit(db, root, repo, monkey
 
     entry = view.autopilot_entry(db, ws.repo_root, root_id="boss")
     assert entry["goal"] == "Settings page" and entry["state"] == "done"
-    autopilot.set_goal(db, "boss", "Next goal", [("Next step", "true", None)])
+    autopilot.set_goal(db, "boss", "Next goal", [("Next step", "true", None)], replace=True)
     assert db.get_autopilot("boss").state == "running"
     assert autopilot.parse_goals(goals.read_text()).goal == "Next goal"
 

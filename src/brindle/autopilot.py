@@ -89,9 +89,10 @@ to be asked each step.
   cover its acceptance criteria. Tell the user the plan in a few lines, then
   start. If the session started with a goal, call `get_progress`.
 - A later request in this session becomes new milestones on this session's
-  goal: call `set_goal` with the existing milestones (unchanged, so they keep
-  their results) plus the new ones. The goal is this session's alone; brindle
-  keeps it in `.brindle/goals/<session id>.md`.
+  goal. Call `set_goal` with the new or updated milestones. Omitted milestones
+  keep their results and follow the supplied ones. To pause or remove a
+  milestone, omit it and name its exact title in `drop`. The goal lives in
+  `.brindle/goals/<session id>.md`.
 - Within a goal, the delegation rule decides which of a milestone's tasks you
   do yourself and which you `assign`. Pass `milestone` (the exact milestone
   title) on every `assign` or `handoff` so each worker is linked to its work.
@@ -498,8 +499,14 @@ def reload_goals_file(db: DB, root_id: str) -> None:
         if path is None or not path.is_file() or not db.get_autopilot(root_id):
             return
         plan = parse_goals(path.read_bytes().decode("utf-8"))
-        if plan is not None and plan != _db_plan(db, root_id):
-            set_goal(db, root_id, plan.goal, plan.milestones, plan.detail)
+        if plan is None:
+            return
+        current = _db_plan(db, root_id)
+        if plan != current:
+            # The edited file supplies the entire list, so omissions are removals.
+            titles = {m[0] for m in plan.milestones}
+            drop = [m[0] for m in current.milestones if m[0] not in titles] if current else []
+            set_goal(db, root_id, plan.goal, plan.milestones, plan.detail, drop=drop)
     except Exception:  # noqa: BLE001
         log.exception("brindle: couldn't reload the session's goal file")
 
@@ -799,20 +806,20 @@ def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]
 
 def set_goal(db: DB, root_id: str, goal: str,
              milestones: list[tuple], detail: str | None = None, *,
-             summary: str | None = None, replace: bool = False) -> None:
+             summary: str | None = None, replace: bool = False,
+             drop: list[str] | None = None) -> list[str]:
     """Record the goal and its milestones, ``(title, check, detail[, profile[, repo[, phase]]])``.
+    Append omitted milestones in their old order unless named in ``drop`` or
+    replacing the goal. Return the titles removed from the goal in their old order.
     A milestone that keeps its title and check keeps its last result. A big
     goal may open brindle's offer to plan it first (``consider_plan_offer``).
     Rewording or growing the goal keeps the session's offer, answered or not;
     only ``replace=True`` (an explicit, unrelated new goal) gives it a fresh one."""
     if not goal.strip():
         raise AutopilotError("the goal needs a title")
-    if not milestones:
-        raise AutopilotError("give at least one milestone")
     # Before the goal changes: a shared goals.md still saying the old goal
     # would otherwise look unowned and seed the next session with it.
     _adopt_legacy(db, root_id)
-    old = {(m.title, m.check_cmd): m for m in db.milestones(root_id)}
     ap = db.get_autopilot(root_id)
     fields: dict[str, object] = {}
     if summary is None and ap is not None and ap.goal == goal.strip():
@@ -834,6 +841,19 @@ def set_goal(db: DB, root_id: str, goal: str,
     # Sweeps must see the old goal and its landing claims, or the complete
     # replacement. Preserved check results belong to the same transaction.
     with db.tx() as c:
+        previous = db.milestones(root_id)
+        old = {(m.title, m.check_cmd): m for m in previous}
+        sent = {m[0] for m in milestones}
+        omitted = [m for m in previous if m.title not in sent]
+        drop_titles = set(drop or ())
+        dropped = list(dict.fromkeys(m.title for m in omitted if replace or m.title in drop_titles))
+        if not replace:
+            milestones = milestones + [
+                (m.title, m.check_cmd, m.detail, m.profile, m.repo, m.phase_name)
+                for m in omitted if m.title not in drop_titles
+            ]
+        if not milestones:
+            raise AutopilotError("give at least one milestone")
         if ap is None or ap.goal != goal.strip():
             c.execute("DELETE FROM phase_landings WHERE root_id=?", (root_id,))
             c.execute("DELETE FROM phase_prs WHERE root_id=?", (root_id,))
@@ -861,6 +881,7 @@ def set_goal(db: DB, root_id: str, goal: str,
 
         if plans.holding(db, root_id) is None:   # the old goal's offer held tasks; the new goal's doesn't
             tasks.on_resumed(db, root_id, why="the new goal")
+    return dropped
 
 
 def _repo_identities(db: DB, root_id: str, milestones: list[Milestone]) -> set[str]:

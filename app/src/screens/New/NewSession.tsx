@@ -41,6 +41,7 @@ export interface NewSessionProps {
   client: DaemonClient;
   /* Open a session's view: its root agent id, the repo it belongs to. */
   onOpen(root: string, repo: string): void;
+  onStarted?(root: string, repo: string): void;
   /* The repo to start in (one just picked); else the first. */
   initialRepo?: string;
   /* The native folder picker, for adding a project (none in a browser tab). */
@@ -74,7 +75,7 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 type StartFields = Omit<StartSession, "repo" | "choice" | "session_id">;
 
-export function NewSession({ client, onOpen, initialRepo, pickFolder, refresh, onSignIn = () => undefined, add }: NewSessionProps) {
+export function NewSession({ client, onOpen, onStarted = onOpen, initialRepo, pickFolder, refresh, onSignIn = () => undefined, add }: NewSessionProps) {
   const { repos: allRepos, sessions, error: loadError, reload } = useSessions();
   /* The practice repo is for the demo flow only: never a project to start in. */
   const repos = useMemo(() => allRepos && allRepos.filter((r) => !r.demo), [allRepos]);
@@ -111,15 +112,15 @@ export function NewSession({ client, onOpen, initialRepo, pickFolder, refresh, o
           <p className="mx-auto w-full max-w-[672px] pt-s8 text-sm text-ink-3">Loading…</p>
         ) : repos.length === 0 ? (
           <div data-walkthrough="project-picker">
-            <FirstRun client={client} pickFolder={pickFolder} refresh={refresh} onStarted={onOpen} onPicked={added} start={intent} />
+            <FirstRun client={client} pickFolder={pickFolder} refresh={refresh} onStarted={onStarted} onPicked={added} start={intent} />
           </div>
         ) : (
           <div className="mx-auto flex min-h-full w-full max-w-[672px] flex-col pb-7 pt-s8">
             <h1 className={title}>Start a session</h1>
             <p className={`${lede} mt-1.5`}>Say what you want done. The supervisor plans it and hands out the work.</p>
-            <Composer client={client} repos={repos} sessions={sessions} reload={reload} refresh={refresh} onOpen={onOpen} chosen={chosen} onChoose={setChosen} pickFolder={pickFolder} onAdded={added} onSignIn={onSignIn} add={intent} />
+            <Composer client={client} repos={repos} sessions={sessions} reload={reload} refresh={refresh} onOpen={onOpen} onStarted={onStarted} chosen={chosen} onChoose={setChosen} pickFolder={pickFolder} onAdded={added} onSignIn={onSignIn} add={intent} />
             <div className="mt-auto pt-s4">
-              <PracticeRow client={client} refresh={refresh} onStarted={onOpen} />
+              <PracticeRow client={client} refresh={refresh} onStarted={onStarted} />
             </div>
           </div>
         )}
@@ -139,7 +140,7 @@ function counts(sessions: SessionDTO[] | undefined) {
    project chip, the CLI chip, Options, Start), name and branch behind
    Options inside it. A start that conflicts, or that the engine's
    preflight refuses, asks here what to do. */
-function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, onChoose, pickFolder, onAdded, onSignIn, add }: {
+function Composer({ client, repos, sessions, reload, refresh, onOpen, onStarted, chosen, onChoose, pickFolder, onAdded, onSignIn, add }: {
   client: DaemonClient;
   /* To Settings › Providers, where a CLI is signed in. */
   onSignIn(): void;
@@ -148,6 +149,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
   reload(): Promise<unknown>;
   refresh?: () => Promise<void>;
   onOpen(root: string, repo: string): void;
+  onStarted(root: string, repo: string): void;
   chosen?: string;
   onChoose(repo: string): void;
   pickFolder?: PickFolder;
@@ -244,6 +246,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
     setError(null);
     setNotes([]);
     let opened: string | null = null;
+    let created = false;
     try {
       const got = await post(fields, how);
       if (currentRepo.current !== repo || attempt !== attempts.current) return false;
@@ -253,6 +256,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
       else {
         setNotes(got.notes);
         opened = got.id;
+        created = true;
       }
     } catch (e) {
       if (currentRepo.current !== repo || attempt !== attempts.current) return false;
@@ -271,9 +275,8 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
       if (attempt === attempts.current) setStarting(false);
     }
     // Opened as soon as the engine returns the id; the session view shows its own starting state.
-    if (opened) onOpen(opened, repo);
-    // Started, the list and the snapshot too, behind the navigation: one read on the new chat's
-    // status event can predate its window ("exited", no window), and nothing on the bus says when it lands.
+    if (opened) (created ? onStarted : onOpen)(opened, repo);
+    // Read the list and snapshot behind the navigation. The pane may still be launching.
     void Promise.all([reload().catch((e: unknown) => attempt === attempts.current && setError(message(e))), opened ? refresh?.() : undefined]);
     return opened !== null;
   };

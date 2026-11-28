@@ -39,7 +39,6 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from functools import lru_cache
-from pathlib import PurePath
 
 from brindle import agents, bus, conflicts, git, savings, spawn
 from brindle.db import DB, Agent, Task, Workspace
@@ -240,19 +239,27 @@ def _normpath(p: str) -> str:
     return os.path.normpath(p) if p else p
 
 
-def _glob_match(a: str, b: str) -> bool:
-    """Whether globs/paths ``a`` and ``b`` could refer to the same file(s)."""
-    a, b = _normpath(a), _normpath(b)
-    if a == b:
-        return True
-    if fnmatch.fnmatch(b, a) or fnmatch.fnmatch(a, b):
-        return True
-    if "**" in a or "**" in b:
-        try:
-            return PurePath(b).match(a) or PurePath(a).match(b)
-        except ValueError:
+def _match_path(pattern: str, path: str) -> bool:
+    """Match a whole path, with ``**`` consuming zero or more segments."""
+    parts = path.split(os.sep)
+    positions: set[int] | range = {0}
+    for segment in pattern.split(os.sep):
+        if segment == "**":
+            positions = range(min(positions), len(parts) + 1)
+        else:
+            positions = {
+                i + 1 for i in positions
+                if i < len(parts) and fnmatch.fnmatch(parts[i], segment)
+            }
+        if not positions:
             return False
-    return False
+    return len(parts) in positions
+
+
+def _glob_match(a: str, b: str) -> bool:
+    """Whether either declaration matches the other as a path."""
+    a, b = _normpath(a), _normpath(b)
+    return a == b or _match_path(a, b) or _match_path(b, a)
 
 
 def _changed_files(ws: Workspace) -> list[str]:

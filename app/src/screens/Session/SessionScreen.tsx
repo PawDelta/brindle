@@ -51,6 +51,7 @@ export interface SessionScreenProps {
   /* The session's root agent (its supervisor), and the repo it belongs to. */
   root: string;
   repo: string;
+  launched?: boolean;
   /* Fetch the snapshot and inbox again (Sync.refresh). */
   refresh: () => Promise<void>;
   store: AppStore;
@@ -92,7 +93,7 @@ export function findNode(node: AgentNode | null, id: string): AgentNode | null {
   return null;
 }
 
-export function SessionScreen({ client, root, repo, refresh, store, agent, sheet, onSelect, openUrl, onOpen, onCloseSession, onHome, onStartOwn }: SessionScreenProps) {
+export function SessionScreen({ client, root, repo, launched, refresh, store, agent, sheet, onSelect, openUrl, onOpen, onCloseSession, onHome, onStartOwn }: SessionScreenProps) {
   const appTheme = useAppTheme();
   const workspaces = useAppState((s) => s.workspaces);
   const inbox = useAppState((s) => s.inbox);
@@ -137,23 +138,28 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   // root in the snapshot, is then a row from before, never the engine's word. Only a row read after its
   // return says paused (the person's pause); while unsure, the live terminal or Restarting… stays.
   const panes = useContext(PanesReadyContext);
-  // Likewise the liveness sweep's "not alive" for a session recovery brought back: it may be a look taken
-  // before its return, arriving after it. It stands once the engine, asked after it came (GET agent looks
-  // at the pane itself), says the pane is down too; till then the pane stays as it is.
+  // A liveness sweep can predate a pane's launch or recovery. Confirm a negative
+  // reading against the pane before it replaces the terminal with an ended card.
   const nodeId = node?.agent.id ?? null;
+  const nodeWindow = node?.agent.window;
+  const nodeStatus = node?.agent.status;
   const said = nodeId ? alive[nodeId] : undefined;
   const saidAt = useAppState((s) => (nodeId ? s.aliveAt[nodeId] : undefined));
-  const recovered = !!nodeId && !!panes.recovered?.includes(nodeId);
-  const [downCheck, setDownCheck] = useState<{ id: string; at: number | undefined; down: boolean } | null>(null);
+  const checkLiveness = !!nodeId && (!!panes.recovered?.includes(nodeId) || (launched && nodeId === root));
+  const [downCheck, setDownCheck] = useState<{
+    id: string; window: typeof nodeWindow; status: typeof nodeStatus; at: number | undefined; down: boolean;
+  } | null>(null);
   useEffect(() => {
-    if (!nodeId || !recovered || said !== false) return;
+    if (!nodeId || !checkLiveness || said !== false) return;
     let current = true;
     void client.agent(nodeId).then((found) => {
-      if (current) setDownCheck({ id: nodeId, at: saidAt, down: PANE_DOWN.has(found.status) });
+      if (current) setDownCheck({ id: nodeId, window: nodeWindow, status: nodeStatus, at: saidAt, down: PANE_DOWN.has(found.status) });
     }, () => {});
     return () => { current = false; };
-  }, [client, nodeId, recovered, said, saidAt]);
-  const nodeAlive = said === false && recovered && !(downCheck?.id === nodeId && downCheck.at === saidAt && downCheck.down) ? undefined : said;
+  }, [client, nodeId, nodeWindow, nodeStatus, checkLiveness, said, saidAt]);
+  const confirmedDown = downCheck?.id === nodeId && downCheck.window === nodeWindow &&
+    downCheck.status === nodeStatus && downCheck.at === saidAt && downCheck.down;
+  const nodeAlive = said === false && checkLiveness && !confirmedDown ? undefined : said;
   const pendingHere = panes.pending?.includes(root) === true;
   const returning = !panesReadyFor(panes, root) && (pendingHere || !!panes.returning?.includes(root));
   // Recovery named it and it isn't known back, its pane shown anyway (the gate's startup deadline): the same.
@@ -161,26 +167,36 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
     : panes.returning?.includes(root) && !panes.back?.includes(root) ? "recovery named it, not back yet"
     : panes.stale?.includes(root) ? "row not read since its return"
     : panes.unsure ? "engine not heard since connecting" : null;
-  const looksStopped = session ? session.status === "paused" || (tree === null && synced) : tree === null && synced;
-  const restarting = returning || (!!unread && looksStopped);
+  // A launch can answer before a snapshot sees its window. Once registered, the
+  // window settles the launch even if the pane has already exited.
+  const rootAgent = tree?.agent;
+  const launchResolved = !!((session && isPaused(session)) || (rootAgent &&
+    (rootAgent.window || rootAgent.locked || (rootAgent.status !== "exited" && PANE_DOWN.has(rootAgent.status)))));
+  const [settledLaunch, setSettledLaunch] = useState<string | null>(null);
+  useEffect(() => {
+    if (launched && launchResolved) setSettledLaunch(root);
+  }, [launched, launchResolved, root]);
+  const starting = !!launched && settledLaunch !== root && !launchResolved && !returning;
+  const looksStopped = session?.status === "paused" || (tree === null && synced);
+  const restarting = returning || (!starting && !!unread && looksStopped);
   // A feed read begun before the pane's release can still arrive saying resuming. The gate's
   // barrier keeps that row stale until a read begun after release answers; use the restored root
   // meanwhile, so another session's recovery update cannot cover this one's live pane again.
   const staleResume = session?.status === "resuming" && panes.back?.includes(root) && panes.stale?.includes(root);
-  const sessionStatus = restarting ? "resuming" : staleResume ? tree?.agent.status ?? null : session?.status ?? null;
-  const paused = !restarting && (session ? isPaused(session) : tree === null && synced);
+  const sessionStatus = starting ? "starting" : restarting ? "resuming" : staleResume ? tree?.agent.status ?? null : session?.status ?? null;
+  const paused = !starting && !restarting && (session ? isPaused(session) : tree === null && synced);
   // A session seen live here that pauses under the view (a fresh start in its checkout, a pause from
   // elsewhere) stays on screen and says so, with Reopen; one opened already paused doesn't.
-  const live = session ? !isPaused(session) : tree !== null;
+  const live = !starting && (session ? !isPaused(session) : tree !== null);
   const [seenLive, setSeenLive] = useState<string | null>(null);
   useEffect(() => {
     if (live) setSeenLive(root);
   }, [live, root]);
   const pausedUnder = paused && seenLive === root;
-  // Each switch between live, restarting and paused, with why, to the debug log while it's on: the next
+  // Each switch of the session's view, with why, to the debug log while it's on: the next
   // restart's log then shows what the view went by.
-  const view = restarting ? "restarting" : paused ? "paused" : "live";
-  const why = restarting
+  const view = starting ? "starting" : restarting ? "restarting" : paused ? "paused" : "live";
+  const why = starting ? "new launch awaiting its pane" : restarting
     ? returning ? "recovery named it and its pane can't show yet" : `rows can't say paused: ${unread}`
     : paused ? (session ? `feed row says ${session.status}` : "no feed row and no root in the snapshot") : session ? `feed row says ${session.status}` : tree ? "root in the snapshot" : "nothing read yet";
   const logged = useRef<{ root: string; view: string } | null>(null);
@@ -286,7 +302,8 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   // here, on an engine that says it takes the box's messages. Files dropped anywhere on the session wait
   // in the box as chips: the box of the agent they were dropped on, and no other's.
   const chatSupported = useChatSupport(client);
-  const shown = node?.agent ?? null;
+  const shownNode = starting ? null : node;
+  const shown = shownNode?.agent ?? null;
   const chatAgent = chatSupported && shown && shown.provider === "claude" && !shown.locked && !paused && sessionStatus !== "resuming" && CHAT_STATES.has(shown.status) && nodeAlive !== false ? shown : null;
   const [dropped, setDropped] = useState<{ agent: string; files: File[] }>();
   const [dropping, setDropping] = useState(false);
@@ -326,7 +343,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
         client={client}
         root={root}
         repo={repo}
-        node={node}
+        node={shownNode}
         alive={nodeAlive}
         sessionStatus={sessionStatus}
         restarting={restarting}
@@ -336,7 +353,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
         recovery={recovery}
         onAgent={(id) => select(id, null)}
         onOpen={onOpen}
-        closeSession={closeSession}
+        closeSession={starting ? undefined : closeSession}
         onChat={showChanges ? closeSheet : undefined}
         practice={practice && (
           <PracticeActions
@@ -349,7 +366,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
             }}
           />
         )}
-        hidePause={practice?.done}
+        hidePause={starting || practice?.done}
       />
       {practice && !showChanges && <PracticeSteps step={practice.step} done={practice.done} />}
       {pausedUnder && (
@@ -370,9 +387,9 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
       )}
       </div>
       <div className={showChanges || showVisual ? "hidden" : "flex min-h-0 flex-1 p-s2"} data-testid="chat-area">
-        {!tree && !paused && !synced ? (
+        {!starting && !tree && !paused && !synced ? (
           <p className="flex-1 text-ink-3">Loading…</p>
-        ) : !tree && !paused && !session ? (
+        ) : !starting && !tree && !paused && !session ? (
           <p className="flex-1 text-ink-3">No session {root}.</p>
         ) : (
           // Files dragged over a Claude Code session land in its message box; any other session's drags stay the terminal's.
@@ -383,9 +400,9 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
                 key={`${selected}:${paused}`}
                 repo={repo}
                 root={root}
-                agent={node?.agent ?? null}
+                agent={shown}
                 alive={nodeAlive}
-                sessionStatus={sessionStatus === "resuming" || !node || node.agent.id === root ? sessionStatus : null}
+                sessionStatus={sessionStatus === "resuming" || !shown || shown.id === root ? sessionStatus : null}
                 restarting={restarting}
                 sessionName={session?.name || session?.goal}
                 credentials={credentials}
@@ -485,6 +502,7 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, restarting
   };
   const resuming = sessionStatus === "resuming";
   const status = resuming ? { glyph: "◌", label: restarting ? "Restarting…" : "Resuming", style: "dim" as const, needs: false }
+    : !node && sessionStatus === "starting" ? { glyph: "◌", label: "Starting…", style: "dim" as const, needs: false }
     : node ? cliStatus(node.agent, node.workspace, alive) : { glyph: "‖", label: sessionStatus ?? "paused", style: "dim" as const, needs: false };
   const role = node ? roleOf(node.agent, root) : "Session";
   const model = node?.agent.model_display ?? "";

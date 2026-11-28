@@ -818,6 +818,9 @@ def _launch_deferred(path: str, agent: Agent, ws: Workspace, prompt: str | None,
         try:
             _launch(own, agent, ws, prompt=prompt, resume=None, watch_pane=watch_pane,
                     background_setup=background_setup, model_checked=True)
+            # The status may have been published before the window was registered.
+            # Wake snapshot readers once they can see the pane, even if status is unchanged.
+            bus.publish_agent(own, "agent.pane_registered", agent.id)
             if launched:
                 launched()
         except Exception as e:  # noqa: BLE001 - reported on the session, nobody is waiting to catch it

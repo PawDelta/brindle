@@ -1034,3 +1034,4 @@ def test_only_the_person_decides_and_only_when_they_asked(db, session):
     assert e.value.code == "forbidden"
     assert plans.get(db, pid)["state"] == "open" and messages(db) == []
     assert "behind plan" in asyncio.run(mcp_server.assign("developer", "anything", **work(db))) and started == []
+

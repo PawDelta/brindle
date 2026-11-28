@@ -33,6 +33,8 @@ How to work:
 - Milestones may carry a `profile` (in `set_goal` or a `profile:` line in
   goals.md). `assign`/`handoff` without `agent_profile` use the first
   unverified milestone's profile, else the repo's default agent.
+- For a later request in the same session, use `set_goal` to add or update its
+  milestones. To pause or remove a milestone, omit it and name its title in `drop`.
 - When you don't need a specific profile, pass `weight` on each `assign`/
   `handoff`: "light" (small, well-specified, mechanical; cheapest), "medium" (a normal
   feature or bugfix in one area; standard tier) or "heavy" (design-heavy, cross-cutting,

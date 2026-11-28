@@ -225,7 +225,7 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
         />
       );
     case "new":
-      return <NewSession key={`${route.repo ?? ""}|${route.add ?? ""}|${route.add ? visit : ""}`} client={client} onOpen={openSession} initialRepo={route.repo} add={route.add} pickFolder={pickFolder} refresh={refresh} onSignIn={() => navigate({ screen: "settings", section: "providers", ask: ++providerAsks })} />;
+      return <NewSession key={`${route.repo ?? ""}|${route.add ?? ""}|${route.add ? visit : ""}`} client={client} onOpen={openSession} onStarted={(root, repo) => navigate({ screen: "session", root, repo, launched: true })} initialRepo={route.repo} add={route.add} pickFolder={pickFolder} refresh={refresh} onSignIn={() => navigate({ screen: "settings", section: "providers", ask: ++providerAsks })} />;
     case "inbox":
       return <InboxScreen client={client} refresh={refresh} onOpen={openSession} onNavigate={navigate} session={route.session ?? null} onShowAll={() => navigate({ screen: "inbox" })} onOpenRule={(rule) => navigate({ screen: "settings", section: "permissions", rule, ask: ++providerAsks })} appUpdates={appUpdates} openUrl={openUrl} />;
     case "session":
@@ -235,6 +235,7 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
           client={client}
           root={route.root}
           repo={route.repo}
+          launched={route.launched}
           refresh={refresh}
           store={store}
           agent={route.agent ?? route.root}
