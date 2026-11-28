@@ -10,6 +10,7 @@ import type { PlanGateRowDTO } from "../../../api/schema";
 import type { Writes } from "./PlanReader";
 import { displayName, initials } from "./PlanCards";
 import { PolicyPreview } from "./DocPolicies";
+import { LibraryNetworkLabel, LibraryNetworkNote, SlowConnectionNote, libraryNetwork, useSlowPending, type LibraryNetwork } from "./LibraryNetwork";
 import "./SharePanel.css";
 
 type Scope = { kind: string; id: string };
@@ -66,7 +67,7 @@ type Person = { sub: string; name: string; access: ShareAccessLevel | null; sign
   sent?: ShareQueued["state"] | "unconfirmed"; op?: ShareQueued["op"]; why?: string | null; receipt?: string | null; rev?: number };
 type Work = { key: string; label: string; run(): Promise<Plan> };
 /* A write out now, or one the Library refused, kept so Try again sends the same one. */
-type Busy = Record<string, { state: "saving" | "failed"; refused?: Work; why?: string }>;
+type Busy = Record<string, { state: "saving" | "failed"; refused?: Work; why?: string; net?: LibraryNetwork | null }>;
 
 export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onClose, children, signOff, teams = [], owned = false, previewRules, onStopAll }: {
   plan: Plan; target?: SharePeopleTarget; nameOf(sub: string): string; writes: Writes;
@@ -96,6 +97,9 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const [searchState, setSearchState] = useState<"loading" | "ready" | "error">("ready");
   /* Why the last search failed, as the daemon said: a sign-in held up on this Mac reads differently from a refusal. */
   const [searchWhy, setSearchWhy] = useState("");
+  /* A Library call that failed on the network: a calm note with Try again, not the daemon's text. */
+  const [searchNet, setSearchNet] = useState<LibraryNetwork | null>(null);
+  const [accessNet, setAccessNet] = useState<LibraryNetwork | null>(null);
   const [again, setAgain] = useState(0);
   const [adding, setAdding] = useState<{ sub: string; name: string; email: string; access: ShareAccessLevel; signOff: boolean } | null>(null);
   const [busy, setBusy] = useState<Busy>({});
@@ -152,6 +156,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     setAccessReadyFor(null);
     if (!visible || !target) return;
     setAccessError(null);
+    setAccessNet(null);
     const request = firstShare && target.syncAccess ? target.syncAccess() : target.access();
     request.then((got) => {
       if (accessGeneration.current !== generation) return;
@@ -159,7 +164,9 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
       setAccessReadyFor({ target, reload, shared });
       setAdding((current) => current && got.people.some((p) => p.sub === current.sub) ? null : current);
     }, (e: unknown) => {
-      if (accessGeneration.current === generation) setAccessError(e instanceof Error ? e.message : "Couldn't read who has access.");
+      if (accessGeneration.current !== generation) return;
+      setAccessNet(libraryNetwork(e));
+      setAccessError(e instanceof Error ? e.message : "Couldn't read who has access.");
     });
     // What is still being sent comes from this Mac: it shows while the Library can't be reached.
     target.invites?.().then((got) => {
@@ -201,10 +208,14 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     }, (e: unknown) => {
       if (!live) return;
       setSearchWhy(e instanceof Error ? e.message : "");
+      setSearchNet(libraryNetwork(e));
       setSearchState("error");
     });
     return () => { live = false; };
   }, [visible, target, again]);
+  // Any Library call still out (reading access or the directory, or a write) after a few seconds.
+  const slow = useSlowPending(visible && !!target && ((!accessReady && accessError === null)
+    || searchState === "loading" || Object.values(busy).some((b) => b.state === "saving")));
   const query = typed.trim().toLowerCase();
   const results = members.filter((p) => `${personLabel(p)} ${p.email}`.toLowerCase().includes(query));
 
@@ -257,7 +268,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
         if (work.key === "all") latest.current.onStopAll?.();
       } catch (e) {
         const why = e instanceof Error ? e.message : "";
-        if (mounted.current) setBusy((old) => ({ ...old, [work.key]: { state: "failed", refused: work, why } }));
+        if (mounted.current) setBusy((old) => ({ ...old, [work.key]: { state: "failed", refused: work, why, net: libraryNetwork(e) } }));
       } finally {
         flight.current.delete(work.key);
         out.current--;
@@ -324,7 +335,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     const b = busy[key];
     if (!b) return null;
     return b.state === "saving" ? <span className="st"><i className="spin" />Saving…</span>
-      : <><span className="st bad" title={b.why}>{b.refused?.label ?? label}</span><button className="sp-btn q" data-testid={`share-try-${key}`} onClick={() => b.refused && run(b.refused)}>Try again</button>
+      : <>{b.net ? <LibraryNetworkLabel state={b.net} /> : <span className="st bad" title={b.why}>{b.refused?.label ?? label}</span>}<button className="sp-btn q" data-testid={`share-try-${key}`} onClick={() => b.refused && run(b.refused)}>Try again</button>
         {cancel && <button className="sp-btn q end" onClick={cancel}>Cancel</button>}</>;
   };
   const drop = (sub: string) => {
@@ -436,7 +447,8 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
         : !searching ? (!listed && <p className="hint">Only you can open this plan. Add a person or a team to share it.</p>)
         : <>
           {searchState === "loading" && <div data-testid="share-search-loading"><div className="sweep" /><div className="rows">{[96, 132, 78].map((w) => <div className="r" key={w}><i className="av skv" /><i className="sk" style={{ width: w }} /></div>)}</div></div>}
-          {searchState === "error" && <div className="msg bad" role="alert" data-testid="share-search-error"><span className="grid grow">Couldn't search people.{searchWhy && <span className="note">{searchWhy}</span>}</span><button className="sp-btn q end" onClick={() => setAgain((n) => n + 1)}>Try again</button></div>}
+          {searchState === "error" && searchNet && <LibraryNetworkNote state={searchNet} onTryAgain={() => setAgain((n) => n + 1)} />}
+          {searchState === "error" && !searchNet && <div className="msg bad" role="alert" data-testid="share-search-error"><span className="grid grow">Couldn't search people.{searchWhy && <span className="note">{searchWhy}</span>}</span><button className="sp-btn q end" onClick={() => setAgain((n) => n + 1)}>Try again</button></div>}
           {!accessReady && accessError === null && results.length > 0 && <div className="msg" role="status">Checking who has access…</div>}
           {(teamHits.length > 0 || searchState === "ready") && <div className="rows">
             {teamHits.map((t) => teamRow(t, true))}
@@ -452,7 +464,9 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
         </>}
     </section>}
     <section className="sec fill" data-testid="share-access">
-      {accessError !== null && <div className="msg bad" role="alert"><span className="grow">{accessError}</span><button className="sp-btn q end" onClick={() => setReload((n) => n + 1)}>Try again</button></div>}
+      {slow && <SlowConnectionNote />}
+      {accessError !== null && accessNet && <LibraryNetworkNote state={accessNet} onTryAgain={() => setReload((n) => n + 1)} />}
+      {accessError !== null && !accessNet && <div className="msg bad" role="alert"><span className="grow">{accessError}</span><button className="sp-btn q end" onClick={() => setReload((n) => n + 1)}>Try again</button></div>}
       {/* A first add shows here at once, and stays with its error if the upload is refused. */}
       {(listed || people.length > 0) && <>
         <div className="lab"><b>Who has access</b><span>{[count && `${count} ${count === 1 ? "person" : "people"}`, scopes.length && `${scopes.length} ${scopes.length === 1 ? "team" : "teams"}`].filter(Boolean).join(" · ")}</span></div>
