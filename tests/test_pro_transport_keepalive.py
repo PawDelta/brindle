@@ -60,6 +60,7 @@ def server(monkeypatch):
     srv.server_close()
 
 
+@pytest.mark.variant("the keep-alive fix itself: two requests open one connection, which no other test asserts")
 def test_requests_reuse_one_connection(server):
     srv, base = server
     # Call sites build a new transport per call, so the pool is shared by all of them.

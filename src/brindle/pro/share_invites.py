@@ -44,7 +44,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from brindle.db import DB
-from brindle.service.errors import ServiceError, from_exception
+from brindle.service.errors import ServiceError
 
 log = logging.getLogger(__name__)
 
@@ -195,7 +195,9 @@ def change(db: DB, plan_id: str, sub: str, field: str, value: Any, *, store=None
     """A change to a person whose invite is still out (``field`` access or
     sign_off), sent after it; None when nothing is out for them (the route
     writes it now)."""
+    from brindle import plan_docs
     from brindle.pro import share_access as sa
+    from brindle.pro import shared_docs as sd
 
     if field == "access":
         value = sa._access(value)
@@ -209,6 +211,7 @@ def change(db: DB, plan_id: str, sub: str, field: str, value: Any, *, store=None
         if old is None:
             return None             # it landed meanwhile: the route writes it now
         _theirs(old, who)
+        sd._review_open(plan_docs._plan(db, plan_id))
         if old["op"] == "remove":
             raise ServiceError("conflict", "they're being removed from this plan", 409)
         new = {**old, field: int(value) if field == "sign_off" else value}
@@ -406,7 +409,8 @@ def _send(db: DB, row: dict, client, store) -> None:
         if share is None or share["doc_id"] is None:
             return                  # never shared: nobody to remove
         try:
-            sa.plan_write(db, plan_id, lambda call: sa.revoke(call, sub), notify=False, client=client, store=store)
+            sa.plan_write(db, plan_id, lambda call: sa.revoke(call, sub),
+                          revoking=True, notify=False, client=client, store=store)
         except ad.Refused as e:
             if e.status != 404:     # never had it: removed already
                 raise
@@ -441,7 +445,7 @@ def _outcome(e: BaseException) -> tuple[bool, str]:
         else:
             again = isinstance(e, ad.Refused) and (e.status >= 500 or e.status in (408, 429))
     else:
-        err, again = from_exception(e), False
+        err, again = actions.upstream_error(e), False
     return again, redact.mask(err.message)
 
 

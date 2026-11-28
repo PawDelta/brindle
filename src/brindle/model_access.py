@@ -349,18 +349,24 @@ NO_TOOLS = ("--tools", "", "--strict-mcp-config", "--no-session-persistence")
 
 
 def ask(binary: str, model: str, prompt: str, cwd: str, env: Mapping[str, str], *,
-        run=None, timeout: float = PROBE_TIMEOUT) -> str | None:
+        run=None, timeout: float = PROBE_TIMEOUT, raise_on_error: bool = False) -> str | None:
     """One small call to ``model`` through the claude CLI, with no tools: its
-    reply, or None when the call failed."""
+    reply, or None when the call failed unless the caller needs the cause."""
     try:
         proc = _claude_p(binary, model, prompt, cwd, env, run, timeout, NO_TOOLS)
     except (subprocess.TimeoutExpired, OSError):
+        if raise_on_error:
+            raise
         return None
     if proc.returncode != 0:
+        if raise_on_error:
+            raise ChildProcessError(f"Claude exited with status {proc.returncode}")
         return None
     try:
         return str(json.loads(proc.stdout).get("result") or "")
     except (ValueError, AttributeError):
+        if raise_on_error:
+            raise
         return None
 
 

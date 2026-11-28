@@ -54,13 +54,16 @@ def test_shared_history_compares_library_revisions_without_a_local_plan(db, lib,
     new = copy.deepcopy(CONTENT)
     new["sections"][0]["markdown"] = "Revised passage."
     lib.calls.routes.update({
-        f"GET {DESIGN}": lambda f, h: (200, {**lib.view(), "rev": 2, "revisions": revisions}),
+        f"GET {DESIGN}": lambda f, h: (200, {**lib.view(), "rev": 2, "revisions": revisions,
+                                            "sign_offs": [None, {"rev": 1}, {"rev": 2, "sub": "user_1", "at": 3}]}),
         f"GET {DESIGN}/revisions/1": lambda f, h: (200, {**old, **revisions[0]}),
         f"GET {DESIGN}/revisions/2": lambda f, h: (200, {**new, **revisions[1]}),
     })
     before = db.conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
     events = app.get(f"{ROUTE}/history").json()["events"]
-    assert [event["rev"] for event in events] == [2, 1]
+    assert [(event["kind"], event["rev"]) for event in events] == [
+        ("sign_off", 2), ("revision", 2), ("revision", 1),
+    ]
     comparison = app.get(f"{ROUTE}/revisions/2/changes").json()
     assert comparison["revision"]["rev"] == 2 and comparison["previous"]["rev"] == 1
     assert comparison["changes"][0]["spans"]
