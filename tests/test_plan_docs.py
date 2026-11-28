@@ -201,11 +201,12 @@ def test_the_person_reviews_a_design_doc_through_the_routes(db, session, tmp_pat
 
 
 def test_a_plan_from_before_revisions_stays_readable_and_keeps_its_history(db, session):
-    """A plan with no revision rows (an older brindle's) reads, takes an edit
-    and a supervisor revision, and each keeps the revision it replaced."""
+    """Plans with missing revision rows or titles retain the current visual's
+    title when an edit or a supervisor proposal replaces the revision."""
     boss, _ = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
-    pid = mcp_server.propose_plan(PLAN).split()[2]
+    title = "Per-team presets"
+    pid = mcp_server.propose_plan(PLAN, title=title).split()[2]
     db.conn.execute("DELETE FROM plan_revisions")          # as an older brindle left it
     with TestClient(build_app(TOKEN), headers=AUTH) as client:
         def section(rev, n):
@@ -215,10 +216,12 @@ def test_a_plan_from_before_revisions_stays_readable_and_keeps_its_history(db, s
         assert [s["id"] for s in got["sections"]][:2] == ["s1", "s2"] and [r["rev"] for r in got["revisions"]] == [1]
         got = client.post(f"/v1/plans/{pid}/edit", json={"rev": 1, "section": "s2", "before": "Two workers.",
                                                            "after": "Three workers."}).json()
-        assert [(r["rev"], r["title"]) for r in got["revisions"]] == [(1, "Org presets"), (2, "Org presets")]
+        assert [(r["rev"], r["title"]) for r in got["revisions"]] == [(1, title), (2, title)]
         assert (section(1, 1), section(2, 1)) == ("Two workers.", "Three workers.")
 
-        db.conn.execute("DELETE FROM plan_revisions")      # legacy again, now at r2
+        db.conn.execute("DELETE FROM plan_revisions WHERE plan_id=? AND rev=1", (pid,))
+        db.conn.execute("UPDATE plan_revisions SET title=NULL WHERE plan_id=? AND rev=2", (pid,))
+        assert client.get(f"/v1/plans/{pid}").json()["revisions"][0]["title"] == title
         earliest = client.get(f"/v1/plans/{pid}/revisions/2/changes")
         assert earliest.status_code == 200
         retained = earliest.json()
@@ -228,7 +231,7 @@ def test_a_plan_from_before_revisions_stays_readable_and_keeps_its_history(db, s
         client.post(f"/v1/plans/{pid}/decide", json={"rev": 2, "approved": False, "note": "Fewer."})
         mcp_server.propose_plan(PLAN.replace("Two workers.", "One worker."), plan_id=pid)
         got = client.get(f"/v1/plans/{pid}").json()
-        assert [r["rev"] for r in got["revisions"]] == [2, 3]
+        assert [(r["rev"], r["title"]) for r in got["revisions"]] == [(2, title), (3, "Org presets")]
         assert (section(2, 1), section(3, 1)) == ("Three workers.", "One worker.")
         assert client.get(f"/v1/plans/{pid}/revisions/2/changes").json()["revision"]["rev"] == 2
         assert client.get(f"/v1/plans/{pid}/revisions/3/changes").json()["previous"]["rev"] == 2
