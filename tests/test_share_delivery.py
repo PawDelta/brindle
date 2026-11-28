@@ -8,6 +8,7 @@ import json
 import pytest
 
 from brindle import plans, visual_offers
+from brindle.approval_sources import PERSON_IN_APP
 from brindle.pro import analysis_docs as ad
 from brindle.pro import shared_docs as sd
 from brindle.service.errors import ServiceError
@@ -82,5 +83,5 @@ def test_a_share_the_library_has_no_document_for_can_be_stopped_and_approved(db,
         sd.set_reviewers(db, pid, [{"sub": "u_a", "required": True}], **net)
     sd.stop_sharing(db, pid, 1)
     assert plans.gate(db, plans.get(db, pid)) is None
-    plans.decide(db, pid, 1, True, person=True)
+    plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
     assert plans.get(db, pid)["state"] == "approved"

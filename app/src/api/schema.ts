@@ -35,6 +35,7 @@ export interface ApiSchema {
   GcloudOptionsDTO: GcloudOptionsDTO;
   GitHubConnectionDTO: GitHubConnectionDTO;
   GoalDTO: GoalDTO;
+  HeldApprovalDTO: HeldApprovalDTO;
   InboxActionDTO: InboxActionDTO;
   InboxChoiceDTO: InboxChoiceDTO;
   InboxItemDTO: InboxItemDTO;
@@ -648,6 +649,14 @@ export interface PrStateDTO {
   unpushed?: number;
 }
 /**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "HeldApprovalDTO".
+ */
+export interface HeldApprovalDTO {
+  rev: number;
+  waiting_on: string[];
+}
+/**
  * A route the app can call to act on the item itself.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -1171,7 +1180,9 @@ export interface PlanOptionDTO {
  * via the `definition` "PlanGateDTO".
  */
 export interface PlanGateDTO {
+  approval_held?: HeldApprovalDTO | null;
   approval_refused?: string | null;
+  can_hold_approval?: boolean;
   policies?: PlanGatePolicyDTO[];
   reason?: string | null;
   required: number;

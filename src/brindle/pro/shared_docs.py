@@ -70,6 +70,7 @@ import logging
 import re
 import threading
 import time
+from contextlib import nullcontext
 from typing import Any, Protocol
 from urllib.parse import urlencode
 from uuid import uuid4
@@ -324,12 +325,12 @@ def _reviewers(raw: Any) -> list[dict]:
     return [{"sub": r["sub"], "required": bool(r.get("required", True))} for r in raw]
 
 
-def _remember(db: DB, plan_id: str, view: dict) -> bool:
+def _remember(db: DB, plan_id: str, view: dict, *, connection=None) -> bool:
     """Keep the review state the Library answered with. True if it changed."""
     kept = {k: view.get(k) for k in REVIEW}
     review = json.dumps(kept, sort_keys=True)
     whole = plans._review_rows(kept) is not None        # only a whole answer takes back an access refusal
-    with db.tx() as c:
+    with (db.tx() if connection is None else nullcontext(connection)) as c:
         share_ = c.execute("SELECT owner, remote_rev, local_rev, review FROM plan_shares WHERE plan_id=?",
                            (plan_id,)).fetchone()
         if share_ is not None:
@@ -835,11 +836,16 @@ def _link_own(c, plan_id: str, owner: str, known: dict, threads: Any) -> None:
                 pair(r["id"], (parent["local_id"], "reply", r.get("text") or "", None, None, False), "open")
 
 
-def _pull(db: DB, p: dict, share_: dict, view: dict) -> int:
+def _pull(db: DB, p: dict, share_: dict, view: dict, *, doc_id: str, owner: str) -> int:
     rev, now = share_["local_rev"], time.time()
     cur = plan_docs.revision(db, p["id"], rev) if view.get("rev") == share_["remote_rev"] else None
     changes = 0
     with db.tx() as c:
+        current = c.execute("SELECT 1 FROM plan_shares s JOIN plans p ON p.id=s.plan_id WHERE p.id=? AND p.rev=?"
+                            " AND s.doc_id=? AND s.owner=? AND s.local_rev=? AND s.remote_rev=?",
+                            (p["id"], p["rev"], doc_id, owner, rev, share_["remote_rev"])).fetchone()
+        if not current or view["rev"] < share_["remote_rev"]:
+            raise ServiceError("stale", "A newer plan review arrived during sync.", 409)
         known = _known(c, p["id"])
         _link_own(c, p["id"], share_["owner"], known, view.get("threads"))
         for t in view.get("threads") or []:
@@ -848,7 +854,9 @@ def _pull(db: DB, p: dict, share_: dict, view: dict) -> int:
         from brindle import plan_answers
 
         changes += plan_answers.pull(c, p["id"], share_["owner"], view, now)
-    changes += _remember(db, p["id"], view)
+        changes += _remember(db, p["id"], view, connection=c)
+        if rev == p["rev"] and view["rev"] == share_["remote_rev"]:
+            plans.withdraw_on_objection(c, p)
     return changes
 
 
@@ -885,19 +893,33 @@ def _readable(view: dict, ours: dict | None = None) -> dict:
     return out
 
 
-def _import(db: DB, p: dict, share_: dict, view: dict) -> int:
+def _require_share_head(c, plan_id: str, share_: dict) -> None:
+    if not c.execute("SELECT 1 FROM plan_shares WHERE plan_id=? AND doc_id=? AND owner=?"
+                     " AND local_rev=? AND remote_rev=?", (plan_id, share_["doc_id"], share_["owner"],
+                                                           share_["local_rev"], share_["remote_rev"])).fetchone():
+        raise ServiceError("stale", "A newer plan review arrived during sync.", 409)
+
+
+def _import(db: DB, p: dict, share_: dict, view: dict) -> dict:
     """Take the Library's head as a new revision, when a teammate moved it and
     the plan hasn't changed here. Only an open plan changes: a redirected one
     is the supervisor's to revise and an approved one is building. Returns
-    how many revisions it added: claimed from the revision read here, so a
-    concurrent edit or import leaves this one out."""
+    the share head this response actually established, so later work keeps
+    the identity and revision of the document the Library answered about."""
+    if view["rev"] < share_["remote_rev"]:
+        raise ServiceError("stale", "A newer plan review arrived during sync.", 409)
     if view.get("rev") == share_["remote_rev"] or share_["local_rev"] != p["rev"] or p["state"] != "open":
-        return 0
+        return share_
     cur = plan_docs.revision(db, p["id"])
     if _same(cur, *_comparable(view)):       # moved, but the same text: nothing to read
         with db.tx() as c:
-            c.execute("UPDATE plan_shares SET remote_rev=? WHERE plan_id=?", (view["rev"], p["id"]))
-        return 0
+            if not c.execute("UPDATE plan_shares SET remote_rev=? WHERE plan_id=? AND doc_id=? AND owner=?"
+                             " AND local_rev=? AND remote_rev=? AND EXISTS"
+                             " (SELECT 1 FROM plans WHERE id=? AND rev=?)",
+                             (view["rev"], p["id"], share_["doc_id"], share_["owner"], share_["local_rev"],
+                              share_["remote_rev"], p["id"], p["rev"])).rowcount:
+                raise ServiceError("stale", "A newer plan review arrived during sync.", 409)
+        return {**share_, "remote_rev": view["rev"]}
     new = _readable(view, cur)
     before = {s["id"]: s for s in cur["sections"]}
     after = {s["id"]: s for s in new["sections"]}
@@ -905,6 +927,7 @@ def _import(db: DB, p: dict, share_: dict, view: dict) -> int:
     changed += [field for field in ("lede", "decisions", "split", "ask") if cur[field] != new[field]]
     author, rev, at = _author(view.get("author")) or plan_docs.TEAMMATE + "unknown", p["rev"] + 1, time.time()
     with db.tx() as c:
+        _require_share_head(c, p["id"], share_)
         claimed = c.execute("UPDATE plans SET rev=?, markdown=?, decisions=?, split=?, ask=?, updated_at=?"
                             " WHERE id=? AND rev=? AND state='open'",
                             (rev, new["markdown"], json.dumps(new["decisions"]), json.dumps(new["split"]), new["ask"],
@@ -914,7 +937,9 @@ def _import(db: DB, p: dict, share_: dict, view: dict) -> int:
             plan_docs.insert_revision(c, p["id"], rev, author, "edit", new["lede"], new["sections"], new["markdown"],
                                       new["decisions"], new["split"], new["ask"], changed, at)
             c.execute("UPDATE plan_shares SET remote_rev=?, local_rev=? WHERE plan_id=?", (view["rev"], rev, p["id"]))
-    return int(claimed)
+    if not claimed:
+        raise ServiceError("stale", "The plan changed during sync.", 409)
+    return {**share_, "local_rev": rev, "remote_rev": view["rev"]}
 
 
 # -- sending what was done here -----------------------------------------------------------
@@ -1370,6 +1395,7 @@ def _carry_over(db: DB, p: dict, share_: dict, view: dict, replica: DraftReplica
     changed += [field for field in ("lede", "decisions", "split", "ask") if ours[field] != new[field]]
     author, rev, at = _author(view.get("author")) or plan_docs.TEAMMATE + "unknown", p["rev"] + 1, time.time()
     with db.tx() as c:
+        _require_share_head(c, p["id"], share_)
         claimed = c.execute("UPDATE plans SET rev=?, markdown=?, decisions=?, split=?, ask=?, updated_at=?"
                             " WHERE id=? AND rev=? AND state='open'",
                             (rev, new["markdown"], json.dumps(new["decisions"]), json.dumps(new["split"]), new["ask"],
@@ -1456,8 +1482,10 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
         raise
     _team_active(db, p, store)
     pending_threads = {row["id"] for row in _unsent(db, p["id"])}
-    imported = _import(db, p, share_, view)
-    share_ = link(db, p["id"])
+    previous_rev = share_["local_rev"]
+    share_ = _import(db, p, share_, view)
+    imported = share_["local_rev"] - previous_rev
+    _require_share_head(db.conn, p["id"], share_)
     # The draft's updates go before the threads, so what those are anchored on is there.
     # Threads as they stand before the draft is read: only what the relay then took can go with them.
     held = {r["id"]: r["status"] for r in db.conn.execute(
@@ -1466,10 +1494,15 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
     live, acked, typed = relays.get(share_["doc_id"]), None, False
     if replica is not None and live is not None:
         typed, acked = _trade(replica, live), held
-    imported += _carry_over(db, p, share_, view, replica)
+    if not imported:
+        imported = _carry_over(db, p, share_, view, replica)
+        if imported:
+            share_ = {**share_, "local_rev": p["rev"] + imported, "remote_rev": view["rev"]}
     if imported:
-        p, share_ = plan_docs._plan(db, p["id"]), link(db, p["id"])
-    changes = _pull(db, p, share_, view)
+        p = plan_docs._plan(db, p["id"])
+        if p["rev"] != share_["local_rev"]:
+            raise ServiceError("stale", "The plan changed during sync.", 409)
+    changes = _pull(db, p, share_, view, doc_id=doc_id, owner=names_share["owner"])
     if not include_access and share_["doc_id"] == doc_id and (changes or imported or share_["names_pending"]):
         names_share = share_
         names = member_names(doc_id, client=client, store=store)
@@ -1485,6 +1518,7 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
     delivery_changed = pending_threads and pending_threads.difference(row["id"] for row in _unsent(db, p["id"]))
     if pushed or imported or typed or delivery_changed:
         plan_docs._changed(db, p, p["rev"])
+    plans.settle_held_approval(db, p["id"], signoffs_only=True)
     return {**link(db, p["id"]), "pulled": imported + typed + changes, "pushed": pushed,
             **({"access": access} if access is not None else {})}
 
@@ -1521,6 +1555,7 @@ def sign_off(db: DB, plan_id: str, rev: Any, *, version: Any = None, client=None
                                                   {"rev": share_["remote_rev"]}, document=False, client=client,
                                                   store=store)):
         plan_docs._changed(db, p, p["rev"])
+    plans.settle_held_approval(db, p["id"], signoffs_only=True)
     return link(db, p["id"])
 
 

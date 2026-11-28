@@ -5,13 +5,14 @@ import { SharedDesignReader } from "./SharedDesignReader";
 
 afterEach(cleanup);
 
-async function open(state: "waiting" | "refused", failFirstAcknowledgment = false) {
+async function open(state: "waiting" | "refused", { failFirstAcknowledgment = false, designDoc = false } = {}) {
+  const section = designDoc ? "context" : "s";
   const doc = {
     id: "shared", session: "", title: "Workers", rev: 1, state: "open", markdown: "Where?", lede: "",
-    sections: [{ id: "s", title: "Summary", markdown: "Where?" }],
+    sections: [{ id: section, title: "Summary", markdown: "Where?" }],
     decisions: [{ id: "where", title: "Where?", options: [{ id: "local", label: "Here" }] }],
     threads: [{ id: 1, kind: "comment", rev: 1, author: "person", text: "Why?", status: "open",
-      at: 1, anchor: { kind: "section", section: "s" }, replies: [] }],
+      at: 1, anchor: { kind: "section", section }, replies: [] }],
     split: [], queued: 0, created_at: 1, me: "me", can_comment: true,
     outbox: [
       { client_id: "vote", tail: "/votes", state, body: { rev: 1, decision: "where", option: "local" } },
@@ -29,7 +30,11 @@ async function open(state: "waiting" | "refused", failFirstAcknowledgment = fals
         current = { ...current, outbox: current.outbox?.filter(item => !ids.includes(item.client_id)) };
       }
     },
-    libraryPeople: async () => ({ people: [] }) };
+    libraryPeople: async () => ({ people: [] }),
+    ...(designDoc && {
+      sharedDesignHistory: async () => ({ events: [] }),
+      sharedDesignRevisionChanges: async () => { throw new Error("No revisions to compare"); },
+    }) };
   await act(async () => { render(<SharedDesignReader client={client} docId={doc.id} onBack={() => {}} />); });
   async function refresh(changes: Partial<SharedDesign>) {
     current = { ...current, ...changes };
@@ -47,9 +52,12 @@ it("keeps the current pick and both earlier refusal receipts after reconnect", a
 });
 
 it("keeps a queued pick selected and dims a queued reply", async () => {
-  const { card, refresh, read } = await open("waiting", true);
+  const { card, refresh, read } = await open("waiting", { failFirstAcknowledgment: true });
   expect(card.getByRole("radio").getAttribute("aria-checked")).toBe("true");
   expect(card.getByText("Waiting to send")).toBeTruthy();
+  const trailing = screen.getByTestId("plan-toolbar-trailing");
+  const queue = trailing.querySelector('[data-queue-count="2"]');
+  expect(queue?.nextElementSibling).toBe(within(trailing).getByRole("radiogroup", { name: "Mode" }));
   const reply = screen.getAllByText("For privacy.")[0].closest('[data-state="waiting"]');
   expect(reply?.classList.contains("text-ink-3")).toBe(true);
   await refresh({ outbox: [{ client_id: "reply", tail: "/comments", state: "sent", body: { rev: 1, parent: 1 } }] });
@@ -73,4 +81,16 @@ it("opens the refused pick on its card with its previous choice marked", async (
   expect(card.getByRole("radio").querySelector(".border-dashed")).toBeTruthy();
   fireEvent.click(card.getByRole("button", { name: "See what changed" }));
   expect(screen.getByRole("tab", { name: /History/ }).getAttribute("aria-selected")).toBe("true");
+});
+
+it("places the design decision's refusal details between the question and choices", async () => {
+  const { card } = await open("refused", { designDoc: true });
+  const question = card.getByRole("heading");
+  const header = question.previousElementSibling;
+  expect(header?.querySelector('[data-state="refused"]')).toBeTruthy();
+  expect(header?.querySelector("button")).toBeNull();
+  const details = card.getByTestId("plan-refusal-details");
+  expect(question.nextElementSibling).toBe(details);
+  fireEvent.click(within(details).getByRole("button"));
+  expect(screen.getByTestId("plan-history-menu").hidden).toBe(false);
 });

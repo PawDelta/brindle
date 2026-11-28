@@ -58,7 +58,7 @@ def test_offline_comment_sent_once(app, lib, db, monkeypatch):
     assert len(app.get(ROUTE).json()["threads"]) == 1
 
 
-@pytest.mark.parametrize("attempted", [False, True])
+@pytest.mark.parametrize("attempted", [pytest.param(False, marks=pytest.mark.variant("a refused vote never sent must not block the sign-off queued after it")), True])
 def test_refused_vote_leaves_following_signoff_deliverable(app, lib, attempted):
     route = f"POST {DESIGN}/votes"
 
@@ -106,7 +106,8 @@ def test_signoff_confirmed_from_history_after_plan_advances(app, lib):
 
 
 @pytest.mark.parametrize("tail,supported,view_only", [
-    ("comments", False, True), ("comments", True, True),
+    pytest.param("comments", False, True, marks=pytest.mark.variant("an older server without keys: a lost comment response is matched by content, not resent")),
+    pytest.param("comments", True, True, marks=pytest.mark.variant("a view-only reader's keyed comment replay confirms without a write")),
     pytest.param("comments", True, False, marks=pytest.mark.variant(
         "With write access a keyed replay must confirm the original client ID without creating another comment.")),
     pytest.param("suggestions", False, True, marks=pytest.mark.variant("Legacy suggestions match the edit range and replacement.")),
@@ -167,7 +168,7 @@ def test_lost_response_after_save(app, lib, supported, tail, view_only, db):
     assert keys == ({"lost-response"} if supported else {None})
 
 
-@pytest.mark.parametrize("keyed", [True, False])
+@pytest.mark.parametrize("keyed", [pytest.param(True, marks=pytest.mark.variant("a keyed server keeps two identical comments with different client ids apart")), pytest.param(False, marks=pytest.mark.variant("without keys, an identical comment from another client id is still sent"))])
 def test_identical_comment_with_another_client_id(app, lib, keyed):
     lib.calls.routes[f"GET {DESIGN}"] = lambda *_: (200, {**lib.view(), "features": ["comment_idempotency"] if keyed else []})
     route = f"POST {DESIGN}/comments"
@@ -189,6 +190,7 @@ def test_identical_comment_with_another_client_id(app, lib, keyed):
         assert app.get(ROUTE).json()["outbox"][0]["state"] == "unconfirmed"
 
 
+@pytest.mark.variant("a reader whose access was revoked still sees their own receipt, without the document")
 def test_revoked_reader_gets_own_receipt_without_document(app, lib):
     # This earlier comment can't read its anchor, so neither write reaches a POST.
     lib.calls.routes[f"GET {DESIGN}"] = [TransportError("offline", network="offline") for _ in range(2)]

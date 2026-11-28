@@ -431,7 +431,7 @@ def test_legacy_unscoped_grants_are_revoked(db, session):
 
 
 @pytest.mark.parametrize("case", [
-    "quoted",
+    pytest.param("quoted", marks=pytest.mark.variant("a quoted visual ask must not spend a standing plan ask")),
     pytest.param("legacy", marks=pytest.mark.variant("migration preserves an existing unspent plan grant")),
     pytest.param("model", marks=pytest.mark.variant("a standing plan grant must allow a separate model-confirmed visual ask")),
 ])

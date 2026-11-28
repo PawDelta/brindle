@@ -572,7 +572,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     sharing.docScopes().then((got) => { if (alive.current) setScopes(got.scopes); }, () => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once for this doc: the reader is keyed by plan
   }, []);
-  const gate: (NonNullable<Plan["gate"]> & { approval_held?: { rev: number; waiting_on: string[] } | null; can_hold_approval?: boolean }) | null = plan.gate ?? null;
+  const gate = plan.gate ?? null;
   const shared = !!gate;
   const sharePeople = (!teammate || plan.can_edit) && plan.state !== "approved" ? source.people : undefined;
   const wasShared = useRef(shared);
@@ -1451,7 +1451,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           {draft?.kind === "suggest" ? suggestingBar : live && (editing || raw) ? editingBar : teammate ? teammateBar : open ? (
             <>
               <div role="status" className="grid gap-px" data-testid="plan-next" data-state={left.length ? "open" : "ready"} data-left={left.length}>
-                {left.length ? nextUp : (
+                {left.length && !held ? nextUp : (
                   <>
                     <span className="text-[13px] text-ink">{buildSentence} {withdraw}</span>
                   </>

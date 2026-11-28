@@ -69,12 +69,16 @@ export function ReaderBar({ lead, version, badges, presence, markdown, queue, mo
         {version}
         {badges}
       </div>
-      {presence}
-      {markdown && <MarkdownButton pressed={markdown.pressed} onToggle={markdown.onToggle} />}
-      {queue}
-      {modes?.picker}
-      {share}
-      {actions}
+      {(presence || markdown || queue || modes || share || actions) && (
+        <div data-testid="plan-toolbar-trailing" className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-x-2 gap-y-1">
+          {presence}
+          {markdown && <MarkdownButton pressed={markdown.pressed} onToggle={markdown.onToggle} />}
+          {queue}
+          {modes?.picker}
+          {share}
+          {actions}
+        </div>
+      )}
     </header>
   );
 }
