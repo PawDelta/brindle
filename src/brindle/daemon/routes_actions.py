@@ -45,7 +45,7 @@ from brindle.db import DB, Agent, Workspace
 from brindle.service import inbox
 from brindle.service import sessions as svc
 from brindle.service.dto import SessionDTO
-from brindle.service.errors import ServiceError, from_exception
+from brindle.service.errors import ServiceError, from_exception, network_error
 
 log = logging.getLogger(__name__)
 
@@ -2559,6 +2559,8 @@ def upstream_error(e: Exception) -> ServiceError:
 
     if busy := _library_busy(e):
         return busy
+    if network := network_error(e):
+        return network
     if isinstance(e, AuthError) and not isinstance(e, TransportError):
         return from_exception(e)
     if isinstance(e, Refused) and 400 <= e.status < 500 and e.status != 401 and (e.status != 403 or e.code):

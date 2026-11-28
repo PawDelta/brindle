@@ -11,6 +11,7 @@ from starlette.testclient import TestClient
 
 from brindle import plan_docs, plans, visual_offers
 from brindle.daemon.app import build_app
+from brindle.pro import review_policies
 from brindle.pro import shared_docs as sd
 from pro_fixtures import backend, claims, fixed_identity, pro_env, sign, signing_key  # noqa: F401
 from test_plans import AUTH, DECISIONS, TOKEN, messages, session, work  # noqa: F401 - fixture
@@ -162,7 +163,7 @@ def test_an_org_rule_refusing_an_answer_bars_the_review(db, shared, backend):
     _write(pid, f"answers/{answer}", {"rev": 1, "text": "something else"})
     sd.sync(db, pid, **net)
 
-    assert db.conn.execute("SELECT access_refused FROM plan_shares WHERE plan_id=?", (pid,)).fetchone()[0] is not None
+    assert sd.link(db, pid)["review"][review_policies.REFUSED]["code"] == "policy_denied"
     assert plans.gate(db, plans.get(db, pid))["state"] != "ready"
     assert [a["text"] for a in _decision(db, pid)["answers"]] == ["something else"]   # kept for the next sync
 

@@ -20,7 +20,7 @@ from brindle import (
 )
 from brindle import repos as repos_mod
 from brindle.cost import NotEntitled as CostNotEntitled
-from brindle.pro.auth import AuthError
+from brindle.pro.auth import AuthError, TransportError
 from brindle.pro.license import NotEntitled as LicenseNotEntitled
 
 
@@ -52,9 +52,27 @@ _MAP: tuple[tuple[tuple[type[BaseException], ...], str, int], ...] = (
 )
 
 
+NETWORK_CODES = {"slow": "library_slow", "offline": "library_offline"}
+
+
+def network_error(exc: BaseException | None) -> ServiceError | None:
+    """A brindle Pro call that failed on the network (``TransportError.network``),
+    anywhere in ``exc``'s chain, as ``library_slow`` or ``library_offline`` (503)
+    with a plain message, so the app can say so instead of showing socket text."""
+    seen = 0
+    while exc is not None and seen < 16:
+        if isinstance(exc, TransportError) and exc.network in NETWORK_CODES:
+            return ServiceError(NETWORK_CODES[exc.network], str(exc), 503)
+        exc = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
+        seen += 1
+    return None
+
+
 def from_exception(exc: BaseException) -> ServiceError:
     if isinstance(exc, ServiceError):
         return exc
+    if network := network_error(exc):
+        return network
     if isinstance(exc, agents.PreflightBlocked):   # a job's launch: the items, as POST answers them
         return ServiceError("preflight", str(exc), 409, preflight=[i.to_json() for i in exc.items])
     for kinds, code, status in _MAP:
