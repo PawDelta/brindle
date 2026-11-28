@@ -40,7 +40,7 @@ export type KnowledgeView = "map" | "docs" | "imported" | "decisions" | "kept";
 export const LIBRARY_STAGES = [
   { id: "needs-you", label: "Needs you" },
   { id: "drafting", label: "Drafting" },
-  { id: "in-review", label: "Approvals" },
+  { id: "in-review", label: "In review" },
   { id: "approved", label: "Approved" },
   { id: "building", label: "Building" },
   { id: "shipped", label: "Shipped" },

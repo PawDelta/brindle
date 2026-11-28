@@ -1,5 +1,5 @@
 /* The Library as a board (library-redesign option A, state 2): the same designs as the list, each
-   in the column of the stage it has reached (Drafting, Approvals, Approved, Building, Shipped),
+   in the column of the stage it has reached (Drafting, In review, Approved, Building, Shipped),
    newest first in each. A card carries what a row carries: its folder, reviewers with their
    sign-off rings and open threads, the linked work item, its plan's tasks once building and the
    briefs it went into once shipped. A card that waits on you has an orange foot saying what for.
