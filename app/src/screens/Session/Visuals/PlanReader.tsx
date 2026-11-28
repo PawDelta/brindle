@@ -323,7 +323,6 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
   const lead = (
     <>
       <BackButton onBack={onBack} asking={asking} label={backLabel} />
-      <QueueCount items={shown?.outbox} />
       <span className="mx-1 h-5 w-px bg-line" aria-hidden />
       <h2 title={visual.title} className="min-w-0 truncate text-[13px] font-semibold">{visual.title}</h2>
     </>
@@ -1384,7 +1383,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     return (
       <>
         {chrome && (
-          <ReaderBar lead={chrome.lead} version={versionMenu} presence={presence} actions={chrome.actions}
+          <ReaderBar lead={chrome.lead} version={versionMenu} presence={presence} actions={chrome.actions} queue={<QueueCount items={plan.outbox} />}
             modes={{ current: mode, picker: <ModeMenu modes={chrome.modes} current={mode} allowed={(m) => (locked ? m === "viewing" : chrome.allowed(m))} onPick={chrome.onMode} markdown={{ pressed: raw, toggle: () => setRaw(!raw) }} /> }}
             share={!historical && shareMenu} />
         )}
@@ -1524,7 +1523,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     <ShowPlanChanges.Provider value={() => { collapse(false); setTab("history"); }}>
       {earlierRefusals}
       {chrome && (
-        <ReaderBar lead={chrome.lead} badges={chrome.badges} actions={chrome.actions}
+        <ReaderBar lead={chrome.lead} badges={chrome.badges} actions={chrome.actions} queue={<QueueCount items={plan.outbox} />}
           version={<span className="whitespace-nowrap text-xs text-ink-3" title={`${plan.id} · rendered by brindle from the plan's own text${frozen ? ` · rev ${plan.rev}` : ""}`} data-testid="plan-rev">{versionLabel}</span>}
           presence={presence}
           markdown={{ pressed: raw, onToggle: () => setRaw((r) => !r) }}

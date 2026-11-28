@@ -428,7 +428,7 @@ export function DecisionCard({ decision: d, n, of, open, canPick, disabled = fal
           <p className="m-0 text-[12.5px] leading-normal text-ink-3">
             {d.challenge && (d.mine ? <><b className="font-medium text-ink-2">The case against the recommendation:</b> {d.challenge}</> : d.challenge)}
           </p>
-          {onComment && <button type="button" className={link} onClick={onComment}>Comment</button>}
+          {onComment && <button type="button" className={`${link} flex-none whitespace-nowrap`} onClick={onComment}>Comment</button>}
         </div>
       )}
     </section>
