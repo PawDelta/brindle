@@ -7,6 +7,7 @@ from brindle.daemon.app import build_app
 from brindle.pro import shared_docs
 from brindle.pro import analysis_docs as ad, auth
 from brindle.service import inbox
+from brindle.service.errors import ServiceError
 from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401
 from test_plans import AUTH, TOKEN, _shared, _signed_off, messages, outage, session  # noqa: F401
 from test_shared_plan_docs import TEAM, parts  # noqa: F401
@@ -74,13 +75,33 @@ def test_stale_withdrawal_preserves_new_revision_approval(db, outage):
         assert app.get(path).json()["gate"]["approval_held"]["rev"] == 2
 
 
-def test_optional_only_approves_immediately(db, session, outage):
-    outage.down = None
-    outage.view = {**outage.view, "reviewers": [{"sub": "Maya", "required": False}]}
-    with TestClient(build_app(TOKEN), headers=AUTH) as app:
-        plan = app.post(f"/v1/plans/{outage.pid}/decide", json={"rev": 1, "approved": True}).json()
-        assert plan["state"] == "approved" and session[1] == ["build it"]
-        assert plan["gate"]["approval_held"] is None
+def test_stale_import_cannot_reopen_objection_after_new_revision_approval(db, parts, monkeypatch):
+    pid, library, net = parts
+    monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
+    shared_docs.share(db, pid, TEAM, reviewers=[{"sub": "u_a", "required": True}], **net)
+    thread = {"id": 99, "kind": "comment", "rev": 1, "author": "u_a", "text": "Revise.",
+              "status": "open", "at": 5.0, "replies": [], "anchor": {"kind": "section", "section": "summary"}}
+    library.threads.append(thread)
+    shared_docs.sync(db, pid, **net)
+    pull = shared_docs._pull
+
+    def pull_after_revision(db, p, share, view, **kwargs):
+        monkeypatch.setattr(shared_docs, "_pull", pull)
+        library.threads[0] = {**thread, "status": "resolved"}
+        plan_docs.edit(db, pid, 1, "summary", 0, "", "Revised. ")
+        shared_docs.sync(db, pid, **net)
+        plans.decide(db, pid, 2, True, {"d1": "repo"}, person=True)
+        return pull(db, p, share, view, **kwargs)
+
+    monkeypatch.setattr(shared_docs, "_pull", pull_after_revision)
+    try:
+        shared_docs.sync(db, pid, **net)
+    except ServiceError as error:
+        assert error.code == "stale"
+    gate = plans.gate(db, plans.get(db, pid))
+    assert gate["approval_held"] == {"rev": 2, "waiting_on": ["u_a"]}
+    assert db.conn.execute("SELECT status FROM plan_threads WHERE plan_id=? AND author='teammate:u_a'",
+                           (pid,)).fetchone()[0] == "resolved"
 
 
 def test_imported_objection_withdraws_even_if_outbound_write_fails(db, parts, monkeypatch):

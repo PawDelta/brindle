@@ -836,11 +836,16 @@ def _link_own(c, plan_id: str, owner: str, known: dict, threads: Any) -> None:
                 pair(r["id"], (parent["local_id"], "reply", r.get("text") or "", None, None, False), "open")
 
 
-def _pull(db: DB, p: dict, share_: dict, view: dict) -> int:
+def _pull(db: DB, p: dict, share_: dict, view: dict, *, doc_id: str, owner: str) -> int:
     rev, now = share_["local_rev"], time.time()
     cur = plan_docs.revision(db, p["id"], rev) if view.get("rev") == share_["remote_rev"] else None
     changes = 0
     with db.tx() as c:
+        current = c.execute("SELECT 1 FROM plan_shares s JOIN plans p ON p.id=s.plan_id WHERE p.id=? AND p.rev=?"
+                            " AND s.doc_id=? AND s.owner=? AND s.local_rev=? AND s.remote_rev=?",
+                            (p["id"], p["rev"], doc_id, owner, rev, share_["remote_rev"])).fetchone()
+        if not current or view["rev"] < share_["remote_rev"]:
+            raise ServiceError("stale", "A newer plan review arrived during sync.", 409)
         known = _known(c, p["id"])
         _link_own(c, p["id"], share_["owner"], known, view.get("threads"))
         for t in view.get("threads") or []:
@@ -850,7 +855,8 @@ def _pull(db: DB, p: dict, share_: dict, view: dict) -> int:
 
         changes += plan_answers.pull(c, p["id"], share_["owner"], view, now)
         changes += _remember(db, p["id"], view, connection=c)
-        plans.withdraw_on_objection(c, p)
+        if rev == p["rev"] and view["rev"] == share_["remote_rev"]:
+            plans.withdraw_on_objection(c, p)
     return changes
 
 
@@ -893,12 +899,19 @@ def _import(db: DB, p: dict, share_: dict, view: dict) -> int:
     is the supervisor's to revise and an approved one is building. Returns
     how many revisions it added: claimed from the revision read here, so a
     concurrent edit or import leaves this one out."""
+    if view["rev"] < share_["remote_rev"]:
+        raise ServiceError("stale", "A newer plan review arrived during sync.", 409)
     if view.get("rev") == share_["remote_rev"] or share_["local_rev"] != p["rev"] or p["state"] != "open":
         return 0
     cur = plan_docs.revision(db, p["id"])
     if _same(cur, *_comparable(view)):       # moved, but the same text: nothing to read
         with db.tx() as c:
-            c.execute("UPDATE plan_shares SET remote_rev=? WHERE plan_id=?", (view["rev"], p["id"]))
+            if not c.execute("UPDATE plan_shares SET remote_rev=? WHERE plan_id=? AND doc_id=? AND owner=?"
+                             " AND local_rev=? AND remote_rev=? AND EXISTS"
+                             " (SELECT 1 FROM plans WHERE id=? AND rev=?)",
+                             (view["rev"], p["id"], share_["doc_id"], share_["owner"], share_["local_rev"],
+                              share_["remote_rev"], p["id"], p["rev"])).rowcount:
+                raise ServiceError("stale", "A newer plan review arrived during sync.", 409)
         return 0
     new = _readable(view, cur)
     before = {s["id"]: s for s in cur["sections"]}
@@ -907,6 +920,10 @@ def _import(db: DB, p: dict, share_: dict, view: dict) -> int:
     changed += [field for field in ("lede", "decisions", "split", "ask") if cur[field] != new[field]]
     author, rev, at = _author(view.get("author")) or plan_docs.TEAMMATE + "unknown", p["rev"] + 1, time.time()
     with db.tx() as c:
+        if not c.execute("SELECT 1 FROM plan_shares WHERE plan_id=? AND doc_id=? AND owner=?"
+                         " AND local_rev=? AND remote_rev=?", (p["id"], share_["doc_id"], share_["owner"],
+                                                               share_["local_rev"], share_["remote_rev"])).fetchone():
+            raise ServiceError("stale", "A newer plan review arrived during sync.", 409)
         claimed = c.execute("UPDATE plans SET rev=?, markdown=?, decisions=?, split=?, ask=?, updated_at=?"
                             " WHERE id=? AND rev=? AND state='open'",
                             (rev, new["markdown"], json.dumps(new["decisions"]), json.dumps(new["split"]), new["ask"],
@@ -1471,7 +1488,7 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
     imported += _carry_over(db, p, share_, view, replica)
     if imported:
         p, share_ = plan_docs._plan(db, p["id"]), link(db, p["id"])
-    changes = _pull(db, p, share_, view)
+    changes = _pull(db, p, share_, view, doc_id=doc_id, owner=names_share["owner"])
     if not include_access and share_["doc_id"] == doc_id and (changes or imported or share_["names_pending"]):
         names_share = share_
         names = member_names(doc_id, client=client, store=store)

@@ -1213,10 +1213,11 @@ def _hold_approval(db: DB, p: dict, why: str, was_ready: bool, wanted: dict) -> 
     return held
 
 
-def withdraw_signoffs(c, plan_id: str, why: str) -> bool:
+def withdraw_signoffs(c, plan_id: str, why: str, *, rev: int | None = None) -> bool:
     """Invalidate the saved verdict in the same transaction as the edit or cancellation."""
     if c.execute("UPDATE plan_shares SET approve_wanted=NULL, approve_refused=? WHERE plan_id=?"
-                 " AND json_extract(approve_wanted,'$.signoffs')=1", (why, plan_id)).rowcount:
+                 " AND json_extract(approve_wanted,'$.signoffs')=1"
+                 " AND (? IS NULL OR json_extract(approve_wanted,'$.rev')=?)", (why, plan_id, rev, rev)).rowcount:
         root = c.execute("SELECT root_id FROM plans WHERE id=?", (plan_id,)).fetchone()[0]
         _queue_message(c, root, why)
         return True
@@ -1228,7 +1229,7 @@ def withdraw_on_objection(c, p: dict) -> None:
                  (p["id"],)).fetchone():
         found = _gate(c, p)
         if found and found["state"] == CHANGES:
-            withdraw_signoffs(c, p["id"], f"Your held approval was withdrawn. {found['reason']}")
+            withdraw_signoffs(c, p["id"], f"Your held approval was withdrawn. {found['reason']}", rev=p["rev"])
 
 
 def _drop_held_approval(db: DB, p: dict, why: str, expected: str) -> None:
