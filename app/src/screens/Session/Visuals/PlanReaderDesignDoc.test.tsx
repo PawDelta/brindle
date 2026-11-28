@@ -286,7 +286,7 @@ it.each([
   await finish();
 });
 
-it("counts a teammate's pick as decided only once its vote is saved, and takes no second pick while one is out", async () => {
+it("shows a teammate's pick immediately and takes no second pick while one is out", async () => {
   let settle!: () => void;
   let answer: () => Promise<void> = () => new Promise<void>((resolve) => { settle = resolve; });
   const { design, sent, client } = teammateDoc(() => answer());
@@ -296,11 +296,11 @@ it("counts a teammate's pick as decided only once its vote is saved, and takes n
   const pick = (id: string) => act(async () => fireEvent.click(within(card(id)).getAllByRole("radio")[0]));
   const signOff = () => screen.getByTestId("plan-sign-off") as HTMLButtonElement;
 
-  // The first vote is still out: it isn't decided yet, and a second pick isn't taken (nor lost as a decided one).
+  // The first vote is visible while pending. A second pick cannot start until it settles.
   await pick("store");
   await pick("loud");
   expect(sent.map(([, body]) => body.decision)).toEqual(["store"]);
-  expect([card("store").dataset.state, card("loud").dataset.state]).toEqual(["open", "open"]);
+  expect([card("store").dataset.state, card("loud").dataset.state]).toEqual(["decided", "open"]);
   await act(async () => settle());
   expect(card("store").dataset.state).toBe("decided");
 

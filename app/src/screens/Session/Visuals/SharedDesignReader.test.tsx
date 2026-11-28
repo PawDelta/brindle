@@ -167,7 +167,7 @@ it("a teammate signs off through the Library, keeps a draft across a stale write
 
   answer = async () => (doc = { ...doc, signed_off: true });
   await act(async () => fireEvent.click(screen.getByTestId("plan-sign-off")));
-  expect(sent.at(-1)).toEqual(["sign-offs", { rev: 2 }]);
+  expect(sent.at(-1)).toMatchObject(["sign-offs", { rev: 2 }]);
   expect(screen.queryByTestId("plan-sign-off")).toBeNull();
 
   // An outage says nothing about access: what was on screen stays.

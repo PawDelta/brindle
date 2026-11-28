@@ -519,9 +519,13 @@ export interface KeptVisualDTO {
 }
 
 /* A planning doc (brindle/plans.py): markdown the app renders itself, by section. */
-export type Plan = PlanDTO;
+export type Plan = Omit<PlanDTO, "outbox"> & { outbox?: PlanDeliveryItem[] };
 export type PlanComment = PlanCommentDTO;
-export type SharedDesign = SharedDesignDTO;
+export type PlanDeliveryItem = Omit<import("./schema").PlanDeliveryItemDTO, "body"> & {
+  body: { rev?: number; decision?: string; option?: string; parent?: number; thread_item?: number; text?: string;
+    before?: string; after?: string; section?: string; anchor?: { section?: string; decision?: string } };
+};
+export type SharedDesign = Omit<SharedDesignDTO, "outbox"> & { outbox?: PlanDeliveryItem[] };
 
 /* The person's verdict on the plan revision on screen: approve, or redirect with what to change. */
 export interface PlanVerdict {

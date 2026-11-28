@@ -60,6 +60,7 @@ import { Annotated, DecisionCard, type OwnAnswers, MarginNote, Menu, ModeMenu, O
 import type { Work } from "./WorkPanel";
 import { planSource, type DocSource } from "./docSource";
 import { LibraryNetworkNote, SlowConnectionNote, libraryNetwork, useSlowPending, type LibraryNetwork } from "./LibraryNetwork";
+import { PendingNote, PlanDeliveryProvider, QueueCount, ShowPlanChanges, SignOffDelivery, usePendingNotes } from "./PlanDelivery";
 import { StoreContext } from "../../../store/useStore";
 import { PlanDraftScope, readPlanDraft, savePlanDraft, usePlanDraft, usePlanDraftScope } from "./planDrafts";
 
@@ -339,6 +340,7 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
   const lead = (
     <>
       <BackButton onBack={onBack} asking={asking} label={backLabel} />
+      <QueueCount items={shown?.outbox} />
       <span className="mx-1 h-5 w-px bg-line" aria-hidden />
       <h2 title={visual.title} className="min-w-0 truncate text-[13px] font-semibold">{visual.title}</h2>
     </>
@@ -359,7 +361,7 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="plan-reader">
       {shown ? (
-        <DesignDoc key={shown.id} source={source} author={{ client, visual }} plan={shown} mode={current} writes={writes} work={work}
+        <PlanDeliveryProvider key={shown.id} items={shown.outbox ?? []}><DesignDoc source={source} author={{ client, visual }} plan={shown} mode={current} writes={writes} work={work}
           shareLink={planLinkTarget(client, shown.id, repo)}
           chrome={{ lead, badges, actions, modes: MODES, allowed, onMode: setMode, onBack }}
           top={shown.state === "approved" ? (
@@ -370,7 +372,7 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
             <div className="max-h-[30vh] shrink-0 overflow-auto border-b border-line px-s3 py-3">
               <Alongside rows={shown.alongside} onStop={stopAlongside || undefined} />
             </div>
-          )} />
+          )} /></PlanDeliveryProvider>
       ) : (
         <>
           <ReaderBar lead={lead} version={<span className="whitespace-nowrap text-xs text-ink-3" data-testid="plan-rev">{`rev ${visual.rev}`}</span>} actions={actions} />
@@ -516,8 +518,11 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const [historical, setHistorical] = useState<{ comparison: DocRevisionComparison; close(): void } | null>(null);
   const lastRead = useLastRead(receivedPlan.id, receivedPlan.rev);
   const plan = useLiveReview ? { ...receivedPlan, gate: liveReviewGate(receivedPlan.gate, liveState) } : receivedPlan;
-  const teammate = receivedTeammate && useLiveReview ? { ...receivedTeammate, signedOff: !!receivedTeammate.me && !!liveState?.version?.signOffs.includes(receivedTeammate.me) } : receivedTeammate;
   const reviewVersion = useLiveReview ? liveState?.version?.id : undefined;
+  const pendingSignOff = receivedPlan.outbox?.some(item => item.tail === "/sign-offs" &&
+    item.state === "waiting" && item.body.rev === reviewVersion);
+  const teammate = receivedTeammate && useLiveReview ? { ...receivedTeammate, signedOff: !!pendingSignOff ||
+    (!!receivedTeammate.me && !!liveState?.version?.signOffs.includes(receivedTeammate.me)) } : receivedTeammate;
   const reviewBlocked = useLiveReview && reviewVersion === undefined;
   const visual = author?.visual;
   const canComment = !teammate || teammate.rights.comment;
@@ -564,6 +569,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // free-form doc keeps the side column.
   const designDoc = onSpine(receivedPlan);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const pendingNotes = usePendingNotes();
   const [cancelOpen, setCancelOpen] = useState(false);
   const [changesOpen, setChangesOpen] = useState(() => !!readPlanDraft<string>(draftScope, "verdict"));
   const doc = useRef<HTMLDivElement>(null);
@@ -728,7 +734,13 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     setAgainName(null);
     setReadBack(null);
     try {
-      const now = await work();
+      const result = await work();
+      // An offline receipt carries only this account's changes. Keep the authorized view in memory.
+      let now: Plan | null = result;
+      if (result.rev === undefined && "outbox" in result) {
+        now = result.id === plan.id && "me" in result && result.me === teammate?.me
+          ? Object.assign({}, plan, { outbox: result.outbox }) : null;
+      }
       writes.end(now);
       return now;
     } catch (e) {
@@ -758,7 +770,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     control.click();
   };
   const footerNotes = (span: string) => <>
-    {slow && <SlowConnectionNote className={`m-0 ${span} text-xs text-ink-3`} />}
+    {slow && (teammate ? <SlowConnectionNote className={`m-0 ${span} text-xs text-ink-3`} />
+      : <p role="status" className={`m-0 ${span} text-xs text-ink-3`}>Sending…</p>)}
     {error && net && <LibraryNetworkNote state={net} className={`m-0 flex ${span} items-center gap-2 text-xs text-ink-2`}
       hint="It couldn't be confirmed, so it may or may not have gone through. What you wrote is kept: check the plan before sending it again."
       buttonClassName={`${quiet} px-2 text-xs`}
@@ -1280,6 +1293,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const draftAt = draftStale ? { at: LEDE, anchor: null }
       : draft ? (draft.kind === "suggest" ? { at: draft.section, anchor: null } : home(draft.anchor)) : null;
     const notesFor = (at: string) => [
+      ...pendingNotes.filter(({ body }) => (body.anchor?.decision ? `decision:${body.anchor.decision}`
+        : body.section ?? body.anchor?.section ?? LEDE) === at).map(item => ({
+        key: item.client_id, anchor: null, node: <PendingNote item={item} />,
+      })),
       ...openThreads.map((t) => ({ t, h: home(t.anchor, t.id) })).filter(({ h }) => h.at === at).map(({ t, h }) => ({
         key: `t${t.id}`, anchor: h.anchor, offset: t.anchor.start,
         // A teammate's suggestions are the author's to judge, and a teammate resolves only their own comments.
@@ -1293,7 +1310,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           className="grid gap-1.5 border-l border-branch pb-0.5 pl-[13px] pt-px font-sans text-[12.5px] leading-normal text-ink-2" />,
       }] : []),
     ];
-    const noted = openThreads.length > 0 || !!draft;
+    const noted = openThreads.length > 0 || !!pendingNotes.length || !!draft;
     const body = (s: PlanSectionDTO) => (s.kind === "mermaid" || s.kind === "svg" ? <Diagram section={s} figure={figures.get(s.id) ?? 1} /> : textBody(s.id, s.title));
     const cards = (at: string) => (placed.get(at) ?? []).map((d) => (
       <Annotated key={d.id} notes={notesFor(`decision:${d.id}`)}>
@@ -1354,6 +1371,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             </>
           )}
         </div>
+        <SignOffDelivery rev={frozen?.id ?? plan.rev} />
         {teammate.rights.signOff && !teammate.signedOff && (
           <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked || left.length > 0} data-testid="plan-sign-off"
             title={left.length ? "Pick an option in every decision first" : undefined} data-again="signoff" onClick={() => void signOff()}>{signName}</LoadingButton>
@@ -1502,10 +1520,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       </>
     );
   }
-  if (designDoc) return planningDoc();
+  if (designDoc) return <ShowPlanChanges.Provider value={() => setHistoryOpen(true)}>{planningDoc()}</ShowPlanChanges.Provider>;
 
   return (
-    <>
+    <ShowPlanChanges.Provider value={() => { collapse(false); setTab("history"); }}>
       {chrome && (
         <ReaderBar lead={chrome.lead} badges={chrome.badges} actions={chrome.actions}
           version={<span className="whitespace-nowrap text-xs text-ink-3" title={`${plan.id} · rendered by brindle from the plan's own text${frozen ? ` · rev ${plan.rev}` : ""}`} data-testid="plan-rev">{versionLabel}</span>}
@@ -1598,6 +1616,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             </div>
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
+              <SignOffDelivery rev={frozen?.id ?? plan.rev} />
               {!next && teammate.rights.signOff && !teammate.signedOff && (
                 <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked} data-testid="plan-sign-off" data-again="signoff" onClick={() => void signOff()}>{signName}</LoadingButton>
               )}
@@ -1657,6 +1676,6 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         {footerNotes("col-span-full")}
         {error && !net && error !== gate?.unconfirmed?.message && <p role="alert" className="col-span-full text-xs text-sap">{error}</p>}
       </footer>
-    </>
+    </ShowPlanChanges.Provider>
   );
 }

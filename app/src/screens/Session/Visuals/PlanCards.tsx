@@ -9,6 +9,7 @@ import { useContext, useState, useSyncExternalStore } from "react";
 import { StoreContext } from "../../../store/useStore";
 import { message } from "./chrome";
 import { peerClass } from "./docAwareness";
+import { DeliveryStatus, useQueuedPick } from "./PlanDelivery";
 
 const card = "flex min-w-0 flex-col gap-2 rounded-lg border bg-canvas p-3 text-[12.5px] text-ink-2";
 const cardTitle = "text-[13.5px] font-semibold leading-5 text-ink";
@@ -110,8 +111,11 @@ const optionRow = "grid grid-cols-[14px_minmax(0,1.15fr)_minmax(0,1.5fr)_minmax(
    "recommended", the trade-offs as + and − lines, the files it would touch, and who voted for it.
    A row is a radio: the person's selection is sent with their verdict. */
 export function Decision({ decision: d, chosen, open, onPick, nameOf }: { decision: PlanDecisionDTO; chosen: string | null; open: boolean; onPick(option: string): void; nameOf?(who: string): string }) {
+  const delivery = useQueuedPick(d.id);
+  if (delivery) chosen = delivery.state === "refused" ? null : delivery.body.option ?? chosen;
   return (
     <div role="radiogroup" aria-label={d.title} className="-mx-2.5 grid min-w-0 [overflow-wrap:anywhere] font-sans text-[13px] leading-normal">
+      {delivery && <DeliveryStatus item={delivery} />}
       <div aria-hidden className={`${optionRow} border-line-strong pb-1.5 pt-1 text-[11px] font-medium uppercase tracking-[0.08em] text-ink-3`}>
         <span />
         <span>Option</span>
@@ -131,7 +135,7 @@ export function Decision({ decision: d, chosen, open, onPick, nameOf }: { decisi
               e.preventDefault();
               onPick(o.id);
             }}>
-            <span aria-hidden className={`mt-1 size-3 rounded-full ${picked ? "border-4 border-branch" : "border-[1.5px] border-line-strong"}`} />
+            <span aria-hidden className={`mt-1 size-3 rounded-full ${picked ? "border-4 border-branch" : "border-[1.5px] border-line-strong"} ${delivery?.state === "refused" && delivery.body.option === o.id ? "border-dashed" : ""}`} />
             <span className="grid min-w-0 justify-items-start gap-0.5">
               <b className="font-medium text-ink">{o.label}</b>
               {o.id === d.mine && <span className={`${pill} max-w-full whitespace-normal text-pass`}>recommended</span>}

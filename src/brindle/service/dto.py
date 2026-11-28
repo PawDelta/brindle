@@ -663,6 +663,14 @@ class DesignTaskDTO(_DTO):
     state: str
 
 
+class PlanDeliveryItemDTO(_DTO):
+    client_id: str
+    tail: str
+    state: Literal["waiting", "sending", "refused", "sent"]
+    body: dict[str, Any]
+    code: str | None = None
+
+
 class PlanDTO(_DTO):
     """A planning doc (brindle.plans): markdown brindle renders itself, split
     into its ``##`` sections. ``state``: open (the person hasn't decided),
@@ -683,6 +691,7 @@ class PlanDTO(_DTO):
     lede: str
     sections: list[PlanSectionDTO]
     decisions: list[PlanDecisionDTO]
+    outbox: list[PlanDeliveryItemDTO] = []
     split: list[PlanWorkerDTO]
     verdict: PlanVerdictDTO | None = None
     queued: int

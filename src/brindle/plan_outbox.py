@@ -1,0 +1,145 @@
+"""Ordered delivery of one account's changes to a shared Library plan."""
+
+import json
+import threading
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
+from uuid import uuid4
+
+from brindle import airgap, config
+from brindle.db import DB
+from brindle.pro.analysis_docs import Refused
+from brindle.redact import mask
+from brindle.service.errors import ServiceError, network_error
+
+current = ContextVar("plan_outbox", default=None)
+_locks = [threading.Lock() for _ in range(64)]
+
+
+@contextmanager
+def writing(db, client_id, repo):
+    legacy = client_id is None
+    if client_id is None:
+        client_id = uuid4().hex
+    if not isinstance(client_id, str) or not 1 <= len(client_id) <= 128:
+        raise ServiceError("invalid", "The change needs a valid client id.")
+    token = current.set((db, client_id, repo, legacy))
+    try:
+        yield
+    finally:
+        current.reset(token)
+
+
+@contextmanager
+def destination():
+    if active := current.get():
+        yield active
+        return
+    db = DB()
+    try:
+        yield db, uuid4().hex, None, True
+    finally:
+        db.conn.close()
+
+
+def _matching_id(view, owner, tail, body):
+    """Newest matching thread or reply. Older Libraries have no replay key."""
+    matches = []
+    for thread in view.get("threads") or []:
+        if not isinstance(thread, dict) or not isinstance(thread.get("id"), int):
+            continue
+        if "parent" in body:
+            if thread.get("id") == body["parent"]:
+                matches.extend(r["id"] for r in thread.get("replies") or []
+                               if isinstance(r, dict) and isinstance(r.get("id"), int)
+                               and r.get("author") == owner and r.get("text") == body["text"])
+            continue
+        if thread.get("author") != owner or thread.get("rev") != body["rev"]:
+            continue
+        anchor = thread.get("anchor") or {}
+        if not isinstance(anchor, dict):
+            continue
+        if tail == "/suggestions":
+            if (thread.get("kind") == "suggestion" and thread.get("after") == body["after"]
+                    and all(anchor.get(k) == body[v] for k, v in
+                            (("section", "section"), ("start", "start"), ("quote", "before")))):
+                matches.append(thread["id"])
+        elif (thread.get("kind") == "comment" and thread.get("text") == body["text"]
+              and all(anchor.get(k) == v for k, v in body["anchor"].items())):
+            matches.append(thread["id"])
+    return max(matches, default=-1)
+
+
+def deliver(db, owner, doc, send, load, *, item=None, read=False, legacy=False):
+    """Persist before sending. A reconnect uses the same account, revision and key."""
+    conn = db.conn
+    if item:
+        client_id, tail, body, repo = item
+        conn.execute(
+            "INSERT INTO plan_outbox(owner,doc,client_id,tail,payload,repo) VALUES(?,?,?,?,?,?) "
+            "ON CONFLICT(owner,doc,client_id) DO NOTHING",
+            (owner, doc, client_id, tail, json.dumps(body), repo),
+        )
+    with _locks[hash((db.path, owner, doc)) % len(_locks)]:
+        view = load() if read else None
+        features = view.get("features", []) if view is not None else None
+        for row in conn.execute("SELECT * FROM plan_outbox WHERE owner=? AND doc=? AND state='waiting' ORDER BY seq",
+                                (owner, doc)).fetchall():
+            body = json.loads(row["payload"])
+            if row["repo"]:
+                config.load_repo_config(row["repo"])
+            if airgap.enabled():
+                break
+            try:
+                tail = row["tail"]
+                already_saved = False
+                if tail in ("/comments", "/suggestions"):
+                    if features is None:
+                        view = load()
+                        features = view.get("features") or []
+                    feature = "comment_idempotency" if tail == "/comments" else "suggestion_idempotency"
+                    match = _matching_id(view, owner, tail, body)
+                    if row["prior_match"] is None:
+                        conn.execute("UPDATE plan_outbox SET prior_match=?, keyed=? WHERE seq=?",
+                                     (match, feature in features, row["seq"]))
+                    elif not row["keyed"] or feature not in features:
+                        already_saved = match > row["prior_match"]
+                    if feature in features:
+                        body["idempotency_key"] = row["client_id"]
+                if not already_saved:
+                    view = send(tail, body)
+            except Exception as exc:
+                if network_error(exc):
+                    break
+                if not isinstance(exc, Refused) or exc.status not in (400, 403, 404, 409, 422):
+                    raise
+                reason = {403: "forbidden", 404: "forbidden", 409: "stale"}.get(exc.status, "invalid")
+                conn.execute("UPDATE plan_outbox SET state='refused', code=? WHERE seq=?", (reason, row["seq"]))
+                if legacy and item and item[0] == row["client_id"]:
+                    raise
+            else:
+                # Keep the receipt and its target. The delivered text belongs in the Library.
+                target = {k: body[k] for k in ("decision", "rev", "option", "parent") if k in body}
+                if tail in ("/comments", "/suggestions"):
+                    target["thread_item"] = _matching_id(view, owner, tail, body)
+                if tail in ("/votes", "/sign-offs"):
+                    conn.execute("UPDATE plan_outbox SET state='sent',sent_at=0,payload='{}' "
+                                 "WHERE owner=? AND doc=? AND tail=? AND seq<? AND state='refused' "
+                                 "AND json_extract(payload,'$.decision') IS ?",
+                                 (owner, doc, tail, row["seq"], body.get("decision")))
+                conn.execute("UPDATE plan_outbox SET state='sent', sent_at=?, payload=? WHERE seq=?",
+                             (time.time(), json.dumps(target), row["seq"]))
+        rows = conn.execute("SELECT * FROM plan_outbox WHERE owner=? AND doc=? AND "
+                            "(state!='sent' OR sent_at>?) ORDER BY seq", (owner, doc, time.time() - 3))
+        items = []
+        for row in rows:
+            body = json.loads(row["payload"])
+            for field in ("text", "before", "after"):
+                if isinstance(body.get(field), str):
+                    body[field] = mask(body[field])
+            if isinstance(body.get("anchor"), dict):
+                body["anchor"] = {k: body["anchor"][k] for k in ("section", "decision") if k in body["anchor"]}
+            items.append({"client_id": row["client_id"], "tail": row["tail"], "state": row["state"],
+                          "code": row["code"], "body": body})
+        return view, items

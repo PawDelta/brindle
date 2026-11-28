@@ -66,6 +66,22 @@ it.each(["shared", "author"])("keeps reviewers in Share and bounds the %s reader
   expect(within(decision).getByTitle(name).textContent).toBe("DJ");
 });
 
+it("shows an author's local comment waiting until the shared plan syncs", async () => {
+  const plan = doc(1, "Read this", { threads: [{ id: 4, rev: 1, author: "person", at: 1, text: "Check this",
+    kind: "comment", status: "open", anchor: { kind: "section", section: "summary" } }] });
+  const change = { client_id: "local-4", tail: "/comments", body: { thread_item: 4 } };
+  const open = (state: "waiting" | "sent") => {
+    const shown = { ...plan, outbox: [{ ...change, state }] };
+    const client = { ...visuals, ...docWrites(() => shown), plan: async () => shown, decidePlan: async () => shown };
+    return <PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />;
+  };
+  const view = render(open("waiting"));
+  const comment = await screen.findByText("Check this");
+  expect(comment.dataset.state).toBe("waiting");
+  await act(async () => view.rerender(open("sent")));
+  expect(screen.getByText("Check this").dataset.state).toBe("sent");
+});
+
 /* Who reviews the doc, and sharing it, open over the page from the toolbar's Share. */
 const openShare = async () => fireEvent.click(await screen.findByRole("button", { name: "Share" }));
 

@@ -1267,8 +1267,14 @@ def test_a_comment_the_library_committed_before_a_server_error_stays_one_thread(
     mine = plan_docs.comment(db, pid, 1, {"kind": "section", "section": "summary"}, "Which ones?")
     lib.answer_status = 500
     sd.sync(db, pid, **net)
+    def delivery():
+        return next(item["state"] for item in plans.to_dto(db, plans.get(db, pid))["outbox"]
+                    if item["body"]["thread_item"] == mine)
+
+    assert delivery() == "waiting"
     lib.answer_status = 200
     sd.sync(db, pid, **net)
+    assert delivery() == "sent"
     assert len(lib.threads) == 1 and len(sent(backend, f"POST {DESIGN}/comments")) == 1
     assert [t["author"] for t in plan_docs.fields(db, plans.get(db, pid))["threads"]] == ["person"]
 

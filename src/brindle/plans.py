@@ -521,6 +521,7 @@ def holding_count(db: DB, root_id: str, plan_id: str) -> int:
 
 def to_dto(db: DB, p: dict) -> dict:
     from brindle import plan_docs
+    from brindle.pro.shared_docs import author_delivery
     from brindle.service.dto import PlanDTO
 
     return PlanDTO(id=p["id"], session=p["root_id"], title=p["visual"]["title"], rev=p["rev"],
@@ -528,7 +529,7 @@ def to_dto(db: DB, p: dict) -> dict:
                    verdict=p["decision"], queued=_queued(db, p["root_id"]) if p["state"] in HOLDING else 0,
                    created_at=p["created_at"], gate=gate(db, p), team_ended=_team_ended(db, p),
                    reference=doc_templates.reference_of(db, p["id"]), alongside=alongside(db, p["id"]),
-                   **plan_docs.fields(db, p)).to_json()
+                   outbox=author_delivery(db, p["id"]), **plan_docs.fields(db, p)).to_json()
 
 
 def assignment(db: DB, caller: Agent, ref: str) -> tuple[str, str]:

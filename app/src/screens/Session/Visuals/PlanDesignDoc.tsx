@@ -14,6 +14,7 @@ import { createContext, memo, useContext, useEffect, useLayoutEffect, useRef, us
 import { usePlanDraft } from "./planDrafts";
 import type { Plan } from "../../../api/client";
 import type { PlanAnswerDTO, PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
+import { DeliveryStatus, NoteStatus, NoteText, PendingReplies, useQueuedPick } from "./PlanDelivery";
 import { ago } from "../../../components/ProviderConnect";
 import { button, field, pill, quiet } from "../../../components/ui";
 import { SupervisorReplying, type ThreadActions } from "./DocReview";
@@ -367,6 +368,8 @@ export function DecisionCard({ decision: d, n, of, open, canPick, disabled = fal
   onPick(option: string): void;
   onComment?: () => void;
 }) {
+  const delivery = useQueuedPick(d.id);
+  if (delivery) picked = delivery.state === "refused" ? null : delivery.body.option ?? picked;
   const waiting = open && !picked;
   const needsPick = waiting && canPick;
   const done = !!picked;
@@ -376,7 +379,7 @@ export function DecisionCard({ decision: d, n, of, open, canPick, disabled = fal
       className={`relative min-w-0 [overflow-wrap:anywhere] mb-1.5 mt-[26px] scroll-mt-16 rounded-md border border-l-2 font-sans transition-colors duration-200 ${needsPick ? "border-[color-mix(in_srgb,var(--sap)_42%,transparent)] border-l-sap bg-[color-mix(in_srgb,var(--sap)_5%,transparent)]" : "border-line border-l-line-strong"}`}>
       <div className="flex flex-wrap items-center justify-between gap-3 px-4 pt-3">
         <p className="m-0 text-[11px] font-medium uppercase leading-[1.3] tracking-[0.08em] text-ink-3">{`Decision ${n} of ${of}`}</p>
-        {needsPick ? <span className={`${pill} text-sap`}>Needs your pick</span>
+        {delivery ? <DeliveryStatus item={delivery} /> : needsPick ? <span className={`${pill} text-sap`}>Needs your pick</span>
           : waiting ? <span className="text-xs text-ink-3" data-testid="plan-decision-status" data-state="waiting-on-author">Not decided yet · {approver ?? "the author"} picks</span>
           : done ? <Tick>Decided{canPick
             ? <span className="font-normal text-ink-3" data-testid="plan-decision-approval" data-approver={approver ?? "you"}>· change it any time before {approver ? `${approver} approves` : "you approve"}</span>
@@ -394,7 +397,7 @@ export function DecisionCard({ decision: d, n, of, open, canPick, disabled = fal
             <label key={o.id} data-testid="plan-option" data-option={o.id} data-chosen={chosen || undefined}
               className={`relative grid grid-cols-[16px_minmax(0,1fr)] gap-x-3 border-t border-line px-4 pb-3 pt-[11px] transition-colors has-[:focus-visible]:outline-2 has-[:focus-visible]:-outline-offset-2 has-[:focus-visible]:outline-branch ${canPick ? "cursor-pointer hover:bg-[color-mix(in_srgb,var(--ink)_4%,transparent)]" : ""}`}>
               <input type="radio" name={`decision-${d.id}`} value={o.id} checked={chosen} disabled={!canPick || disabled} onChange={() => onPick(o.id)} className="absolute m-0 size-px opacity-0" />
-              <span aria-hidden className={`relative mt-[3px] size-[15px] rounded-full ${chosen ? "bg-pass-soft" : "shadow-[inset_0_0_0_1.5px_var(--line-strong)]"}`}>
+              <span aria-hidden className={`relative mt-[3px] size-[15px] rounded-full ${delivery?.state === "refused" && delivery.body.option === o.id ? "border border-dashed border-line-strong" : chosen ? "bg-pass-soft" : "shadow-[inset_0_0_0_1.5px_var(--line-strong)]"}`}>
                 {chosen && <span className="absolute left-[5px] top-[2.5px] h-2 w-1 rotate-45 border-b-[1.75px] border-r-[1.75px] border-solid border-pass" />}
               </span>
               <span className="min-w-0">
@@ -468,20 +471,23 @@ export function MarginNote({ thread: t, busy, canJudge, canReply, canResolve, ac
       <Who who={t.author_name ?? (t.author.startsWith("teammate:") ? "A teammate" : t.author)}><span>{suggestion ? `suggests · ${ago(t.at)}` : ago(t.at)}</span></Who>
       {suggestion && (
         <div className="ml-[25px] whitespace-pre-wrap break-words rounded-sm bg-surface-2 px-2 py-[5px] font-serif text-[13.5px] leading-normal" data-testid="suggestion-change">
-          {t.before && <del className="text-fail decoration-1">{t.before}</del>}
+          <NoteText id={t.id}>{t.before && <del className="text-fail decoration-1">{t.before}</del>}
           {t.before && t.after && " → "}
-          {t.after && <ins className="border-b border-pass text-pass no-underline">{t.after}</ins>}
+          {t.after && <ins className="border-b border-pass text-pass no-underline">{t.after}</ins>}</NoteText>
         </div>
       )}
-      {t.text && <p className="m-0 whitespace-pre-wrap break-words pl-[25px]">{t.text}</p>}
+      {t.text && <p className="m-0 whitespace-pre-wrap break-words pl-[25px]"><NoteText id={t.id}>{t.text}</NoteText></p>}
+      <NoteStatus id={t.id} />
       {t.anchor.state === "detached" && <p className="m-0 pl-[25px] text-ink-3">That text has since changed.</p>}
       {t.replies?.map((r) => (
         <div key={r.id} className="contents" data-from-supervisor={r.from_supervisor || undefined}>
           <Who who={r.from_supervisor ? "supervisor" : r.author_name ?? (r.author.startsWith("teammate:") ? "A teammate" : r.author)}><span>{ago(r.at)}</span></Who>
-          <p className="m-0 whitespace-pre-wrap break-words pl-[25px]">{r.text}</p>
+          <p className="m-0 whitespace-pre-wrap break-words pl-[25px]"><NoteText id={r.id} parent={t.id}>{r.text}</NoteText></p>
+          <NoteStatus id={r.id} parent={t.id} />
         </div>
       ))}
       {supervisorReplying && <SupervisorReplying />}
+      <PendingReplies thread={t.id} />
       {canReply && replying && (
         <form className="flex items-center gap-2 pl-[25px]" onSubmit={(e) => void send(e)}>
           <input className={`${field} min-w-0 flex-1 text-[12.5px]`} aria-label="Reply" placeholder="Reply…" autoFocus value={text} onChange={(e) => setDraft(e.target.value || null)} />

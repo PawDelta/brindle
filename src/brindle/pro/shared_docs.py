@@ -815,8 +815,8 @@ def _link_own(c, plan_id: str, owner: str, known: dict, threads: Any) -> None:
         if waiting.get(key) and remote_id not in known:
             local = waiting[key].pop(0)
             c.execute("DELETE FROM plan_share_threads WHERE plan_id=? AND remote_id=?", (plan_id, -local))
-            c.execute("INSERT INTO plan_share_threads (plan_id, remote_id, local_id, status) VALUES (?,?,?,?)",
-                      (plan_id, remote_id, local, status))
+            c.execute("INSERT INTO plan_share_threads (plan_id, remote_id, local_id, status, delivered_at) "
+                      "VALUES (?,?,?,?,?)", (plan_id, remote_id, local, status, time.time()))
             known[remote_id] = {"local_id": local, "status": status}
 
     for t in threads or []:
@@ -981,6 +981,33 @@ def _unsent(db: DB, plan_id: str) -> list:
         (plan_id, plan_docs.PERSON, plan_docs.SUPERVISOR, plan_id, plan_docs.PERSON, plan_id, SENDING)).fetchall()
 
 
+def author_delivery(db: DB, plan_id: str) -> list[dict]:
+    share = link(db, plan_id)
+    if not share or not share["doc_id"]:
+        return []
+    now = time.time()
+    sending = (share["claimed_at"] or 0) > now - CLAIM_FOR
+    items = {}
+    for row in _unsent(db, plan_id):
+        if row["author"] == plan_docs.PERSON:
+            items[row["id"]] = (row, "waiting", None)
+    for row in db.conn.execute(
+            "SELECT t.id,t.kind,t.parent_id,s.status,s.remote_id FROM plan_share_threads s "
+            "JOIN plan_threads t ON t.id=s.local_id WHERE s.plan_id=? AND t.author=? AND "
+            "(s.delivered_at>? OR s.status IN ('sending','refused_access','refused_stale'))",
+            (plan_id, plan_docs.PERSON, now - 3)):
+        state, code = "sent", None
+        if row["status"] == SENDING:
+            state = "sending" if sending else "waiting"
+        elif row["status"].startswith("refused_"):
+            state, code = "refused", "forbidden" if row["status"] == "refused_access" else "stale"
+        items[row["id"]] = (row, state, code)
+    return [{"client_id": f"local-{i}", "state": state, "code": code,
+             "tail": "/suggestions" if row["kind"] == "suggestion" else "/comments",
+             "body": {"thread_item": i, **({"parent": row["parent_id"]} if row["parent_id"] is not None else {})}}
+            for i, (row, state, code) in items.items()]
+
+
 def _send_thread(db: DB, plan_id: str, owner: str, head: _Head, t: Any, on: dict, replica=None) -> None:
     """Make thread or reply ``t`` in the Library, placed by revision ``on``,
     or, on a live draft (``replica``), by the draft's text and the anchor's
@@ -1017,10 +1044,13 @@ def _send_thread(db: DB, plan_id: str, owner: str, head: _Head, t: Any, on: dict
     with db.tx() as c:
         if status == 200:
             _link_own(c, plan_id, owner, _known(c, plan_id), head.view.get("threads"))
+        elif status in (403, 409):
+            c.execute("UPDATE plan_share_threads SET status=? WHERE plan_id=? AND remote_id=?",
+                      ("refused_access" if status == 403 else "refused_stale", plan_id, -t["id"]))
         elif status < 500:      # refused outright. After a server error it may have landed: the next pull will say
             c.execute("DELETE FROM plan_share_threads WHERE plan_id=? AND remote_id=?", (plan_id, -t["id"]))
     if status != 200:
-        log.info("shared doc %s: %s refused (%s), kept for the next sync", head.doc_id, tail, resp.get("error"))
+        log.info("shared doc %s: %s refused (%s)", head.doc_id, tail, resp.get("error"))
 
 
 def _send_revision(db: DB, plan_id: str, head: _Head, rev: int) -> bool:
@@ -1425,6 +1455,7 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
             return {**link(db, p["id"]), "pulled": 0, "pushed": False}
         raise
     _team_active(db, p, store)
+    pending_threads = {row["id"] for row in _unsent(db, p["id"])}
     imported = _import(db, p, share_, view)
     share_ = link(db, p["id"])
     # The draft's updates go before the threads, so what those are anchored on is there.
@@ -1451,7 +1482,8 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
     if changes:
         plan_docs._changed(db, p, p["rev"])
     pushed = _send(db, p, view, client, store, time.time() if now is None else now, acked)
-    if pushed or imported or typed:
+    delivery_changed = pending_threads and pending_threads.difference(row["id"] for row in _unsent(db, p["id"]))
+    if pushed or imported or typed or delivery_changed:
         plan_docs._changed(db, p, p["rev"])
     return {**link(db, p["id"]), "pulled": imported + typed + changes, "pushed": pushed,
             **({"access": access} if access is not None else {})}
@@ -1735,4 +1767,7 @@ def sync_open(db: DB, *, client=None, store=None) -> int:
             plans.settle_held_approval(db, row["plan_id"])
         except Exception:  # noqa: BLE001 - it stays held: the next pass looks again
             log.warning("brindle: couldn't settle plan %s's held approval", row["plan_id"], exc_info=True)
+    from brindle.pro import shared_reader
+
+    shared_reader.drain_pending(db, ent.sub, client, store)
     return done

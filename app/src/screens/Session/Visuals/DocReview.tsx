@@ -14,6 +14,7 @@ import { useState, type FormEvent, type ReactNode } from "react";
 import { usePlanDraft } from "./planDrafts";
 import type { Plan, PlanAnchor } from "../../../api/client";
 import type { PlanThreadDTO } from "../../../api/schema";
+import { NoteStatus, NoteText, PendingNote, PendingReplies, usePendingNotes } from "./PlanDelivery";
 import { ago } from "../../../components/ProviderConnect";
 import { ChevronRightIcon, CommentIcon } from "../../../components/icons";
 import { button, field, label, main, quiet } from "../../../components/ui";
@@ -148,8 +149,10 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
         <time className="whitespace-nowrap" dateTime={new Date(t.at * 1000).toISOString()} title={new Date(t.at * 1000).toLocaleString()}>{ago(t.at)}</time>
       </button>
       <Who who={t.author_name ?? (t.author.startsWith("teammate:") ? "A teammate" : t.author)} />
-      {suggestion && <Change before={t.before ?? ""} after={t.after ?? ""} />}
-      {t.text && <span className="whitespace-pre-wrap break-words">{t.text}</span>}
+      {suggestion && <NoteText id={t.id}><Change before={t.before ?? ""} after={t.after ?? ""} /></NoteText>}
+      {t.text && <span className="whitespace-pre-wrap break-words"><NoteText id={t.id}>{t.text}</NoteText></span>}
+      <NoteStatus id={t.id} />
+      <PendingReplies thread={t.id} />
       {t.attachments?.map((name) => (
         <span key={name} title={name} className="max-w-full justify-self-start truncate rounded-sm border border-line px-1.5 py-px font-mono text-[11px] text-ink-2">{name}</span>
       ))}
@@ -161,7 +164,8 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
                 <Who who={r.from_supervisor ? (t.author_name ?? t.author) : (r.author_name ?? (r.author.startsWith("teammate:") ? "A teammate" : r.author))} supervisor={r.from_supervisor} />
                 <span className="ml-auto text-[11.5px] text-ink-3">{ago(r.at)}</span>
               </div>
-              <span className="whitespace-pre-wrap break-words">{r.text}</span>
+              <span className="whitespace-pre-wrap break-words"><NoteText id={r.id} parent={t.id}>{r.text}</NoteText></span>
+              <NoteStatus id={r.id} parent={t.id} />
             </div>
           ))}
           {supervisorReplying && <SupervisorReplying />}
@@ -276,6 +280,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
   workItems?: WorkItem[] | null;
 }) {
   const threads = plan.threads ?? [];
+  const pendingNotes = usePendingNotes();
   const open = threads.filter((t) => t.status === "open");
   const answered = threads.filter((t) => t.status !== "open");
   const counts: Record<ReviewTab, string | null> = { comments: String(open.length), decisions: todo.length ? `${decided}/${todo.length}` : null, history: null, tasks: null };
@@ -323,7 +328,8 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
       <>
         {draft && <DraftCard key={`${draft.kind}:${draft.where}`} draft={draft} number={nextNumber} stale={draftStale} busy={busy} text={draftText} onText={onDraftText} onSend={onDraftSend} onCancel={onDraftCancel} change={draftChange} />}
         {open.map(thread)}
-        {open.length === 0 && !draft && <p className="px-3.5 py-3 text-ink-3">No open comments. Highlight any text in the plan to comment on it.</p>}
+        {pendingNotes.map(item => <PendingNote key={item.client_id} item={item} />)}
+        {open.length === 0 && !pendingNotes.length && !draft && <p className="px-3.5 py-3 text-ink-3">No open comments. Highlight any text in the plan to comment on it.</p>}
         {answered.length > 0 && (
           <div data-testid="plan-resolved">
             <p className={`${label} border-b border-line px-3.5 pb-1.5 pt-3 text-[11px]`}>{`Resolved · ${answered.length}`}</p>

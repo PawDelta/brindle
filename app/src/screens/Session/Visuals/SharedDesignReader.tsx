@@ -2,12 +2,11 @@
    (PlanReader.tsx) on the Library's copy. Read, comment, suggest,
    vote and sign off, as far as the Library lets this account; never approve or build. Editing is
    offered only where the doc's text is live and the Library lets this account write: the live
-   text, never a revision of its own. Nothing is kept on this machine: the doc lives in this
-   component's state and is read from the Library again while open, so losing access takes it off
-   the screen. */
+   text, never a revision of its own. The document lives in memory and access is checked again
+   while open. The daemon holds pending review changes for this account. */
 
-import { useEffect, useMemo, useState } from "react";
-import type { LibraryPerson, SharedDesign } from "../../../api/client";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { LibraryPerson, PlanDeliveryItem, SharedDesign } from "../../../api/client";
 import type { ShareLinkClient, SharedDesignClient } from "./client";
 import { designLinkTarget } from "./ShareLink";
 import type { LiveClient } from "./DocEditor";
@@ -18,6 +17,7 @@ import { DesignDoc, MODES, useDoc, type Mode, type Teammate } from "./PlanReader
 import type { Work } from "./WorkPanel";
 import { displayName } from "./PlanCards";
 import { AccessRequest } from "./AccessRequest";
+import { PlanDeliveryProvider, QueueCount } from "./PlanDelivery";
 
 /* How often a design open here is read again: what teammates wrote, and whether it can still be opened. */
 const READ_EVERY_MS = 30_000;
@@ -34,9 +34,11 @@ function observeVisibleReads(read: () => void) {
   };
   update();
   document.addEventListener("visibilitychange", update);
+  window.addEventListener("online", update);
   return () => {
     clearInterval(timer);
     document.removeEventListener("visibilitychange", update);
+    window.removeEventListener("online", update);
   };
 }
 
@@ -53,6 +55,12 @@ function named(doc: SharedDesign, directory: LibraryPerson[]): SharedDesign {
     : (names[who] !== "A teammate" && names[who]) || (label !== "A teammate" && label) || "A teammate";
   return {
     ...doc,
+    signed_off: doc.signed_off || doc.outbox?.some(item => item.state === "waiting" && item.tail === "/sign-offs" && item.body.rev === doc.rev),
+    decisions: doc.decisions.map(d => {
+      const pick = doc.outbox?.filter(item => item.tail === "/votes" && item.body.decision === d.id).at(-1);
+      if (!pick || pick.state === "sent") return d;
+      return { ...d, confirmed: pick.state === "refused" ? null : pick.body.option };
+    }),
     teammate_names: names,
     threads: doc.threads?.map((t) => ({ ...t, author_name: name(t.author, t.author_name), replies: t.replies?.map((r) => ({ ...r, author_name: name(r.author, r.author_name) })) })),
   };
@@ -71,7 +79,12 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
   backLabel?: string;
 }) {
   useEscBack(onBack);
-  const source = useMemo(() => sharedSource(client, docId, repo), [client, docId, repo]);
+  const account = useRef<string | undefined>(undefined);
+  const [sending, setSending] = useState<{ docId: string; me?: string; item: PlanDeliveryItem } | null>(null);
+  const source = useMemo(() => sharedSource(client, docId, repo, item => {
+    const pending = item && { docId, me: account.current, item };
+    setSending(previous => pending ?? (previous?.docId === docId ? null : previous));
+  }), [client, docId, repo]);
   const [mode, setMode] = useState<Mode>("viewing");
   const [directory, setDirectory] = useState<LibraryPerson[]>([]);
   useEffect(() => {
@@ -80,7 +93,13 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
     return () => { live = false; };
   }, [client]);
   const { doc, error, writes } = useDoc(source, undefined, undefined, observeVisibleReads);
-  const shown = useMemo(() => doc && { ...named(doc, directory), title: title ?? doc.title }, [doc, directory, title]);
+  account.current = doc?.me;
+  const shown = useMemo(() => {
+    if (!doc) return null;
+    const current = sending?.docId === doc.id && sending.me === doc.me
+      ? { ...doc, outbox: [...(doc.outbox ?? []), sending.item] } : doc;
+    return { ...named(current, directory), title: title ?? doc.title };
+  }, [doc, directory, title, sending]);
   const allowed = (m: Mode) => m === "viewing" || (!!shown?.can_suggest && m === "suggesting") || (m === "editing" && !!shown?.can_edit && !!client.visualLive);
   const current = allowed(mode) ? mode : "viewing";
   const teammate: Teammate | undefined = shown ? {
@@ -95,6 +114,7 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
   const lead = (
     <>
       <BackButton onBack={onBack} label={backLabel} />
+      <QueueCount items={doc?.outbox} />
       <span className="mx-1 h-5 w-px bg-line" aria-hidden />
       <h2 title={title ?? shown?.title} className="min-w-0 truncate text-[13px] font-semibold">{title ?? shown?.title ?? "Plan"}</h2>
     </>
@@ -102,11 +122,11 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="shared-design-reader">
       {doc && shown && teammate ? (
-        <DesignDoc key={shown.id} source={source} teammate={teammate} plan={shown} mode={current} writes={writes} work={work}
+        <PlanDeliveryProvider key={shown.id} items={shown.outbox ?? []}><DesignDoc source={source} teammate={teammate} plan={shown} mode={current} writes={writes} work={work}
           top={<AccessRequest key={docId} client={client} doc={doc} repo={repo} />}
           shareLink={shown.can_edit ? designLinkTarget(client, docId, repo) : undefined}
           liveClient={client.visualLive ? client as LiveClient : undefined}
-          chrome={{ lead, modes: (client.visualLive ? MODES : COLUMN_MODES).map((m) => m.id === "viewing" && !shown.can_comment ? { ...m, hint: "Read this plan" } : m), allowed, onMode: setMode }} />
+          chrome={{ lead, modes: (client.visualLive ? MODES : COLUMN_MODES).map((m) => m.id === "viewing" && !shown.can_comment ? { ...m, hint: "Read this plan" } : m), allowed, onMode: setMode }} /></PlanDeliveryProvider>
       ) : (
         <>
           <ReaderBar lead={lead} />

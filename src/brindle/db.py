@@ -1334,6 +1334,21 @@ CREATE TABLE IF NOT EXISTS doc_questions (
     PRIMARY KEY (doc_id, thread_id, owner)
 );
 -- Votes on a plan's decisions (Confirm A): one per voter and decision.
+CREATE TABLE IF NOT EXISTS plan_outbox (
+    seq INTEGER PRIMARY KEY,
+    owner TEXT NOT NULL,
+    doc TEXT NOT NULL,
+    client_id TEXT NOT NULL,
+    tail TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    prior_match INTEGER,
+    keyed INTEGER,
+    repo TEXT,
+    state TEXT NOT NULL DEFAULT 'waiting',
+    code TEXT,
+    sent_at REAL,
+    UNIQUE(owner, doc, client_id)
+);
 CREATE TABLE IF NOT EXISTS plan_votes (
     plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
     decision_id TEXT NOT NULL,
@@ -1538,6 +1553,7 @@ CREATE TABLE IF NOT EXISTS plan_share_threads (
     remote_id INTEGER NOT NULL,
     local_id INTEGER NOT NULL REFERENCES plan_threads(id) ON DELETE CASCADE,
     status TEXT NOT NULL,
+    delivered_at REAL,
     PRIMARY KEY (plan_id, remote_id)
 );
 """
@@ -2092,6 +2108,9 @@ class DB:
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
+        share_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_share_threads)")}
+        if "delivered_at" not in share_cols:
+            self.conn.execute("ALTER TABLE plan_share_threads ADD COLUMN delivered_at REAL")
         thread_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_threads)")}
         if "author_name" not in thread_cols:
             self.conn.execute("ALTER TABLE plan_threads ADD COLUMN author_name TEXT")

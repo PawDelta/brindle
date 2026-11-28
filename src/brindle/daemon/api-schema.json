@@ -6950,6 +6950,53 @@
           "title": "PlanDecisionDTO",
           "type": "object"
         },
+        "PlanDeliveryItemDTO": {
+          "properties": {
+            "body": {
+              "additionalProperties": true,
+              "title": "Body",
+              "type": "object"
+            },
+            "client_id": {
+              "title": "Client Id",
+              "type": "string"
+            },
+            "code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Code"
+            },
+            "state": {
+              "enum": [
+                "waiting",
+                "sending",
+                "refused",
+                "sent"
+              ],
+              "title": "State",
+              "type": "string"
+            },
+            "tail": {
+              "title": "Tail",
+              "type": "string"
+            }
+          },
+          "required": [
+            "client_id",
+            "tail",
+            "state",
+            "body"
+          ],
+          "title": "PlanDeliveryItemDTO",
+          "type": "object"
+        },
         "PlanGateDTO": {
           "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:\nevery org review rule covering it, including those a listed reviewer meets.\n``approval_refused``: why an Approve held for the Library wasn't applied.",
           "properties": {
@@ -8010,6 +8057,14 @@
           "title": "Markdown",
           "type": "string"
         },
+        "outbox": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanDeliveryItemDTO"
+          },
+          "title": "Outbox",
+          "type": "array"
+        },
         "queued": {
           "title": "Queued",
           "type": "integer"
@@ -8299,6 +8354,53 @@
         "options"
       ],
       "title": "PlanDecisionDTO",
+      "type": "object"
+    },
+    "PlanDeliveryItemDTO": {
+      "properties": {
+        "body": {
+          "additionalProperties": true,
+          "title": "Body",
+          "type": "object"
+        },
+        "client_id": {
+          "title": "Client Id",
+          "type": "string"
+        },
+        "code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Code"
+        },
+        "state": {
+          "enum": [
+            "waiting",
+            "sending",
+            "refused",
+            "sent"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "tail": {
+          "title": "Tail",
+          "type": "string"
+        }
+      },
+      "required": [
+        "client_id",
+        "tail",
+        "state",
+        "body"
+      ],
+      "title": "PlanDeliveryItemDTO",
       "type": "object"
     },
     "PlanGateDTO": {
@@ -13496,6 +13598,53 @@
           "title": "PlanDecisionDTO",
           "type": "object"
         },
+        "PlanDeliveryItemDTO": {
+          "properties": {
+            "body": {
+              "additionalProperties": true,
+              "title": "Body",
+              "type": "object"
+            },
+            "client_id": {
+              "title": "Client Id",
+              "type": "string"
+            },
+            "code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Code"
+            },
+            "state": {
+              "enum": [
+                "waiting",
+                "sending",
+                "refused",
+                "sent"
+              ],
+              "title": "State",
+              "type": "string"
+            },
+            "tail": {
+              "title": "Tail",
+              "type": "string"
+            }
+          },
+          "required": [
+            "client_id",
+            "tail",
+            "state",
+            "body"
+          ],
+          "title": "PlanDeliveryItemDTO",
+          "type": "object"
+        },
         "PlanGateDTO": {
           "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:\nevery org review rule covering it, including those a listed reviewer meets.\n``approval_refused``: why an Approve held for the Library wasn't applied.",
           "properties": {
@@ -14597,6 +14746,14 @@
         "me": {
           "title": "Me",
           "type": "string"
+        },
+        "outbox": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanDeliveryItemDTO"
+          },
+          "title": "Outbox",
+          "type": "array"
         },
         "queued": {
           "title": "Queued",
