@@ -27,8 +27,11 @@ const gate: Plan["gate"] = { state: "waiting", required: 1, signed: 0, waiting_o
   { sub: "alice", required: true, status: "waiting" }, { sub: "bob", required: false, status: "waiting" },
 ] };
 
+const decision: Plan["decisions"][number] = { id: "transport", title: "Transport", confirmed: "http", options: [{ id: "http", label: "HTTP", pros: [], cons: [] }] };
+const pick: NonNullable<Plan["outbox"]>[number] = { client_id: "pick", tail: "/votes", state: "waiting", body: { rev: 1, decision: "transport", option: "http" } };
+
 it("shows the author's gate and groups its signers by their effect on approval", async () => {
-  read({ gate, decisions: [{ id: "transport", title: "Transport", confirmed: "http", options: [{ id: "http", label: "HTTP", pros: [], cons: [] }] }] });
+  read({ gate, decisions: [decision] });
   const rail = await screen.findByTestId("review-rail");
   expect(within(rail).getByTestId("plan-build")).toHaveProperty("disabled", true);
   expect(within(rail).getByTestId("signoff-alice").closest("[data-group]")?.getAttribute("data-group")).toBe("required");
@@ -36,14 +39,33 @@ it("shows the author's gate and groups its signers by their effect on approval",
 });
 
 it("gives a reviewer the sign-off action in their rail", async () => {
-  read({ gate, outbox: [{ client_id: "feedback", tail: "/comments", state: "waiting", body: { rev: 1, text: "Check the delivery order." } }] }, true);
+  read({ gate }, true);
   const rail = within(await screen.findByTestId("review-rail"));
-  expect(rail.getByTestId("rail-queue").querySelector("article[data-state=waiting] [data-state=waiting]")).toBeTruthy();
   fireEvent.click(rail.getByRole("button", { name: "Comment" }));
   expect(within(rail.getByTestId("thread-draft")).getByRole("textbox")).toBeTruthy();
   await waitFor(() => expect(rail.getByTestId("plan-sign-off")).toHaveProperty("disabled", false));
   fireEvent.click(rail.getByTestId("plan-sign-off"));
   await waitFor(() => expect(rail.getByTestId("signoff-alice").dataset.state).toBe("signed"));
+});
+
+it("groups queued rail items under a single delivery status", async () => {
+  read({ gate, decisions: [decision], outbox: [pick,
+    { client_id: "reply", tail: "/comments", state: "sending", body: { rev: 1, parent: 1, thread_item: 2 } },
+  ] });
+  const rail = within(await screen.findByTestId("review-rail"));
+  const groups = rail.getAllByTestId("rail-queue");
+  expect(groups).toHaveLength(1);
+  expect(groups[0].querySelectorAll("[data-state] [data-state]")).toHaveLength(0);
+  expect(within(groups[0]).getByRole("heading").dataset.queueCount).toBe("2");
+  expect(groups[0].querySelectorAll("[data-state]")).toHaveLength(2);
+});
+
+it("shows a waiting author pick in the decision status slot", async () => {
+  read({ gate, decisions: [decision], outbox: [pick] });
+  const card = within(await screen.findByTestId("plan-decision"));
+  const header = card.getByRole("heading").previousElementSibling;
+  expect(header?.querySelector("[data-state=waiting]")).toBeTruthy();
+  expect(card.queryByTestId("plan-decision-approval")).toBeNull();
 });
 
 it("shows the linked item's title beside its tracker chip", async () => {
