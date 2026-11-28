@@ -5,7 +5,7 @@ import { SharedDesignReader } from "./SharedDesignReader";
 
 afterEach(cleanup);
 
-async function open(state: "waiting" | "refused") {
+async function open(state: "waiting" | "refused", failFirstAcknowledgment = false) {
   const doc = {
     id: "shared", session: "", title: "Workers", rev: 1, state: "open", markdown: "Where?", lede: "",
     sections: [{ id: "s", title: "Summary", markdown: "Where?" }],
@@ -21,6 +21,10 @@ async function open(state: "waiting" | "refused") {
   let current: SharedDesign = doc;
   const client = { sharedDesign: async () => current, writeSharedDesign: async () => doc,
     acknowledgeDesignReceipts: async (id: string, owner: string, ids: string[]) => {
+      if (failFirstAcknowledgment) {
+        failFirstAcknowledgment = false;
+        throw new Error("Offline");
+      }
       if (id === current.id && owner === current.me) {
         current = { ...current, outbox: current.outbox?.filter(item => !ids.includes(item.client_id)) };
       }
@@ -43,7 +47,7 @@ it("keeps the current pick and both earlier refusal receipts after reconnect", a
 });
 
 it("keeps a queued pick selected and dims a queued reply", async () => {
-  const { card, refresh, read } = await open("waiting");
+  const { card, refresh, read } = await open("waiting", true);
   expect(card.getByRole("radio").getAttribute("aria-checked")).toBe("true");
   expect(card.getByText("Waiting to send")).toBeTruthy();
   const reply = screen.getAllByText("For privacy.")[0].closest('[data-state="waiting"]');
@@ -52,11 +56,14 @@ it("keeps a queued pick selected and dims a queued reply", async () => {
   expect(screen.queryByText("For privacy.")).toBeNull();
   const receipt = screen.getByTestId("shared-design-reader").querySelector('[data-client-id="reply"] [data-state="sent"]');
   expect(receipt).toBeTruthy();
-  expect((await read()).outbox).toEqual([]);
+  expect((await read()).outbox).toHaveLength(1);
   // React selects the WebKit event in jsdom, which exposes WebkitAnimation without AnimationEvent.
   const end = "AnimationEvent" in window ? "animationend" : "webkitAnimationEnd";
   fireEvent(receipt!, new Event(end, { bubbles: true }));
   expect(receipt?.isConnected).toBe(false);
+  await refresh({});
+  expect((await read()).outbox).toEqual([]);
+  expect(screen.getByTestId("shared-design-reader").querySelector('[data-state="sent"]')).toBeNull();
 });
 
 it("opens the refused pick on its card with its previous choice marked", async () => {

@@ -188,9 +188,11 @@ export function useDoc<P extends Plan>(source: DocSource<P>, version: unknown, f
     const now = latest.current?.id === p.id ? latest.current : null;
     if (now && (progress(now) > progress(p) || (newer && progress(now) === progress(p)))) return false;
     // Votes, permissions and sign-offs can change without a revision or thread change.
-    if (now && now.rev === p.rev && (now === p || JSON.stringify(now) === JSON.stringify(p))) return true;
-    latest.current = p;
-    setDoc(p);
+    // A Sent receipt needs a commit on each accepted read until its acknowledgment reaches the daemon.
+    if (!p.outbox?.some(item => item.state === "sent") && now && now.rev === p.rev &&
+        (now === p || JSON.stringify(now) === JSON.stringify(p))) return true;
+    latest.current = now === p ? { ...p } : p;
+    setDoc(latest.current);
     return true;
   }, []);
   // Comments, picks and replies change the plan without moving it along, so nothing in a snapshot
