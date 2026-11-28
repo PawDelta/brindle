@@ -810,11 +810,10 @@ def outage(db, session, monkeypatch):
         return {"scope": {"kind": "user", "id": "me"}, "scopes": [{"kind": "user", "id": "me"}, {"kind": "group", "id": "t_1"}]}
 
     monkeypatch.setattr(shared_docs, "sync", sync)
-    monkeypatch.setattr(shared_docs, "_require_team", lambda store: SimpleNamespace(sub="me", org_id="org_1"))
     monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (None, None))
     monkeypatch.setattr(ad, "api", api)
     monkeypatch.setattr(license, "current", lambda **kw: SimpleNamespace(sub=line.signed_in, org_id="org_1", in_grace=False,
-                                                                         features=frozenset()))
+                                                                         features=frozenset((ad.FEATURE, shared_docs.TEAM_FEATURE))))
     return line
 
 

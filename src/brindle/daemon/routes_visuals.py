@@ -873,14 +873,13 @@ def review_policies_impact(db: DB, params: dict, body: dict) -> Any:
 
 
 # A design shared by someone else (brindle.pro.shared_reader), by its Library
-# doc id. Only the person reaches these; each answers with the design as the
-# Library has it now, and nothing is kept here.
+# doc id. The person's review writes can return an outbox receipt while offline.
 
 
 def _shared_design(repo: str | None, work: Callable[[Any], Any], *, require_entitlement: bool = True) -> Any:
     from pydantic import ValidationError
 
-    from brindle import airgap, config, keystore
+    from brindle import airgap, config, keystore, plan_outbox
     from brindle.daemon import routes_actions as actions
     from brindle.pro import analysis_docs, auth, shared_reader
 
@@ -891,13 +890,17 @@ def _shared_design(repo: str | None, work: Callable[[Any], Any], *, require_enti
             actions._docs_entitlement(repo, None if airgap.enabled() else analysis_docs._session()[1])
         return work(shared_reader)
     except (RuntimeError, auth.AuthError, keystore.KeychainReadBlocked, ValidationError) as e:
-        raise actions.upstream_error(e) from e
+        error = actions.upstream_error(e)
+        if isinstance(e, plan_outbox.AccessLost):
+            error.extra["refused_changes"] = e.receipts
+            error.extra["unconfirmed_changes"] = e.unconfirmed
+        raise error from e
 
 
 @_json
 def shared_design(db: DB, request: Request) -> Any:
     doc = request.path_params["doc_id"]
-    return _shared_design(request.query_params.get("repo") or None, lambda r: r.read(doc))
+    return _shared_design(request.query_params.get("repo") or None, lambda r: r.read(doc, db=db))
 
 
 @_json
@@ -975,15 +978,29 @@ def shared_design_comparison(db: DB, request: Request) -> Any:
                           lambda r: r.comparison(request.path_params["doc_id"], request.path_params["n"]))
 
 
+def _plan_change(db, body, work):
+    from brindle import plan_outbox
+
+    with plan_outbox.writing(db, body.get("client_id"), _get(body, "repo")):
+        return _shared_design(_get(body, "repo"), work)
+
+
+def shared_design_receipts(db: DB, params: dict, body: dict) -> Any:
+    return _shared_design(_get(body, "repo"), lambda r: r.acknowledge_receipts(
+        db, params["doc_id"], body.get("owner"), body.get("client_ids")))
+
+
 def shared_design_comment(db: DB, params: dict, body: dict) -> Any:
     """A comment, a reply (``parent``), or a question for the person's own
     supervisor, which starts it only once this answer has been written."""
     doc, repo, parent = params["doc_id"], _get(body, "repo"), _get(body, "parent", int)
     if parent is not None:
-        return _shared_design(repo, lambda r: r.reply(doc, body.get("rev"), parent, body.get("text")))
+        return _plan_change(db, body, lambda r: r.reply(doc, body.get("rev"), parent, body.get("text")))
     question = _get(body, "question", bool, default=False)
-    design = _shared_design(repo, lambda r: r.comment(doc, body.get("rev"), _get(body, "anchor", dict), body.get("text"),
-                                                      question=question))
+    def work(r):
+        return r.comment(doc, body.get("rev"), _get(body, "anchor", dict), body.get("text"), question=question)
+
+    design = _shared_design(repo, work) if question else _plan_change(db, body, work)
     if not question:
         return design
     from brindle.pro import doc_questions, shared_reader
@@ -997,7 +1014,7 @@ def shared_design_comment(db: DB, params: dict, body: dict) -> Any:
 
 
 def shared_design_suggest(db: DB, params: dict, body: dict) -> Any:
-    return _shared_design(_get(body, "repo"), lambda r: r.suggest(
+    return _plan_change(db, body, lambda r: r.suggest(
         params["doc_id"], body.get("rev"), body.get("section"), body.get("start"), body.get("before"), body.get("after"),
         body.get("text", "")))
 
@@ -1007,7 +1024,7 @@ def shared_design_thread(db: DB, params: dict, body: dict) -> Any:
 
 
 def shared_design_vote(db: DB, params: dict, body: dict) -> Any:
-    return _shared_design(_get(body, "repo"), lambda r: r.vote(params["doc_id"], body.get("rev"), body.get("decision"),
+    return _plan_change(db, body, lambda r: r.vote(params["doc_id"], body.get("rev"), body.get("decision"),
                                                                body.get("option")))
 
 
@@ -1029,7 +1046,7 @@ def shared_design_sign_off(db: DB, params: dict, body: dict) -> Any:
     screen: that version is what they read (its own text), so it is the one
     signed, even if their read of the revision came before the freeze."""
     version = body.get("version")
-    return _shared_design(_get(body, "repo"), lambda r: r.sign_off(
+    return _plan_change(db, body, lambda r: r.sign_off(
         params["doc_id"], body.get("rev") if version is None else version))
 
 
@@ -1301,6 +1318,7 @@ ROUTES = [
     Route("/v1/library/people", library_people),
     Route("/v1/share-links/design", _endpoint(share_link_design), methods=["POST"]),
     Route("/v1/shared-designs/{doc_id}", shared_design),
+    Route("/v1/shared-designs/{doc_id}/receipts", _endpoint(shared_design_receipts), methods=["POST"]),
     Route("/v1/shared-designs/{doc_id}/history", shared_design_history),
     Route("/v1/shared-designs/{doc_id}/revisions/{n:int}/changes", shared_design_comparison),
     Route("/v1/shared-designs/{doc_id}/comments", _endpoint(shared_design_comment), methods=["POST"]),

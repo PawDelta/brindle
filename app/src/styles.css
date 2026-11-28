@@ -580,3 +580,8 @@ body {
 .iq-clear b { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
 .iq-clear b svg { width: 16px; height: 16px; color: var(--pass); }
 .iq-clear span { max-width: 62ch; font-size: 13px; color: var(--ink-2); }
+@keyframes plan-delivery-sent {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+.plan-delivery-sent { animation: plan-delivery-sent 150ms ease-out 2s forwards; }

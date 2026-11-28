@@ -604,7 +604,7 @@ def test_required_reviewers_share_sign_off_and_build_through_the_daemon_routes(d
 
 
 def test_required_reviewers_are_synced_in_the_background(monkeypatch):
-    from brindle.daemon import lifecycle
+    from brindle.daemon import health, lifecycle
     from brindle.daemon.session_review import ReadinessWatch
 
     now, synced = [0.0], []
@@ -614,17 +614,24 @@ def test_required_reviewers_are_synced_in_the_background(monkeypatch):
 
     async def elapse(seconds):
         now[0] += lifecycle.SHARED_DOCS_EVERY + 1
-        await asyncio.to_thread(int)            # lets the sync's own task run
-        if synced:
-            Server.should_exit = True
+        Server.should_exit = True
+
+    async def watch():
+        await lifecycle._watch(Server(), lifecycle.Activity(build_app(TOKEN, port=8123)), False,
+                               wait=elapse, clock=lambda: now[0])
+        # Finish the background tasks dispatched by this watch tick.
+        await asyncio.gather(*(asyncio.all_tasks() - {asyncio.current_task()}))
 
     monkeypatch.setattr(lifecycle, "_sync_shared_docs", lambda: synced.append(True))
+    monkeypatch.setattr(health.Monitor, "tick", lambda *args: None)
+    monkeypatch.setattr(lifecycle, "_send_share_invites", lambda: None)
+    monkeypatch.setattr(lifecycle, "_provider_switch_sweep", lambda: None)
+    monkeypatch.setattr(lifecycle, "_provider_update_sweep", lambda refresh_policy: None)
     monkeypatch.setattr(ReadinessWatch, "sweep_safely", lambda self: None)
     monkeypatch.setattr(lifecycle, "_purge_typed_words", lambda: None)
     monkeypatch.setattr(lifecycle, "_keep_codex_hook", lambda settle=0.0: None)
     monkeypatch.setattr(lifecycle, "_cull_sweep", lambda: None)
-    asyncio.run(lifecycle._watch(Server(), lifecycle.Activity(build_app(TOKEN, port=8123)), False, wait=elapse,
-                                 clock=lambda: now[0]))
+    asyncio.run(watch())
     assert synced
 
 
@@ -1271,8 +1278,14 @@ def test_a_comment_the_library_committed_before_a_server_error_stays_one_thread(
     mine = plan_docs.comment(db, pid, 1, {"kind": "section", "section": "summary"}, "Which ones?")
     lib.answer_status = 500
     sd.sync(db, pid, **net)
+    def delivery():
+        return next(item["state"] for item in plans.to_dto(db, plans.get(db, pid))["outbox"]
+                    if item["body"]["thread_item"] == mine)
+
+    assert delivery() == "waiting"
     lib.answer_status = 200
     sd.sync(db, pid, **net)
+    assert delivery() == "sent"
     assert len(lib.threads) == 1 and len(sent(backend, f"POST {DESIGN}/comments")) == 1
     assert [t["author"] for t in plan_docs.fields(db, plans.get(db, pid))["threads"]] == ["person"]
 

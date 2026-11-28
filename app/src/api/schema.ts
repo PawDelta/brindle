@@ -68,6 +68,7 @@ export interface ApiSchema {
   PlanCommentDTO: PlanCommentDTO;
   PlanDTO: PlanDTO;
   PlanDecisionDTO: PlanDecisionDTO;
+  PlanDeliveryItemDTO: PlanDeliveryItemDTO;
   PlanGateDTO: PlanGateDTO;
   PlanGatePolicyDTO: PlanGatePolicyDTO;
   PlanGateRowDTO: PlanGateRowDTO;
@@ -1109,6 +1110,7 @@ export interface PlanDTO {
   id: string;
   lede: string;
   markdown: string;
+  outbox?: PlanDeliveryItemDTO[];
   queued: number;
   reference?: string | null;
   rev: number;
@@ -1280,6 +1282,19 @@ export interface PlanUnconfirmedDTO {
   can_stop_sharing?: boolean;
   message: string;
   reason: "offline" | "sign_in" | "key_unavailable" | "library_error" | "other_account" | "access_refused";
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanDeliveryItemDTO".
+ */
+export interface PlanDeliveryItemDTO {
+  body: {
+    [k: string]: unknown;
+  };
+  client_id: string;
+  code?: string | null;
+  state: "waiting" | "sending" | "refused" | "unconfirmed" | "sent";
+  tail: string;
 }
 /**
  * One revision of a plan: the supervisor's proposal, the person's edit
@@ -1795,6 +1810,7 @@ export interface SharedDesignDTO {
   lede: string;
   markdown: string;
   me: string;
+  outbox?: PlanDeliveryItemDTO[];
   queued: number;
   reference?: string | null;
   rev: number;
