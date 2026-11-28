@@ -24,7 +24,7 @@ describe("DocFormat", () => {
     fireEvent.change(screen.getByLabelText("Reference"), { target: { value: "DES-{number}" } });
     fireEvent.change(screen.getByLabelText("Title hint"), { target: { value: "What it does" } });
     fireEvent.click(screen.getByRole("checkbox", { name: /Sharing is blocked/ }));
-    fireEvent.click(screen.getByRole("checkbox", { name: /Sign-off is blocked/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Approval is blocked/ }));
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect((screen.getByRole("button", { name: "Save" }) as HTMLButtonElement).disabled).toBe(true));
     first.unmount();
@@ -37,7 +37,7 @@ describe("DocFormat", () => {
     expect(checked("New plans start from it")).toBe(true);
     expect((screen.getByLabelText("Reference") as HTMLInputElement).value).toBe("DES-{number}");
     expect((screen.getByLabelText("Title hint") as HTMLInputElement).value).toBe("What it does");
-    expect([checked(/Sign-off is blocked/), checked(/Sharing is blocked/)]).toEqual([false, true]);
+    expect([checked(/Approval is blocked/), checked(/Sharing is blocked/)]).toEqual([false, true]);
     expect(screen.getByTestId("next-reference").textContent).toContain("DES-0001");
   });
 

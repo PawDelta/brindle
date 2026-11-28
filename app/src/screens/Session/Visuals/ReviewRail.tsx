@@ -18,7 +18,7 @@ function QueuedItems({ plan }: { plan: Plan }) {
       const decision = plan.decisions.find(d => d.id === item.body.decision);
       const option = decision?.options.find(o => o.id === item.body.option);
       return <div key={item.client_id} data-state={item.state}>
-        {item.tail === "/sign-offs" ? "Sign-off" : [decision?.title, option?.label].filter(Boolean).join(" · ") || "Decision"}
+        {item.tail === "/sign-offs" ? "Approval" : [decision?.title, option?.label].filter(Boolean).join(" · ") || "Decision"}
       </div>;
     })}
   </section>;
@@ -72,10 +72,10 @@ export function ReviewRail({ children, sheet, plan, settled, chosen, jump, along
   const picks = plan.decisions.map(settled);
   const signatures = rows.filter(r => r.required).map(r => r.state === "signed" || r.state === "waived");
   const current = plan.state !== "open" ? null : picks.some(done => !done) ? "Decide"
-    : signOffsCurrent ? "Sign-offs" : "Approve";
+    : signOffsCurrent ? "Approvals" : "Build";
   const steps = [
-    { name: "Decide", segments: picks }, { name: "Sign-offs", segments: signatures },
-    { name: "Approve", segments: [held || plan.state === "approved"] },
+    { name: "Decide", segments: picks }, { name: "Approvals", segments: signatures },
+    { name: "Build", segments: [held || plan.state === "approved"] },
   ];
   const workTitle = workItem?.title?.trim();
   return <aside aria-label="Review" data-testid="review-rail" data-folded={folded}

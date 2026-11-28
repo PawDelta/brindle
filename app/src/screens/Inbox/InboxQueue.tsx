@@ -98,7 +98,7 @@ function titleOf(row: Row): string {
     case "question":
       return item.detail?.trim() || describeItem(item);
     case "review_requested":
-      return n > 1 ? `${n} plans to review from ${personName(item.from_person)}` : item.detail || "Plan";
+      return n > 1 ? `${n} plans from ${personName(item.from_person)}` : item.detail || "Plan";
     case "org_notice":
       return n > 1 ? `${n} notices from your ${item.detail || "admin"}` : item.reason;
     case "signoff_progress":
@@ -168,7 +168,9 @@ function metaOf(row: Row, ctx: QueueContext): ReactNode[] {
     case "waiting":
       return [<><b>{who ?? "An agent"}</b> waits at its prompt</>, session, branch && <span className="mono">{branch}</span>, <span className="iq-wait">paused until you answer</span>];
     case "review_requested":
-      return row.items.length > 1 ? row.items.map((i) => <>{i.detail || "Plan"} {decisionCount(i)}</>) : [<><b>{personName(item.from_person)}</b> asked for your review</>, "plan", decisionCount(item)];
+      return [kindLabel(item), ...(row.items.length > 1
+        ? row.items.map((i) => <>{i.detail || "Plan"} {decisionCount(i)}</>)
+        : [personName(item.from_person), "plan", decisionCount(item)])];
     case "shared_with_you":
       return [<><b>{personName(item.from_person)}</b> shared this plan with you</>];
     case "access_requested":
@@ -176,8 +178,8 @@ function metaOf(row: Row, ctx: QueueContext): ReactNode[] {
     case "signoff_progress": {
       const s = item.signoff;
       const waiting = (s?.waiting ?? []).map(personName);
-      return [<>{s && <Pips signed={s.signed} required={s.required} />}<b>{s ? `${s.signed} of ${s.required}` : item.reason}</b> signed off</>,
-        item.from_person && `${personName(item.from_person)} signed`, waiting.length > 0 && `waiting on ${names(waiting)}`];
+      return [<>{s && <Pips signed={s.signed} required={s.required} />}<b>{describeItem(item)}</b></>,
+        item.from_person && `${personName(item.from_person)} approved`, waiting.length > 0 && `waiting on ${names(waiting)}`];
     }
     case "shared_doc_comment": {
       const n = row.items.length;
@@ -619,7 +621,7 @@ function LaterMenu({ row, onPick }: { row: Row; onPick(until: number, sig?: stri
   return (
     <div className="iq-menu" role="menu" aria-label="Later" data-testid="later-menu">
       {laterTimes().map((t) => <button key={t.label} type="button" role="menuitem" onClick={stop(() => onPick(t.at))}>{t.label} <span>{t.time}</span></button>)}
-      {row.kind === "signoff_progress" && <button type="button" role="menuitem" onClick={stop(() => onPick(Number.MAX_SAFE_INTEGER, signoffSig(row)))}>When the last sign-off lands <span>auto</span></button>}
+      {row.kind === "signoff_progress" && <button type="button" role="menuitem" onClick={stop(() => onPick(Number.MAX_SAFE_INTEGER, signoffSig(row)))}>When the last approval arrives <span>auto</span></button>}
     </div>
   );
 }
@@ -737,11 +739,11 @@ function RowBody(props: RowProps & { title: string }) {
     return (
       <div className="iq-body" data-testid="row-body">
         <div className="iq-people" data-testid="signoff-people">
-          {item.from_person && <div><i>✓</i>{personName(item.from_person)} <span>signed off</span></div>}
-          {s && s.signed > 1 && <div><i>✓</i>{s.signed - 1} more <span>signed off</span></div>}
+          {item.from_person && <div><i>✓</i>{personName(item.from_person)} <span>approved</span></div>}
+          {s && s.signed > 1 && <div><i>✓</i>{s.signed - 1} more <span>approved</span></div>}
           {(s?.waiting ?? []).map((p) => <div key={p.sub} className="todo"><i>○</i>{personName(p)} <span>asked</span></div>)}
         </div>
-        {s && <p>Your plan builds once all {s.required === 2 ? "two" : s.required === 3 ? "three" : s.required} have signed.</p>}
+        {s && <p>The build waits for all required approvals.</p>}
         <div className="iq-acts">
           <button type="button" className="btn btn-primary text-xs" data-primary disabled={item.doc == null || !nav}
             onClick={() => nav?.({ screen: "shared-design", doc: String(item.doc), title: item.detail ?? undefined, repo: ctx.repo(item) ?? undefined })}>Open plan <Kbd k="⏎" /></button>

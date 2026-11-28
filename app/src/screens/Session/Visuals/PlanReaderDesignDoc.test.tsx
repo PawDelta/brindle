@@ -108,7 +108,7 @@ it("reads a spine plan as the planning doc: the outline marks open decisions, ea
   expect(screen.queryByTestId("task-outbox")).toBeNull();
 });
 
-it("an Approve the engine refuses for a reason other than a newer revision shows that reason", async () => {
+it("a Build the engine refuses for a reason other than a newer revision shows that reason", async () => {
   const plan = spine({ decisions: [], threads: [] });
   const why = "Risks and what's hard to undo is required by the Design review template: fill it in before this is signed off";
   const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...writes(plan), plan: async () => plan,
@@ -117,7 +117,7 @@ it("an Approve the engine refuses for a reason other than a newer revision shows
   const approve = (await screen.findByTestId("plan-build")) as HTMLButtonElement;
   expect(approve.disabled).toBe(false);
   await act(async () => fireEvent.click(approve));
-  expect(within(screen.getByTestId("plan-verdict")).getByRole("alert").textContent).toContain(why);
+  expect(within(screen.getByTestId("plan-verdict")).getByRole("alert").textContent).toContain("Risks and what's hard to undo");
 });
 
 /* The engine as it keeps picks: each voter's one pick per decision, in `library` by account as a

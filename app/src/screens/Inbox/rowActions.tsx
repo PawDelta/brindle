@@ -62,6 +62,7 @@ export function itemDetail(item: InboxItemDTO): ReactNode {
   if (item.detail && item.kind !== "credentials" && item.kind !== "login" && !PROVIDER_SWITCH_KINDS.includes(item.kind)) {
     return <span className="line-clamp-3">{item.detail}</span>;
   }
+  if (item.kind === "signed_off") return null;
   if (item.reason && item.reason !== describeItem(item)) return <span>{item.reason}</span>;
   return null;
 }

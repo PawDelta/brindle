@@ -17,7 +17,7 @@ import { openExternal, type OpenUrl } from "../../api/open";
 import type { InboxItemDTO } from "../../api/schema";
 import { waitingCount } from "../../store/appUpdates";
 import type { AppStore } from "../../store/store";
-import { itemKey, kindLabel } from "./items";
+import { describeItem, itemKey, kindLabel } from "./items";
 
 export interface InboxSink {
   /* `link`: the page the notification is about (an opened PR), for a sink that can offer it as an action. */
@@ -111,6 +111,8 @@ function describe(item: InboxItemDTO): string {
   const who = item.agent_id ? `${item.agent_id}: ` : "";
   // An opened PR says which one, and where (the notification's "Open on GitHub" is its link).
   if (item.kind === "pr_opened") return `${who}${item.reason}${item.detail ? `: ${item.detail}` : ""}${item.url ? ` · ${item.url}` : ""}`;
+  if (item.kind === "signoff_progress") return `${describeItem(item)}${item.detail ? ` · ${item.detail}` : ""}`;
+  if (item.kind === "review_requested" || item.kind === "signed_off") return `${who}${item.detail || describeItem(item)}`;
   return `${who}${item.reason}`;
 }
 

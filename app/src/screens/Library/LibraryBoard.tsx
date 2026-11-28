@@ -1,5 +1,5 @@
 /* The Library as a board (library-redesign option A, state 2): the same designs as the list, each
-   in the column of the stage it has reached (Drafting, In review, Approved, Building, Shipped),
+   in the column of the stage it has reached (Drafting, Approvals, Approved, Building, Shipped),
    newest first in each. A card carries what a row carries: its folder, reviewers with their
    sign-off rings and open threads, the linked work item, its plan's tasks once building and the
    briefs it went into once shipped. A card that waits on you has an orange foot saying what for.
@@ -45,7 +45,7 @@ function Meta({ doc, stage, record }: { doc: AnalysisDoc; stage: DesignStage; re
   }
   const s = signOffs(record?.design);
   if (s) {
-    const said = stage === "approved" && record?.design?.rev ? `signed version ${record.design.rev}` : s.required ? `${s.signed} of ${s.required} signed` : "optional reviewers";
+    const said = stage === "approved" && record?.design?.rev ? `approved version ${record.design.rev}` : s.required ? `${s.signed} of ${s.required} approvals` : "optional reviewers";
     return (
       <span className="flex flex-wrap items-center gap-2 text-[11.5px] text-ink-3">
         <SignOffs record={record} say={said} />
@@ -96,7 +96,7 @@ function Card({ doc, record, queue, folder, onOpen }: { doc: AnalysisDoc; record
       )}
       {need && (
         <span className="-mx-3 -mb-2.5 mt-0.5 rounded-b-[5px] border-t border-[color-mix(in_srgb,var(--sap)_35%,transparent)] bg-sap-soft px-3 py-1.5 text-xs text-ink">
-          <b className="font-medium text-sap">{need === "review" ? "Your review" : "Changes asked"}</b>
+          <b className="font-medium text-sap">{need === "review" ? "Needs your approval" : "Changes asked"}</b>
           {need === "review" && decide > 0 && ` · ${plural(decide, "decision")} to take`}
         </span>
       )}

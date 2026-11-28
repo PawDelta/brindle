@@ -90,12 +90,12 @@ try {
     await page.keyboard.type("and so ");     // typed on the page, over the highlighted words
     await shot("6-doc-suggesting");
     await page.click(`${bar} button:has-text("Discard all")`);
-    // Take the two open decisions as recommended, then sign off: the live board.
+    // Take the two open decisions as recommended, then start the build.
     await page.click('[role="tab"]:has-text("Decisions")');
     await page.click(`${bar} button:has-text("Confirm A")`);
     await page.waitForSelector('[data-testid="plan-todo"] button[data-state="current"]:has-text("lease")');
     await page.click(`${bar} button:has-text("Confirm A")`);
-    await page.click(`${bar} button:has-text("Sign off")`);
+    await page.click(`${bar} [data-testid="plan-build"]`);
     await page.waitForSelector('[data-testid="plan-board-progress"]');
     await shot("7-doc-signed-off");
     await ctx.close();
