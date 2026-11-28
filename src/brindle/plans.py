@@ -984,8 +984,10 @@ def begin(db: DB, root_id: str, asked_at: float | None = None) -> str | None:
         c.execute("INSERT INTO plans (id, root_id, rev, markdown, decisions, split, ask, state, created_at,"
                   " updated_at) VALUES (?,?,0,'','[]','[]',NULL,?,?,?)", (vid, root_id, WRITING, now, now))
         visual_offers._grant(c, root_id, "plan")    # the one revision that fills it
-        queued.append(_queue_message(c, root_id, f"Planning draft {vid} is open. Use propose_plan with "
-                                     f"plan_id={vid!r} when you have the plan ready for the person to review."))
+        queued.append(_queue_message(
+            c, root_id, f"Planning draft {vid} is open. If the person explicitly asked for a planning document "
+            f"or accepted a planning offer, fill the draft with propose_plan using plan_id={vid!r}. "
+            f"If neither happened, close the draft with withdraw_plan(plan_id={vid!r})."))
 
     try:
         v = visuals.publish(db, root, "Plan", _page("Plan", "The supervisor is writing this plan."),

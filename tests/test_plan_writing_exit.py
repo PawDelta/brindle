@@ -40,3 +40,15 @@ def test_writing_plan_can_close_without_starting_or_dropping_its_work(db, sessio
     assert draft["id"] in called_off and held.id in called_off
     assert tasks.start_now(db, boss, held.id).startswith("Started")
     assert started == ["build the schema"]
+
+
+@pytest.mark.variant("a misclassified request opens a draft whose notice must tell the supervisor how to withdraw it")
+def test_misclassified_plan_request_notifies_supervisor_of_withdrawal(db, session):
+    boss, _ = session
+    visual_offers.person_spoke(db, boss, "we need a plan B for the deploy")
+
+    draft = plans.holding(db, boss.id)
+    assert draft["state"] == "writing"
+    [opened] = messages(db)
+    assert draft["id"] in opened
+    assert "withdraw_plan" in opened
