@@ -529,6 +529,7 @@ export type SharedDesign = Omit<SharedDesignDTO, "outbox"> & { outbox?: PlanDeli
 
 /* The person's verdict on the plan revision on screen: approve, or redirect with what to change. */
 export interface PlanVerdict {
+  withdraw?: boolean;
   rev: number;
   /* The frozen live version being built, when this is a live doc. */
   version?: number;
@@ -2434,6 +2435,7 @@ export class DaemonClient {
 
   /* Approve or redirect the revision on screen; a newer revision, or a second verdict, is a 409. */
   decidePlan(id: string, verdict: PlanVerdict) {
+    if (verdict.withdraw) return this.withdrawPlanApproval(id);
     return this.postInbox<Plan>(`/plans/${encodeURIComponent(id)}/decide`, verdict);
   }
 

@@ -703,6 +703,23 @@ it("a design doc whose Team plan ended says so, once, and only then", async () =
   expect(await screen.findAllByTestId("plan-team-ended")).toHaveLength(1);
 });
 
+it("keeps the Approve label when approval is held and withdrawn", async () => {
+  const gate = { state: "waiting" as const, required: 1, signed: 0, waiting_on: ["Maya"], can_hold_approval: true };
+  let plan = doc(1, "Ready for review", { gate, decisions: [] });
+  const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...docWrites(() => plan), plan: async () => plan,
+    decidePlan: async (_id, verdict) => (plan = { ...plan, gate: { ...gate,
+      approval_held: verdict.approved ? { rev: plan.rev, waiting_on: ["Maya"] } : null } }) };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const approve = await screen.findByTestId("plan-build");
+  expect(approve.textContent).toBe("Approve");
+  await act(async () => fireEvent.click(approve));
+  expect(approve.textContent).toBe("Approve");
+  expect(approve.getAttribute("aria-pressed")).toBe("true");
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Withdraw" })));
+  expect(approve.textContent).toBe("Approve");
+  expect(approve.getAttribute("aria-pressed")).toBe("false");
+});
+
 it("the author's plan opened in its session offers its Library link by plan id, and none when it isn't in the Library", async () => {
   const url = "https://pawdelta.com/api/brindle/v1/share-links/dsl_p";
   let plan = doc(1, "Workers run on your machine.");

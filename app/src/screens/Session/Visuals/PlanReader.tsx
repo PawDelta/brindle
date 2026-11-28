@@ -600,7 +600,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   }, []);
   const gate = plan.gate ?? null;
   const approvalHeld = gate?.approval_held?.rev === plan.rev;
-  const approvalLabel = approvalHeld ? "Withdraw approval" : gate?.can_hold_approval ? "Approve when signed" : "Approve";
+  const approveContent = <>{approvalHeld && <svg aria-hidden className="size-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2"><path d="m2 8 4 4 8-8" /></svg>}Approve</>;
   const shared = !!gate;
   const sharePeople = (!teammate || plan.can_edit) && plan.state !== "approved" ? source.people : undefined;
   const wasShared = useRef(shared);
@@ -978,10 +978,12 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (now) savePlanDraft(draftScope, "verdict", null);
     if (alive.current) setSending(null);
   };
-  const approveOrWithdraw = () => {
-    if (!approvalHeld) return decide(true);
-    if (client?.withdrawPlanApproval) return send(() => client.withdrawPlanApproval!(plan.id));
-  };
+  const waitingFor = gate?.approval_held?.waiting_on.map(nameOf) ?? [];
+  const heldStatus = approvalHeld && <span className="text-xs text-ink-3">
+    {waitingFor.length ? `The build starts once ${new Intl.ListFormat("en").format(waitingFor)} ${waitingFor.length === 1 ? "signs" : "sign"} off.` : "The build starts once the review is ready."}{" "}
+    <button type="button" className="underline" disabled={busy || !!historical} onClick={() => client && void send(() =>
+      client.decidePlan(plan.id, { rev: plan.rev, approved: false, withdraw: true, picks: {}, comments: [], note: "" }))}>Withdraw</button>
+  </span>;
   /* The plan becomes a personal doc, then the person's sign-off starts the build. */
   /* Built only when the personal doc it becomes reads as the text on screen (the live draft's, or a
      frozen version's). If it doesn't, nothing is built: the personal revision is shown, said so, for
@@ -1394,7 +1396,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     ) : <span className="whitespace-nowrap px-[9px] text-xs text-ink-3" data-testid="plan-rev">{versionLabel}</span>;
     // A shared plan builds only once every required reviewer has signed.
     const gateHolds = !!gate && gate.state !== "ready" && !gate.can_hold_approval;
-    const approveBlocked = !!historical || busy || (!approvalHeld && (left.length > 0 || reviewBlocked || uploading > 0 || gateHolds));
+    const approveBlocked = !!historical || busy || approvalHeld || left.length > 0 || reviewBlocked || uploading > 0 || gateHolds;
     return (
       <>
         {chrome && (
@@ -1458,10 +1460,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           {draft?.kind === "suggest" ? suggestingBar : live && (editing || raw) ? editingBar : teammate ? teammateBar : open ? (
             <>
               <div role="status" className="grid gap-px" data-testid="plan-next" data-state={left.length ? "open" : "ready"} data-left={left.length}>
-                {left.length ? nextUp : (
+                {approvalHeld ? heldStatus : left.length ? nextUp : (
                   <>
                     <span className="flex items-center gap-2 text-[13.5px] font-semibold text-ink"><Tick className="!text-[13.5px] !font-semibold">Everything is decided</Tick></span>
-                    <span className="text-xs text-ink-3">{approvalHeld ? `Approval saved for r${plan.rev}. ${gateWhy}` : gate?.state === "waiting" || gateHolds ? summary || gateWhy : `Approve starts the build.${stillOpen.length ? ` ${stillOpen.join(" and ")} ${openThreads.length === 1 ? "is" : "are"} still open.` : ""}`}</span>
+                    <span className="text-xs text-ink-3">{gate?.state === "waiting" || gateHolds ? summary || gateWhy : `Approve starts the build.${stillOpen.length ? ` ${stillOpen.join(" and ")} ${openThreads.length === 1 ? "is" : "are"} still open.` : ""}`}</span>
                   </>
                 )}
               </div>
@@ -1507,8 +1509,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                 </Menu>
                 )}</VerdictNote>
                 <LoadingButton className={main} busy={sending === "approve"} disabled={approveBlocked} data-testid="plan-build" data-gate={gate?.state}
-                  title={approvalHeld ? approvalLabel : left.length ? "Pick an option in every decision first" : gateWhy || approvalLabel} data-again="approve" onClick={() => void approveOrWithdraw()}>
-                  {approvalLabel}
+                  aria-pressed={approvalHeld} title={left.length ? "Pick an option in every decision first" : gateWhy || "Approve"} data-again="approve" onClick={() => void decide(true)}>
+                  {approveContent}
                 </LoadingButton>
               </div>
             </>
@@ -1640,7 +1642,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                 <span className="truncate">{next ? next.title : gate ? (gate.state === "ready" ? "Ready to build" : gateWhy) : "Sign off this plan"}</span>
               </span>
               <span className="text-xs text-ink-3">
-                {summary}
+                {heldStatus || summary}
                 {sharedFiles.size > 0 && <span className="text-sap">{`${summary ? " " : ""}${plural(sharedFiles.size, "file is", "files are")} in more than one worker.`}</span>}
               </span>
             </div>
@@ -1653,10 +1655,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               </LoadingButton>
               {/* The person's selections and verdict travel together. */}
               {(
-                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || (!approvalHeld && (!!next || reviewBlocked || uploading > 0 || (!!gate && gate.state !== "ready" && !gate.can_hold_approval)))} title={gateWhy || approvalLabel}
-                  data-again="approve" onClick={() => void approveOrWithdraw()}
+                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || approvalHeld || !!next || reviewBlocked || uploading > 0 || (!!gate && gate.state !== "ready" && !gate.can_hold_approval)} title={gateWhy || "Approve"}
+                  aria-pressed={approvalHeld} data-again="approve" onClick={() => void decide(true)}
                   data-testid="plan-build" data-gate={gate?.state}>
-                  {approvalLabel}
+                  {approveContent}
                 </LoadingButton>
               )}
             </div>
