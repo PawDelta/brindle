@@ -1,21 +1,24 @@
-import { useContext, useLayoutEffect, useState, type ReactNode } from "react";
+import { useContext, useId, useLayoutEffect, useState, type ReactNode } from "react";
 import type { Plan, TrackerLink } from "../../../api/client";
 import { ago } from "../../../components/ProviderConnect";
 import type { SignOffRow } from "./DocReview";
-import { DeliveryStatus, PendingNote, PlanDelivery } from "./PlanDelivery";
+import { PendingNote, PlanDelivery } from "./PlanDelivery";
 import { WorkItemChip } from "./WorkPanel";
+
+const heading = "flex justify-between text-[10.5px] uppercase font-semibold tracking-[0.08em] text-ink-2";
 
 function QueuedItems({ plan }: { plan: Plan }) {
   const items = useContext(PlanDelivery).filter(item => item.state === "waiting" || item.state === "sending");
+  const title = useId();
   if (!items.length) return null;
-  return <section aria-label="Queued changes" className="grid gap-1 text-xs text-ink-3" data-testid="rail-queue">
+  return <section aria-labelledby={title} className="grid gap-2 text-xs text-ink-3" data-testid="rail-queue">
+    <h3 id={title} className={heading} data-queue-count={items.length}>Waiting to send <small className="font-normal">{items.length}</small></h3>
     {items.map(item => {
-      if (item.tail === "/comments" || item.tail === "/suggestions") return <PendingNote key={item.client_id} item={item} />;
+      if (item.tail === "/comments" || item.tail === "/suggestions") return <PendingNote key={item.client_id} item={item} grouped />;
       const decision = plan.decisions.find(d => d.id === item.body.decision);
       const option = decision?.options.find(o => o.id === item.body.option);
-      return <div key={item.client_id} className="grid gap-1">
-        <span>{item.tail === "/sign-offs" ? "Sign-off" : [decision?.title, option?.label].filter(Boolean).join(" · ") || "Decision"}</span>
-        <DeliveryStatus item={item} />
+      return <div key={item.client_id} data-state={item.state}>
+        {item.tail === "/sign-offs" ? "Sign-off" : [decision?.title, option?.label].filter(Boolean).join(" · ") || "Decision"}
       </div>;
     })}
   </section>;
@@ -35,8 +38,6 @@ export function useRailWidth() {
   }, [host]);
   return { setHost, folded };
 }
-
-const heading = "flex justify-between text-[10.5px] uppercase font-semibold tracking-[0.08em] text-ink-2";
 
 export function ReviewRevisions({ plan, compact = false }: { plan: Plan; compact?: boolean }) {
   const revisions = (plan.revisions ?? []).map(({ rev, title, at, source }) => ({

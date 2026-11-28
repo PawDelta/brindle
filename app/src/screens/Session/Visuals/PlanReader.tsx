@@ -343,7 +343,7 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="plan-reader">
       {shown ? (
-        <PlanDeliveryProvider key={shown.id} items={shown.outbox ?? []}><DesignDoc source={source} author={{ client, visual }} plan={shown} mode={current} writes={writes} work={work}
+        <PlanDeliveryProvider key={shown.id} rev={shown.rev} items={shown.outbox ?? []}><DesignDoc source={source} author={{ client, visual }} plan={shown} mode={current} writes={writes} work={work}
           shareLink={planLinkTarget(client, shown.id, repo)}
           chrome={{ lead, badges, actions, modes: MODES, allowed, onMode: setMode, onBack, onStopAlongside: stopAlongside }}
           top={shown.state === "approved" ? (
@@ -1148,10 +1148,11 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const waitingRows = sheetRows.filter(r => r.required && r.state === "waiting");
   const waitingNames = waitingRows.map(r => firstName(r.key));
   const signersLeft = held && gate?.approval_held?.waiting_on.length ? gate.approval_held.waiting_on.map(firstName) : waitingNames;
-  const signature = `${signersLeft.join(" and ") || "the last required reviewer"} ${signersLeft.length > 1 ? "sign" : "signs"} off`;
-  const buildSentence = held ? `Your plan builds when ${signature}.`
-    : gate?.state === "waiting" && waitingNames.length ? `The build starts once you approve and ${signature}.`
+  const signature = `${signersLeft.join(" and ") || "the last required reviewer"} ${signersLeft.length > 1 ? "sign" : "signs"}`;
+  const buildSentence = held ? <>Your plan builds when {signature} <span className="whitespace-nowrap">off. {withdraw}</span></>
+    : gate?.state === "waiting" && waitingNames.length ? `The build starts once you approve and ${signature} off.`
     : gate && gate.state !== "ready" ? gateWhy || summary : "Approve starts the build.";
+  const approveClass = held ? `${button} text-pass disabled:opacity-100 disabled:cursor-default` : main;
   const signOffsCurrent = held || reviewing || (gateHolds && gate?.state === "waiting");
   const railProps = { sheet, plan, rows: sheetRows, settled, chosen, held, signOffsCurrent, jump, alongside, workItem, folded: railWidth.folded };
   const compactReview = railWidth.folded && <div className="my-3 grid gap-1 border-y border-line py-2 font-sans text-xs" data-testid="review-summary">
@@ -1161,11 +1162,12 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     {alongside}
   </div>;
   const railDraft = draft?.kind === "comment" && draft.rail;
-  const reviewerComment = teammate && canComment && open && (railDraft
-    ? <DraftCard draft={draft} number={Math.max(0, ...threads.map(t => t.id)) + 1} stale={draftStale} busy={busy || !!historical}
-        text={drafting?.text ?? ""} onText={setDraftReason} onSend={text => void sendDraft(text)} onCancel={() => setDrafting(null)} />
-    : <button type="button" className={quiet} disabled={busy || !!historical || !!draft}
-        onClick={() => begin({ kind: "comment", rail: true, where: partName(LEDE), anchor: { kind: "section", section: LEDE } })}>Comment</button>);
+  const reviewerDraft = teammate && canComment && open && railDraft &&
+    <DraftCard draft={draft} number={Math.max(0, ...threads.map(t => t.id)) + 1} stale={draftStale} busy={busy || !!historical}
+      text={drafting?.text ?? ""} onText={setDraftReason} onSend={text => void sendDraft(text)} onCancel={() => setDrafting(null)} />;
+  const reviewerComment = teammate && canComment && open && !railDraft &&
+    <button type="button" className={quiet} disabled={busy || !!historical || !!draft}
+      onClick={() => begin({ kind: "comment", rail: true, where: partName(LEDE), anchor: { kind: "section", section: LEDE } })}>Comment</button>;
 
   // The first share happens in the panel too: adding a person or a team shares the plan.
   const canShare = !!gate || (!!sharing && !!sharePeople && plan.state !== "approved" && scopes.some((s) => s.kind !== "user" && s.can_share !== false));
@@ -1368,12 +1370,14 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           )}
         </div>
         <SignOffDelivery rev={frozen?.id ?? plan.rev} />
-        {reviewerComment}
-        <div className="flex gap-2">
-        {teammate.rights.signOff && !teammate.signedOff && (
-          <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked || left.length > 0} data-testid="plan-sign-off"
-            title={left.length ? "Pick an option in every decision first" : undefined} data-again="signoff" onClick={() => void signOff()}>Sign off</LoadingButton>
-        )}</div>
+        {reviewerDraft}
+        <div className="flex items-center gap-2">
+          {reviewerComment}
+          {teammate.rights.signOff && !teammate.signedOff && (
+            <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked || left.length > 0} data-testid="plan-sign-off"
+              title={left.length ? "Pick an option in every decision first" : undefined} data-again="signoff" onClick={() => void signOff()}>Sign off</LoadingButton>
+          )}
+        </div>
       </>
     );
     const versionMenu = source.history ? (
@@ -1398,10 +1402,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         {typing && !historical && <FormatBar />}
         <div ref={railWidth.setHost} className={`flex min-h-0 flex-1 bg-canvas ${railWidth.folded ? "flex-col" : ""}`} data-testid="plan-design-doc">
           {!railWidth.folded && <Outline parts={parts} placed={placed} isOpen={waiting} canPick={canPick} decided={decided} total={ordered.length} scrollPane={doc} />}
-          <div ref={doc} className="relative min-h-0 min-w-0 flex-1 overflow-auto border-l border-line max-[900px]:border-l-0" data-testid="plan-doc" data-mode={historical ? "viewing" : mode}
+          <div ref={doc} className="@container relative min-h-0 min-w-0 flex-1 overflow-auto border-l border-line max-[900px]:border-l-0" data-testid="plan-doc" data-mode={historical ? "viewing" : mode}
             onMouseUp={historical ? undefined : pick} onKeyUp={historical ? undefined : pick} onClick={historical ? undefined : followAnchor}>
             {historical ? <DocHistoryComparison key={historical.comparison.revision.rev} comparison={historical.comparison} onClose={historical.close} /> : (
-              <article className="pb-[84px] px-[68px] pt-12 max-[900px]:pb-16 max-[900px]:pl-[46px] max-[900px]:pr-[22px] max-[900px]:pt-8">
+              <article className="pb-[84px] px-[68px] pt-12 @max-[660px]:pl-[46px] @max-[660px]:pr-[22px] max-[900px]:pb-16 max-[900px]:pl-[46px] max-[900px]:pr-[22px] max-[900px]:pt-8">
                 <div className="mx-auto w-[min(660px,100%)] font-serif text-[15.5px] leading-[1.68] text-ink-2">
                   <h1 className="m-0 min-w-0 [overflow-wrap:anywhere] font-serif text-[31px] font-semibold leading-[1.16] tracking-[-0.012em] text-ink [text-wrap:balance]">{plan.title}</h1>
                   {status}
@@ -1453,7 +1457,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               <div role="status" className="grid gap-px" data-testid="plan-next" data-state={left.length ? "open" : "ready"} data-left={left.length}>
                 {left.length && !held ? nextUp : (
                   <>
-                    <span className="text-[13px] text-ink">{buildSentence} {withdraw}</span>
+                    <span className="text-[13px] text-ink">{buildSentence}</span>
                   </>
                 )}
               </div>
@@ -1488,7 +1492,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                   </div>
                 </Menu>
                 )}</VerdictNote>
-                <LoadingButton className={main} busy={sending === "approve"} aria-pressed={held || sending === "approve"} disabled={held || approveBlocked} data-testid="plan-build" data-state={held || sending === "approve" ? "pressed" : approveBlocked ? "blocked" : "ready"} data-gate={gate?.state}
+                <LoadingButton className={approveClass} busy={sending === "approve"} aria-pressed={held || sending === "approve"} disabled={held || approveBlocked} data-testid="plan-build" data-state={held || sending === "approve" ? "pressed" : approveBlocked ? "blocked" : "ready"} data-gate={gate?.state}
                   title={left.length ? "Pick an option in every decision first" : gateHolds ? gateWhy : "Approve this plan and start building it"} data-again="approve" onClick={() => void decide(true)}>
                   {(held || sending === "approve") && <ApprovalCheck />}Approve
                 </LoadingButton>
@@ -1631,9 +1635,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               </span>
               <span className="text-xs text-ink-3">{summary}</span>
             </div>
+            <SignOffDelivery rev={frozen?.id ?? plan.rev} />
+            {reviewerDraft}
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
-              <SignOffDelivery rev={frozen?.id ?? plan.rev} />
               {reviewerComment}
               {!next && teammate.rights.signOff && !teammate.signedOff && (
                 <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked} data-testid="plan-sign-off" data-again="signoff" onClick={() => void signOff()}>Sign off</LoadingButton>
@@ -1646,7 +1651,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             <div className="grid min-w-0 gap-0.5" data-testid="plan-next">
               <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
                 <span className={`${label} text-[11px]`}>Next</span>
-                <span>{next ? next.title : buildSentence} {withdraw}</span>
+                <span>{next && !held ? next.title : buildSentence}</span>
               </span>
               <span className="text-xs text-ink-3">
                 {summary}
@@ -1661,7 +1666,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               </LoadingButton>
               {/* The person's selections and verdict travel together. */}
               {(
-                <LoadingButton className={main} busy={sending === "approve"} aria-pressed={held || sending === "approve"} disabled={held || !!historical || busy || !!next || reviewBlocked || uploading > 0 || gateHolds} title={next ? "Choose every decision first" : gateHolds ? gateWhy : undefined}
+                <LoadingButton className={approveClass} busy={sending === "approve"} aria-pressed={held || sending === "approve"} disabled={held || !!historical || busy || !!next || reviewBlocked || uploading > 0 || gateHolds} title={next ? "Choose every decision first" : gateHolds ? gateWhy : undefined}
                   data-again="approve" onClick={() => { if (next) jump(next.id); else void decide(true); }}
                   data-testid="plan-build" data-gate={gate?.state} data-state={held || sending === "approve" ? "pressed" : next || reviewBlocked || gateHolds ? "blocked" : "ready"}>
                   {(held || sending === "approve") && <ApprovalCheck />}Approve
