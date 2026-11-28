@@ -2,10 +2,31 @@ import { useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import type { VisualDTO } from "../../../api/client";
 import { inertSource } from "./frame";
 
-function syncChoiceColors(doc: Document) {
-  const theme = getComputedStyle(document.documentElement);
-  doc.documentElement.style.setProperty("--brindle-choice-border", theme.getPropertyValue("--branch"));
-  doc.documentElement.style.setProperty("--brindle-choice-fill", theme.getPropertyValue("--branch-soft"));
+function choiceButtons(field: Element) {
+  return Array.from(field.querySelectorAll<HTMLButtonElement>("button[data-option]"))
+    .filter(button => button.closest("fieldset[data-choice]") === field);
+}
+
+function resetOptionAppearance(button: HTMLButtonElement) {
+  const { style } = button;
+  // Remove competing inline shorthands and logical properties before setting the app's styles.
+  for (const property of Array.from(style)) {
+    if (/^(background|border|outline|color|box-shadow)(-|$)/.test(property)) {
+      style.removeProperty(property);
+    }
+  }
+  // Pair CanvasText with an opaque Canvas even when the page uses a custom background.
+  style.setProperty("background-color", "Canvas", "important");
+  style.setProperty("background-image", "none", "important");
+  style.setProperty("background-clip", "border-box", "important");
+  style.setProperty("border", "2px solid GrayText", "important");
+  style.setProperty("border-image", "none", "important");
+  style.setProperty("border-radius", ".4em", "important");
+  style.setProperty("box-shadow", "none", "important");
+  style.setProperty("outline", "revert", "important"); // Keep the browser's keyboard focus indicator.
+  style.setProperty("outline-offset", "revert", "important");
+  style.setProperty("color", "CanvasText", "important");
+  style.setProperty("transition-property", "none", "important");
 }
 
 /* No page code runs in this frame. Only the parent app attaches listeners and owns picks.
@@ -33,6 +54,13 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
       const attribute = animation.getAttribute("attributeName");
       if (attribute === "href" || attribute?.endsWith(":href")) animation.remove();
     }
+    // Reserve the state hooks for the choice controls the app inserts below.
+    for (const el of doc.querySelectorAll("fieldset[data-choice] :is([data-choice-mark], [data-choice-status], [data-needs-answer], button[data-option][data-selected])")) {
+      el.removeAttribute("data-choice-mark");
+      el.removeAttribute("data-choice-status");
+      el.removeAttribute("data-needs-answer");
+      if (el.matches("button[data-option]")) el.removeAttribute("data-selected");
+    }
     for (const group of visual.choices ?? []) {
       let field = Array.from(doc.querySelectorAll("fieldset[data-choice]")).find(el => el.getAttribute("data-choice") === group.id);
       if (!field) {
@@ -40,49 +68,95 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
         field.setAttribute("data-choice", group.id);
         doc.body.append(field);
       }
-      if (!field.querySelector(":scope > legend, h1, h2, h3, h4, h5, h6, [role='heading']")) {
-        const legend = doc.createElement("legend");
-        legend.textContent = group.question;
-        field.prepend(legend);
+      let heading = field.querySelector(":scope > legend") ??
+        Array.from(field.querySelectorAll("h1, h2, h3, h4, h5, h6, [role='heading']"))
+          .find(el => el.closest("fieldset[data-choice]") === field);
+      if (!heading) {
+        heading = doc.createElement("legend");
+        heading.textContent = group.question;
+        field.prepend(heading);
       }
+      const status = doc.createElement("span");
+      status.setAttribute("data-choice-status", "");
+      status.textContent = "Needs an answer";
+      status.style.cssText = `
+        all: initial !important; display: none !important; margin-inline-start: .65em !important;
+        padding: .1em .4em !important; border: 1px solid currentColor !important;
+        border-radius: .3em !important; font: 600 .75em/1.4 system-ui !important;
+        color: var(--brindle-choice-required, CanvasText) !important; background: Canvas !important;
+      `;
+      heading.append(status);
+      const buttons = choiceButtons(field);
       for (const option of group.options) {
-        let item = Array.from(field.querySelectorAll<HTMLButtonElement>("button[data-option]")).find(el => el.dataset.option === option.id);
+        let item = buttons.find(el => el.dataset.option === option.id);
         if (!item) {
           item = doc.createElement("button");
           item.dataset.option = option.id;
           field.append(item);
         }
         item.setAttribute("aria-label", option.label);
+        const mark = doc.createElement("span");
+        mark.setAttribute("data-choice-mark", "empty");
+        mark.setAttribute("aria-hidden", "true");
+        // Inline priority keeps page rules for button children from changing the radio mark.
+        mark.style.cssText = `
+          all: initial !important; display: inline-block !important; box-sizing: border-box !important;
+          width: 1em !important; height: 1em !important; flex: none !important;
+          margin-inline-end: .5em !important; vertical-align: -.12em !important;
+          font-size: 1em !important; color: transparent !important;
+          border: 2px solid GrayText !important; border-radius: 50% !important;
+        `;
+        item.prepend(mark);
       }
     }
-    const style = doc.createElement("style");
-    style.textContent = `
-      fieldset[data-choice] button[data-option][role="radio"][aria-checked="true"] {
-        border: 2px solid !important;
-        border-color: var(--brindle-choice-border) !important;
-        background-color: var(--brindle-choice-fill) !important;
-      }
-    `;
-    doc.head.append(style);
+    for (const button of doc.querySelectorAll<HTMLButtonElement>("fieldset[data-choice] button[data-option]")) {
+      resetOptionAppearance(button);
+    }
     return `<!doctype html>${doc.documentElement.outerHTML}`;
   }, [visual.inline_html, visual.choices]);
   const refresh = (loaded = false) => {
     const doc = frame.current?.contentDocument;
     if (!doc?.body) return;
     doc.documentElement.style.setProperty("zoom", String(current.current.zoom));
+    const theme = getComputedStyle(document.documentElement);
+    const accent = theme.getPropertyValue("--branch").trim() || "Highlight";
+    const fill = theme.getPropertyValue("--branch-soft").trim() || "color-mix(in srgb, Highlight 12%, transparent)";
+    const selectedBackground = `linear-gradient(${fill}, ${fill})`;
+    const neutral = theme.getPropertyValue("--ink-3").trim() || "GrayText";
+    doc.documentElement.style.setProperty("--brindle-choice-required", theme.getPropertyValue("--sap"));
     const { visual: row, picks: selected } = current.current;
+    const closed = !!row.answer || !!row.answered_in_chat;
     for (const group of row.choices ?? []) {
       const field = Array.from(doc.querySelectorAll("fieldset[data-choice]")).find(el => el.getAttribute("data-choice") === group.id);
       if (!field) continue;
       field.setAttribute("role", "radiogroup");
       field.setAttribute("aria-label", group.question);
-      for (const item of Array.from(field.querySelectorAll<HTMLButtonElement>("button[data-option]"))) {
+      const pick = selected[group.id];
+      const status = Array.from(field.querySelectorAll<HTMLElement>("[data-choice-status]"))
+        .find(el => el.closest("fieldset[data-choice]") === field);
+      if (status) {
+        const needsAnswer = !closed && !group.options.some(option => option.id === pick);
+        status.parentElement?.toggleAttribute("data-needs-answer", needsAnswer);
+        status.style.setProperty("display", needsAnswer ? "inline-block" : "none", "important");
+      }
+      for (const item of choiceButtons(field)) {
         const id = item.dataset.option!;
         const option = group.options.find(o => o.id === id);
         item.type = "button";
-        item.disabled = !!row.answer || !!row.answered_in_chat || !option;
+        item.disabled = closed || !option;
         item.setAttribute("role", "radio");
-        item.setAttribute("aria-checked", String(selected[group.id] === id));
+        const checked = !!option && pick === id;
+        item.setAttribute("aria-checked", String(checked));
+        item.toggleAttribute("data-selected", checked);
+        item.style.setProperty("border-color", checked ? accent : neutral, "important");
+        item.style.setProperty("background-image", checked ? selectedBackground : "none", "important");
+        item.style.setProperty("color", item.disabled ? "GrayText" : "CanvasText", "important");
+        const mark = item.querySelector<HTMLElement>(":scope > [data-choice-mark]");
+        if (mark) {
+          mark.dataset.choiceMark = checked ? "selected" : "empty";
+          mark.style.setProperty("border-color", checked ? accent : neutral, "important");
+          mark.style.setProperty("background-color", checked ? accent : "Canvas", "important");
+        }
         // Read rendered text after loading so hidden preview text doesn't replace the label.
         if (loaded && option && !(item.innerText ?? item.textContent)?.trim()) {
           const label = doc.createElement("span");
@@ -96,10 +170,7 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
   };
   useLayoutEffect(refresh, [picks, visual, zoom]);
   useEffect(() => {
-    const sync = () => {
-      const doc = frame.current?.contentDocument;
-      if (doc) syncChoiceColors(doc);
-    };
+    const sync = () => refresh();
     const observer = new MutationObserver(sync);
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "style", "class"] });
     const system = window.matchMedia?.("(prefers-color-scheme: dark)");
@@ -138,7 +209,6 @@ export function InlineChoices({ visual, picks, onPick, zoom, snapshotRequest, on
         event.stopPropagation();
         onBack();
       };
-      syncChoiceColors(doc);
       refresh(true);
     }} />;
 }

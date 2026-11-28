@@ -789,7 +789,7 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         if not c.execute("UPDATE plans SET state='open', decision=NULL, updated_at=? WHERE id=? AND rev=?"
                          " AND state IN ('open','redirected')", (time.time(), vid, current["rev"])).rowcount:
             raise ServiceError("stale", "the plan changed meanwhile; read it again with read_plan", 409)
-        drafted.update(plan_docs.supervise(c, current, replica, base, replaced, lede, parts, off_draft))
+        drafted.update(draft_change(c))
 
     settled: list[int] = []
     numbered: list[bool] = []
@@ -831,6 +831,8 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
                                   split, ask, [s["id"] for s in parts if previous.get(s["id"]) != s], now)
 
     try:
+        if replica is not None:
+            draft_change = plan_docs.supervise(db, current, replica, base, replaced, lede, parts, off_draft)
         v = visuals.publish(db, caller, title, _page(title, markdown),
                             visual_id=draft_row["id"] if fill else plan_id, kind="plan",
                             extra=write if replica is None else write_draft)

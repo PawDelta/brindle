@@ -49,6 +49,33 @@ it("hides copying when the org disables links, including an existing link", asyn
   expect(screen.queryByRole("button", { name: "Copy link" })).toBeNull();
 });
 
+it("reads the audiences again without touching a change still out", async () => {
+  let scopesDown = true;
+  let revoked: (got: DesignShareLink) => void = () => {};
+  const target: ShareLinkTarget = {
+    key: "plan:p1", read: async () => ({ available: true, scoped: true, link: null }),
+    copy: async () => { throw new Error("must not copy"); },
+    revoke: () => new Promise<DesignShareLink>((resolve) => { revoked = resolve; }),
+    scopes: async () => {
+      if (scopesDown) throw new DaemonError("library_offline", "Couldn't reach brindle Pro.", 503);
+      return { scopes: [{ kind: "org", id: "o", name: "Acme" }] };
+    },
+  };
+  const state: DesignShareLink = { available: true, scoped: true, link: { url: "https://example.com/link", access: "org", created_at: 1 } };
+  await act(async () => render(<ShareLinkPanel target={target} state={state} onState={() => {}} />));
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Revoke link" })));
+  const panel = screen.getByTestId("share-link");
+  expect(panel.dataset.state).toBe("saving");
+  expect(screen.getByTestId("library-network").dataset.state).toBe("offline");
+  scopesDown = false;
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Try again" })));
+  expect(screen.queryByTestId("library-network")).toBeNull();
+  expect(panel.dataset.state).toBe("saving");
+  expect((screen.getByRole("button", { name: "Revoke link" }) as HTMLButtonElement).disabled).toBe(true);
+  await act(async () => revoked({ available: true, scoped: true, link: null }));
+  expect(panel.dataset.state).toBe("ready");
+});
+
 function Menu({ target, fresh }: { target: ShareLinkTarget; fresh: number }) {
   const link = useShareLink(target, fresh);
   return <ShareLinkSection target={target} link={link} />;

@@ -5,7 +5,7 @@
    text (selectedRange), and lets a thread's range be drawn back into the text: a comment's
    anchor underlined, a suggestion's change shown as struck and inserted text. */
 
-import { Fragment, type ReactNode } from "react";
+import { Fragment, memo, type ReactNode } from "react";
 import { BULLET, FENCE, HEADING, INLINE, NUMBERED, RULE, TABLE_SEP } from "../../Knowledge/Markdown";
 
 /* A range of a section's source to draw: a comment's anchor, a suggestion's text to replace
@@ -22,6 +22,14 @@ export interface Mark {
   lit?: boolean;
   /* Drawn neutral (the planning doc's margin notes): an ink wash, branch only while lit. */
   quiet?: boolean;
+}
+
+export function sameMarks(a: Mark[] = [], b: Mark[] = []) {
+  return a === b || (a.length === b.length && a.every((mark, i) => {
+    const other = b[i];
+    return mark.start === other.start && mark.end === other.end && mark.kind === other.kind && mark.thread === other.thread
+      && mark.ins === other.ins && mark.ref === other.ref && mark.lit === other.lit && mark.quiet === other.quiet;
+  }));
 }
 
 /* Rendered text and, for each of its characters, its offset in the source. */
@@ -232,7 +240,7 @@ function arrange(blocks: Block[], layout: DocLayout, leaf: Leaf): ReactNode[] {
   });
 }
 
-export function DocText({ body, marks = [], layout }: { body: string; marks?: Mark[]; layout?: DocLayout }) {
+export const DocText = memo(function DocText({ body, marks = [], layout }: { body: string; marks?: Mark[]; layout?: DocLayout }) {
   const leaf = leaves(marks);
   const lines: { text: string; at: number }[] = [];
   let offset = 0;
@@ -361,7 +369,7 @@ export function DocText({ body, marks = [], layout }: { body: string; marks?: Ma
     put((leaf) => <p key={k} className="max-w-[68ch]">{inline(run, leaf, k)}</p>, { kind: "p", run });
   }
   return <>{layout ? arrange(blocks, layout, leaf) : blocks.map((b) => b.node(leaf))}</>;
-}
+}, (a, b) => a.body === b.body && a.layout === b.layout && sameMarks(a.marks, b.marks));
 
 /* The engine counts a section's text in code points (brindle/plan_docs.py is Python); the DOM
    and a JS string count UTF-16 units. The two part ways after any character outside the basic

@@ -373,7 +373,7 @@ export function SignOffSheet({ version, rows, since, onShowChanges }: {
         <span className={`${label} text-[11px]`}>{`Sign-offs on ${version}`}</span>
         {rows.length === 0 && <span className="text-ink-3">Nobody is asked to sign it yet.</span>}
         {rows.map((r) => (
-          <span key={r.key} className="flex items-center gap-2 text-ink-2" data-testid={`signoff-${r.key}`} data-state={r.state}>
+          <span key={r.key} className="flex items-center gap-2 text-ink-2" data-testid={`signoff-${r.key}`} data-state={r.state} data-sign-off={r.required ? "required" : "optional"}>
             <Avatar who={r.who} ring={r.state === "signed" ? "done" : r.state === "waiting" && r.required ? "wait" : r.required ? undefined : "dim"} />
             <span className="min-w-0 truncate"><b className="font-medium text-ink">{r.name}</b>{` · ${r.required ? "required" : "optional"}`}</span>
             <span className="flex-1" />

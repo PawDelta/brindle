@@ -30,6 +30,7 @@ export interface ApiSchema {
   DesignLinkDTO: DesignLinkDTO;
   DesignLinkScopeDTO: DesignLinkScopeDTO;
   DesignShareLinkDTO: DesignShareLinkDTO;
+  DesignSignOffDTO: DesignSignOffDTO;
   DesignTaskDTO: DesignTaskDTO;
   GcloudOptionsDTO: GcloudOptionsDTO;
   GitHubConnectionDTO: GitHubConnectionDTO;
@@ -540,6 +541,16 @@ export interface DesignShareLinkDTO {
   link?: DesignLinkDTO | null;
   reason?: string | null;
   scoped?: boolean;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "DesignSignOffDTO".
+ */
+export interface DesignSignOffDTO {
+  at: number;
+  optional?: boolean | null;
+  rev: number;
+  sub: string;
 }
 /**
  * One task of a design's plan (GET /v1/analysis-docs/{id} ``tasks``), in
@@ -1761,8 +1772,8 @@ export interface ShareTeamDTO {
 /**
  * A design someone else shared, as the person reviewing it reads it
  * (brindle.pro.shared_reader): ``id`` is its Library doc id and it has no
- * plan on this machine. ``can_*``: what the Library lets this account do,
- * ``can_sign_off`` false only when it can't be one of the signers.
+ * plan on this machine. ``can_*``: what the Library lets this account do now.
+ * ``sign_off``: whether this account's sign-off is required or optional.
  * ``author``: who wrote it, ``person`` if that is this account.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -1790,6 +1801,8 @@ export interface SharedDesignDTO {
   revisions?: PlanRevisionDTO[];
   sections: PlanSectionDTO[];
   session: string;
+  sign_off?: ("required" | "optional") | null;
+  sign_offs?: DesignSignOffDTO[];
   signed_off?: boolean;
   split: PlanWorkerDTO[];
   state: "open" | "redirected" | "approved" | "writing" | "superseded" | "cancelled" | "closed";
