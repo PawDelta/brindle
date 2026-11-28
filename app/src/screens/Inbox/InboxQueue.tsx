@@ -18,7 +18,7 @@
    an unread team row has a dot and a bolder title, and opening it, or Done,
    marks it read on every machine. */
 
-import { useEffect, useReducer, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useReducer, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import type { DaemonClient, LibraryPerson } from "../../api/client";
 import type { OpenUrl } from "../../api/open";
 import type { InboxItemDTO, PersonDTO, PlanThreadDTO, SharedDesignDTO } from "../../api/schema";
@@ -72,6 +72,7 @@ const STOPPED = ["question", "waiting"];
 /* Kinds whose one action goes somewhere other than the item's session (a doc, a plan, GitHub). */
 const ELSEWHERE = ["doc", "changes_requested", "signed_off", "pr_opened", "pr_failed"];
 const PR_KINDS = ["pr_ready", "pr_failed", "pr_opened"];
+const INLINE_MIN_WIDTH = 1000;
 
 /* A grey line where an acted-on row stood, until the person leaves the Inbox; `after` is the row that followed it. */
 interface Line {
@@ -228,6 +229,18 @@ export function InboxQueue({ items: receivedItems, synced, fresh, actions, clien
   const [menu, setMenu] = useState<string | null>(null);
   const [allDone, setAllDone] = useState(false);
   const container = useRef<HTMLDivElement>(null);
+  const [stacked, setStacked] = useState(true);
+  useLayoutEffect(() => {
+    // Measure the available width outside .iq, which caps the line length at 920px.
+    const node = container.current?.parentElement;
+    if (!node || typeof ResizeObserver === "undefined") return;
+    setStacked(node.clientWidth < INLINE_MIN_WIDTH);
+    const observer = new ResizeObserver(([entry]) => {
+      setStacked(entry.contentRect.width < INLINE_MIN_WIDTH);
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [synced]);
   const now = Date.now();
 
   const total = items.length + waitingExtraCount;
@@ -391,7 +404,7 @@ export function InboxQueue({ items: receivedItems, synced, fresh, actions, clien
       else out.splice(at, 0, { line: l });
     }
     return out.map((x) => ("row" in x
-      ? <QueueRow key={x.row.key} row={x.row} open={openKey === x.row.key} menu={menu === x.row.key} isNew={isNew(x.row)}
+      ? <QueueRow key={x.row.key} row={x.row} stacked={stacked} open={openKey === x.row.key} menu={menu === x.row.key} isNew={isNew(x.row)}
           ctx={ctx} actions={actions} client={client} refresh={refresh} onToggle={() => toggle(x.row)} onDone={canDone(x.row) ? () => done(x.row) : undefined} doing={doing.has(x.row.key)}
           onLater={() => setMenu((m) => (m === x.row.key ? null : x.row.key))} onLaterAt={(at, sig) => later(x.row, at, sig)} settle={(entry, meta) => settle(x.row, entry, meta)} markRead={() => markRead(x.row)} />
       : <DoneLine key={`line:${x.line.key}`} line={x.line} onBack={() => back(x.line.key)} />));
@@ -536,8 +549,8 @@ const stop = (f: () => void) => (e: { stopPropagation(): void }) => {
   f();
 };
 
-function QueueRow(props: RowProps) {
-  const { row, open, menu, isNew, ctx, actions, onToggle, onDone, onLater, onLaterAt } = props;
+function QueueRow(props: RowProps & { stacked: boolean }) {
+  const { row, stacked, open, menu, isNew, ctx, actions, onToggle, onDone, onLater, onLaterAt } = props;
   const title = titleOf(row);
   const age = Date.now() - Math.min(...row.items.map((i) => seenAt(i)));
   const note = row.items.map((i) => actions.notes[itemKey(i)]).find(Boolean);
@@ -545,12 +558,12 @@ function QueueRow(props: RowProps) {
   const read = row.part === "team" && !unread(row) && row.items.some((i) => i.read === true);
   return (
     <div className={`iq-item${isNew ? " new" : ""}${read ? " read" : ""}${open ? " open" : ""}${menu ? " hov" : ""}`} data-testid="inbox-row" data-kind={row.kind} data-key={row.key}
-      data-part={row.part} data-open={open || undefined} data-new={isNew || undefined} data-read={read || undefined} aria-label={title}>
+      data-part={row.part} data-layout={stacked ? "stacked" : "inline"} data-open={open || undefined} data-new={isNew || undefined} data-read={read || undefined} aria-label={title}>
       <div className="iq-r" data-testid="row-summary" role="button" tabIndex={-1} aria-expanded={open} onClick={onToggle}>
         <span className="iq-u" />
         <Avatar row={row} />
         <div className="iq-tx">
-          <div className="iq-t">{title}</div>
+          <div className="iq-t" data-field="title">{title}</div>
           <div className="iq-m">{joined(metaOf(row, ctx))}</div>
         </div>
         <div className="iq-end">
