@@ -3104,6 +3104,27 @@
       "title": "GoalDTO",
       "type": "object"
     },
+    "HeldApprovalDTO": {
+      "properties": {
+        "rev": {
+          "title": "Rev",
+          "type": "integer"
+        },
+        "waiting_on": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Waiting On",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rev",
+        "waiting_on"
+      ],
+      "title": "HeldApprovalDTO",
+      "type": "object"
+    },
     "InboxActionDTO": {
       "description": "A route the app can call to act on the item itself.",
       "properties": {
@@ -6668,6 +6689,27 @@
     },
     "PlanDTO": {
       "$defs": {
+        "HeldApprovalDTO": {
+          "properties": {
+            "rev": {
+              "title": "Rev",
+              "type": "integer"
+            },
+            "waiting_on": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Waiting On",
+              "type": "array"
+            }
+          },
+          "required": [
+            "rev",
+            "waiting_on"
+          ],
+          "title": "HeldApprovalDTO",
+          "type": "object"
+        },
         "PlanAlongsideDTO": {
           "description": "A task the supervisor assigned outside an open plan (assign's\noutside_plan): it ran at once instead of waiting on the plan. ``reason``:\nthe supervisor's. ``can_stop``: Stop still has something to cancel or remove.",
           "properties": {
@@ -6950,9 +6992,68 @@
           "title": "PlanDecisionDTO",
           "type": "object"
         },
+        "PlanDeliveryItemDTO": {
+          "properties": {
+            "body": {
+              "additionalProperties": true,
+              "title": "Body",
+              "type": "object"
+            },
+            "client_id": {
+              "title": "Client Id",
+              "type": "string"
+            },
+            "code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Code"
+            },
+            "state": {
+              "enum": [
+                "waiting",
+                "sending",
+                "refused",
+                "unconfirmed",
+                "sent"
+              ],
+              "title": "State",
+              "type": "string"
+            },
+            "tail": {
+              "title": "Tail",
+              "type": "string"
+            }
+          },
+          "required": [
+            "client_id",
+            "tail",
+            "state",
+            "body"
+          ],
+          "title": "PlanDeliveryItemDTO",
+          "type": "object"
+        },
         "PlanGateDTO": {
           "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:\nevery org review rule covering it, including those a listed reviewer meets.\n``approval_refused``: why an Approve held for the Library wasn't applied.",
           "properties": {
+            "approval_held": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/HeldApprovalDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
             "approval_refused": {
               "anyOf": [
                 {
@@ -6964,6 +7065,11 @@
               ],
               "default": null,
               "title": "Approval Refused"
+            },
+            "can_hold_approval": {
+              "default": false,
+              "title": "Can Hold Approval",
+              "type": "boolean"
             },
             "policies": {
               "default": [],
@@ -7569,6 +7675,18 @@
               ],
               "title": "Source",
               "type": "string"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Title"
             }
           },
           "required": [
@@ -8010,6 +8128,14 @@
           "title": "Markdown",
           "type": "string"
         },
+        "outbox": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanDeliveryItemDTO"
+          },
+          "title": "Outbox",
+          "type": "array"
+        },
         "queued": {
           "title": "Queued",
           "type": "integer"
@@ -8301,8 +8427,77 @@
       "title": "PlanDecisionDTO",
       "type": "object"
     },
+    "PlanDeliveryItemDTO": {
+      "properties": {
+        "body": {
+          "additionalProperties": true,
+          "title": "Body",
+          "type": "object"
+        },
+        "client_id": {
+          "title": "Client Id",
+          "type": "string"
+        },
+        "code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Code"
+        },
+        "state": {
+          "enum": [
+            "waiting",
+            "sending",
+            "refused",
+            "unconfirmed",
+            "sent"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "tail": {
+          "title": "Tail",
+          "type": "string"
+        }
+      },
+      "required": [
+        "client_id",
+        "tail",
+        "state",
+        "body"
+      ],
+      "title": "PlanDeliveryItemDTO",
+      "type": "object"
+    },
     "PlanGateDTO": {
       "$defs": {
+        "HeldApprovalDTO": {
+          "properties": {
+            "rev": {
+              "title": "Rev",
+              "type": "integer"
+            },
+            "waiting_on": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Waiting On",
+              "type": "array"
+            }
+          },
+          "required": [
+            "rev",
+            "waiting_on"
+          ],
+          "title": "HeldApprovalDTO",
+          "type": "object"
+        },
         "PlanGatePolicyDTO": {
           "description": "An org review rule covering a shared plan, which nobody on the doc can\nremove. ``when``: paths, label or any; ``matched``: what in this revision\nset it off; ``needs_kind``: team, role or person; ``eligible``: how many\npeople can meet it today; ``asked_at``: the last Ask again; ``opened_by``:\nwho the rule counts has read the doc.",
           "properties": {
@@ -8733,6 +8928,17 @@
       },
       "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:\nevery org review rule covering it, including those a listed reviewer meets.\n``approval_refused``: why an Approve held for the Library wasn't applied.",
       "properties": {
+        "approval_held": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HeldApprovalDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "approval_refused": {
           "anyOf": [
             {
@@ -8744,6 +8950,11 @@
           ],
           "default": null,
           "title": "Approval Refused"
+        },
+        "can_hold_approval": {
+          "default": false,
+          "title": "Can Hold Approval",
+          "type": "boolean"
         },
         "policies": {
           "default": [],
@@ -9546,6 +9757,18 @@
           ],
           "title": "Source",
           "type": "string"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
         }
       },
       "required": [
@@ -9946,6 +10169,18 @@
           },
           "title": "Split",
           "type": "array"
+        },
+        "title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Title"
         }
       },
       "required": [
@@ -13214,6 +13449,27 @@
           "title": "DesignSignOffDTO",
           "type": "object"
         },
+        "HeldApprovalDTO": {
+          "properties": {
+            "rev": {
+              "title": "Rev",
+              "type": "integer"
+            },
+            "waiting_on": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Waiting On",
+              "type": "array"
+            }
+          },
+          "required": [
+            "rev",
+            "waiting_on"
+          ],
+          "title": "HeldApprovalDTO",
+          "type": "object"
+        },
         "PlanAlongsideDTO": {
           "description": "A task the supervisor assigned outside an open plan (assign's\noutside_plan): it ran at once instead of waiting on the plan. ``reason``:\nthe supervisor's. ``can_stop``: Stop still has something to cancel or remove.",
           "properties": {
@@ -13496,9 +13752,68 @@
           "title": "PlanDecisionDTO",
           "type": "object"
         },
+        "PlanDeliveryItemDTO": {
+          "properties": {
+            "body": {
+              "additionalProperties": true,
+              "title": "Body",
+              "type": "object"
+            },
+            "client_id": {
+              "title": "Client Id",
+              "type": "string"
+            },
+            "code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Code"
+            },
+            "state": {
+              "enum": [
+                "waiting",
+                "sending",
+                "refused",
+                "unconfirmed",
+                "sent"
+              ],
+              "title": "State",
+              "type": "string"
+            },
+            "tail": {
+              "title": "Tail",
+              "type": "string"
+            }
+          },
+          "required": [
+            "client_id",
+            "tail",
+            "state",
+            "body"
+          ],
+          "title": "PlanDeliveryItemDTO",
+          "type": "object"
+        },
         "PlanGateDTO": {
           "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:\nevery org review rule covering it, including those a listed reviewer meets.\n``approval_refused``: why an Approve held for the Library wasn't applied.",
           "properties": {
+            "approval_held": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/HeldApprovalDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
             "approval_refused": {
               "anyOf": [
                 {
@@ -13510,6 +13825,11 @@
               ],
               "default": null,
               "title": "Approval Refused"
+            },
+            "can_hold_approval": {
+              "default": false,
+              "title": "Can Hold Approval",
+              "type": "boolean"
             },
             "policies": {
               "default": [],
@@ -14115,6 +14435,18 @@
               ],
               "title": "Source",
               "type": "string"
+            },
+            "title": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Title"
             }
           },
           "required": [
@@ -14597,6 +14929,14 @@
         "me": {
           "title": "Me",
           "type": "string"
+        },
+        "outbox": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanDeliveryItemDTO"
+          },
+          "title": "Outbox",
+          "type": "array"
         },
         "queued": {
           "title": "Queued",
@@ -16289,6 +16629,10 @@
     },
     {
       "method": "POST",
+      "path": "/v1/plans/{id}/approval/withdraw"
+    },
+    {
+      "method": "POST",
       "path": "/v1/plans/{id}/cancel"
     },
     {
@@ -16694,6 +17038,10 @@
     {
       "method": "GET",
       "path": "/v1/shared-designs/{doc_id}/history"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/shared-designs/{doc_id}/receipts"
     },
     {
       "method": "GET",

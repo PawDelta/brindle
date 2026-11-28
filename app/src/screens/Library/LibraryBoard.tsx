@@ -45,7 +45,7 @@ function Meta({ doc, stage, record }: { doc: AnalysisDoc; stage: DesignStage; re
   }
   const s = signOffs(record?.design);
   if (s) {
-    const said = stage === "approved" && record?.design?.rev ? `signed version ${record.design.rev}` : s.required ? `${s.signed} of ${s.required} signed` : "optional reviewers";
+    const said = stage === "approved" && record?.design?.rev ? `approved version ${record.design.rev}` : s.required ? `${s.signed} of ${s.required} approvals` : "optional reviewers";
     return (
       <span className="flex flex-wrap items-center gap-2 text-[11.5px] text-ink-3">
         <SignOffs record={record} say={said} />
@@ -96,7 +96,7 @@ function Card({ doc, record, queue, folder, onOpen }: { doc: AnalysisDoc; record
       )}
       {need && (
         <span className="-mx-3 -mb-2.5 mt-0.5 rounded-b-[5px] border-t border-[color-mix(in_srgb,var(--sap)_35%,transparent)] bg-sap-soft px-3 py-1.5 text-xs text-ink">
-          <b className="font-medium text-sap">{need === "review" ? "Your review" : "Changes asked"}</b>
+          <b className="font-medium text-sap">{need === "review" ? "Needs your approval" : "Changes asked"}</b>
           {need === "review" && decide > 0 && ` · ${plural(decide, "decision")} to take`}
         </span>
       )}
@@ -107,7 +107,7 @@ function Card({ doc, record, queue, folder, onOpen }: { doc: AnalysisDoc; record
 export function LibraryBoard({ docs, queue, records, folderOf, onOpen }: { docs: AnalysisDoc[]; queue: Queue; records: Map<string, DesignRecord>; folderOf(id: string): { label: string; private: boolean } | undefined; onOpen(id: string): void }) {
   const sorted = newestFirst(docs);
   return (
-    <div className="grid min-h-0 flex-1 grid-cols-5 overflow-auto border-t border-line" data-testid="library-board">
+    <div className="grid min-h-0 min-w-0 flex-1 grid-cols-[repeat(5,minmax(244px,1fr))] overflow-auto border-t border-line" data-testid="library-board">
       {BOARD_STAGES.map((column) => {
         const cards = sorted.filter((d) => stageOf(d.id, queue, records.get(d.id)) === column.id);
         return (

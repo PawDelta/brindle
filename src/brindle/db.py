@@ -1182,6 +1182,13 @@ CREATE TABLE IF NOT EXISTS visual_grants (
     explicit INTEGER NOT NULL,
     scope TEXT NOT NULL DEFAULT 'visual'
 );
+CREATE TABLE IF NOT EXISTS visual_scoped_grants (
+    root_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    remaining INTEGER NOT NULL,
+    explicit INTEGER NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'visual',
+    PRIMARY KEY (root_id, scope)
+);
 CREATE TABLE IF NOT EXISTS visual_input_state (
     root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
     generation INTEGER NOT NULL,
@@ -1255,9 +1262,14 @@ CREATE TABLE IF NOT EXISTS plans (
     decision TEXT,                 -- JSON {approved, picks, comments, note, at, rev}: the person's
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
-    ask TEXT                       -- the person's request restated by the supervisor, if given
+    ask TEXT,                      -- the person's request restated by the supervisor, if given
+    approval_notice TEXT           -- author inbox notice retained after a cancelled share is removed
 );
 CREATE INDEX IF NOT EXISTS plans_root ON plans(root_id, state);
+CREATE TABLE IF NOT EXISTS plan_reply_holds (
+    plan_id TEXT PRIMARY KEY REFERENCES plans(id) ON DELETE CASCADE,
+    lease TEXT NOT NULL
+);
 -- A plan as a design doc (brindle.plan_docs): every revision, the supervisor's
 -- and the person's own edits alike; the plans row holds the current one.
 CREATE TABLE IF NOT EXISTS plan_history_events (
@@ -1276,6 +1288,7 @@ CREATE TABLE IF NOT EXISTS plan_revisions (
     rev INTEGER NOT NULL,
     author TEXT NOT NULL,          -- supervisor | person | teammate:<sub> (from the Library)
     source TEXT NOT NULL,          -- proposal | edit | suggestion
+    title TEXT,
     lede TEXT NOT NULL,
     sections TEXT NOT NULL,        -- JSON [{id, title, kind, markdown, caption}]
     markdown TEXT NOT NULL,
@@ -1327,6 +1340,22 @@ CREATE TABLE IF NOT EXISTS doc_questions (
     PRIMARY KEY (doc_id, thread_id, owner)
 );
 -- Votes on a plan's decisions (Confirm A): one per voter and decision.
+CREATE TABLE IF NOT EXISTS plan_outbox (
+    seq INTEGER PRIMARY KEY,
+    owner TEXT NOT NULL,
+    doc TEXT NOT NULL,
+    client_id TEXT NOT NULL,
+    tail TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    prior_match INTEGER,
+    attempted INTEGER NOT NULL DEFAULT 0,
+    keyed INTEGER,
+    repo TEXT,
+    state TEXT NOT NULL DEFAULT 'waiting',
+    code TEXT,
+    sent_at REAL,
+    UNIQUE(owner, doc, client_id)
+);
 CREATE TABLE IF NOT EXISTS plan_votes (
     plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
     decision_id TEXT NOT NULL,
@@ -1531,6 +1560,7 @@ CREATE TABLE IF NOT EXISTS plan_share_threads (
     remote_id INTEGER NOT NULL,
     local_id INTEGER NOT NULL REFERENCES plan_threads(id) ON DELETE CASCADE,
     status TEXT NOT NULL,
+    delivered_at REAL,
     PRIMARY KEY (plan_id, remote_id)
 );
 """
@@ -2019,6 +2049,22 @@ def migration_incompatibility() -> str | None:
 _set_up: dict[str, int] = {}
 
 
+def adopt_visual_grants(c: sqlite3.Connection, root: str | None = None) -> None:
+    """Move legacy grants into the scoped table, in the caller's write transaction."""
+    # Keep the legacy table available to installed helpers that use the same database.
+    where, params = ("WHERE root_id=?", (root,)) if root is not None else ("", ())
+    rows = c.execute(f"DELETE FROM visual_grants {where} RETURNING root_id, remaining, explicit, scope", params)
+    for row in rows.fetchall():
+        if row["remaining"] <= 0:
+            continue
+        source = f"grant:{row['scope']}"
+        c.execute("UPDATE visual_person_words SET source=NULL WHERE root_id=? AND source=?", (row["root_id"], source))
+        c.execute("INSERT INTO visual_scoped_grants (root_id, remaining, explicit, scope) VALUES (?,?,?,?) "
+                  "ON CONFLICT(root_id, scope) DO UPDATE SET remaining=excluded.remaining, explicit=excluded.explicit",
+                  tuple(row))
+        c.execute("UPDATE visual_person_words SET source=? WHERE root_id=? AND source='grant'", (source, row["root_id"]))
+
+
 class DB:
     def __init__(self, path: str | None = None) -> None:
         p = str(path) if path is not None else str(db_path())
@@ -2069,6 +2115,16 @@ class DB:
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
+        outbox_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_outbox)")}
+        if "attempted" not in outbox_cols:
+            with self.tx() as c:
+                c.execute("ALTER TABLE plan_outbox ADD COLUMN attempted INTEGER NOT NULL DEFAULT 0")
+                # Older votes and sign-offs did not record a pre-send checkpoint.
+                c.execute("UPDATE plan_outbox SET attempted=1 WHERE state='waiting' AND "
+                          "(prior_match IS NOT NULL OR tail NOT IN ('/comments','/suggestions'))")
+        share_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_share_threads)")}
+        if "delivered_at" not in share_cols:
+            self.conn.execute("ALTER TABLE plan_share_threads ADD COLUMN delivered_at REAL")
         thread_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_threads)")}
         if "author_name" not in thread_cols:
             self.conn.execute("ALTER TABLE plan_threads ADD COLUMN author_name TEXT")
@@ -2091,11 +2147,7 @@ class DB:
             self.conn.execute("UPDATE visual_input_state SET observer=generation")
         if "invalidated_at" not in input_cols:
             self.conn.execute("ALTER TABLE visual_input_state ADD COLUMN invalidated_at REAL NOT NULL DEFAULT 0")
-        grant_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visual_grants)")}
-        if "scope" not in grant_cols:
-            self.conn.execute("ALTER TABLE visual_grants ADD COLUMN scope TEXT NOT NULL DEFAULT 'visual'")
-            # Earlier grants did not distinguish conditional requests or artifact scope.
-            self.conn.execute("UPDATE visual_grants SET remaining=0")
+        self._migrate_visual_grants()
         visual_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visuals)")}
         if "choices" not in visual_cols:
             self.conn.execute("ALTER TABLE visuals ADD COLUMN choices TEXT")
@@ -2105,8 +2157,12 @@ class DB:
             self.conn.execute("ALTER TABLE visuals ADD COLUMN answered_in_chat_rev INTEGER NOT NULL DEFAULT 0")
         if "consented_by" not in visual_cols:
             self.conn.execute("ALTER TABLE visuals ADD COLUMN consented_by TEXT")
-        if "ask" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(plans)")}:
-            self.conn.execute("ALTER TABLE plans ADD COLUMN ask TEXT")
+        plan_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plans)")}
+        for col in ("ask", "approval_notice"):
+            if col not in plan_cols:
+                self.conn.execute(f"ALTER TABLE plans ADD COLUMN {col} TEXT")
+        if "title" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_revisions)")}:
+            self.conn.execute("ALTER TABLE plan_revisions ADD COLUMN title TEXT")
         share_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_shares)")}
         for col, kind in (("org_id", "TEXT"), ("lapsed_at", "REAL"), ("unconfirmed", "TEXT"),
                           ("approve_wanted", "TEXT"), ("approve_refused", "TEXT"), ("access_refused", "TEXT"),
@@ -2295,6 +2351,19 @@ class DB:
                                   "text, heading_path, chunk_id UNINDEXED)")
         except sqlite3.OperationalError:
             pass
+
+    def _migrate_visual_grants(self) -> None:
+        def has_scope() -> bool:
+            return any(row["name"] == "scope" for row in self.conn.execute("PRAGMA table_info(visual_grants)"))
+
+        if has_scope() and self.conn.execute("SELECT 1 FROM visual_grants LIMIT 1").fetchone() is None:
+            return
+        with self.tx() as c:
+            if not has_scope():
+                # Grants from before scopes were tracked are revoked.
+                c.execute("ALTER TABLE visual_grants ADD COLUMN scope TEXT NOT NULL DEFAULT 'visual'")
+                c.execute("DELETE FROM visual_grants")
+            adopt_visual_grants(c)
 
     def _has_schema_object(self, name: str) -> bool:
         """Whether table or index ``name`` exists, asked by a read: a CREATE ... IF NOT
@@ -4798,10 +4867,14 @@ class DB:
 
     def claim_task(self, task_id: str) -> bool:
         """Move a pending task to 'starting', atomically: True for the one
-        caller that got it, so two sweeps or merges can't both start it."""
+        caller that got it, so two sweeps or merges can't both start it.
+        A task a plan's end left held for the supervisor (plan_cancel_holds)
+        is never claimed here, whatever its caller read before: only the
+        supervisor's start_now (claim_forced_task) starts it."""
         with self.tx() as c:
             return c.execute(
-                "UPDATE tasks SET state='starting' WHERE id=? AND state='pending'", (task_id,)
+                "UPDATE tasks SET state='starting' WHERE id=? AND state='pending'"
+                " AND id NOT IN (SELECT task_id FROM plan_cancel_holds)", (task_id,)
             ).rowcount == 1
 
     def claim_forced_task(self, task_id: str) -> bool:

@@ -32,7 +32,7 @@ it("shows the author a Freeze the daemon refused and leaves the document editabl
   daemon.seedLive("doc", { lede: "Text" }, { canFreeze: false });
   render(<DocPresence client={daemon.client()} visual="doc" isAuthor name="Ann" />);
   await settle();
-  fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
+  fireEvent.click(screen.getByRole("button", { name: "Freeze for approval" }));
   await settle();
   const panel = screen.getByRole("region", { name: "Live plan" });
   expect(within(panel).getByRole("alert").dataset.state).toBe("freeze-refused");
@@ -127,9 +127,9 @@ it("withdraws the rendered review and build gate when a signed live version is r
   const authorUI = within(author.container);
   await settle();
   fireEvent.click(authorUI.getByRole("button", { name: "Share" }));
-  const ownSignOff = () => within(authorUI.getByTestId("share-person-Bo")).getByRole<HTMLButtonElement>("button", { name: "Sign off" });
+  const ownSignOff = () => within(authorUI.getByTestId("share-person-Bo")).getByRole<HTMLButtonElement>("button", { name: "Approve" });
   expect(ownSignOff().disabled).toBe(true);
-  fireEvent.click(authorUI.getByRole("button", { name: "Freeze for sign-off" }));
+  fireEvent.click(authorUI.getByRole("button", { name: "Freeze for approval" }));
   await settle();
   const firstVersion = daemon.liveState("doc").version!.id;
   expect(ownSignOff().disabled).toBe(false);
@@ -160,7 +160,7 @@ it("withdraws the rendered review and build gate when a signed live version is r
   expect((reviewerUI.getByTestId("plan-sign-off") as HTMLButtonElement).disabled).toBe(true);
   expect((await live.plan("doc")).gate?.reviewers?.[0].status).toBe("waiting");
   expect((await live.sharedDesign("doc")).signed_off).toBe(false);
-  fireEvent.click(authorUI.getByRole("button", { name: "Freeze for sign-off" }));
+  fireEvent.click(authorUI.getByRole("button", { name: "Freeze for approval" }));
   await settle();
   // A delayed request for the withdrawn version cannot sign the replacement or build it.
   await expect(live.signOffPlan("doc", 7, firstVersion)).rejects.toMatchObject({ status: 409 });
@@ -194,7 +194,7 @@ it("shows awareness colours, freezes credited text for everyone and withdraws si
   const bo = editor("Bo's text");
   await act(async () => ann.dispatch({ changes: { from: 0, insert: "New " } }));
   await settle();
-  fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
+  fireEvent.click(screen.getByRole("button", { name: "Freeze for approval" }));
   await settle();
   expect(screen.getByRole("region", { name: "Live plan" }).dataset.state).toBe("sign_off");
   expect(within(screen.getByRole("list", { name: "Credited writers" })).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["Ann"]);
@@ -218,7 +218,7 @@ it("shows awareness colours, freezes credited text for everyone and withdraws si
   expect(ann.state.facet(EditorState.readOnly)).toBe(false);
   await act(async () => bo.dispatch({ changes: { from: 0, insert: "Again " } }));
   await settle();
-  fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
+  fireEvent.click(screen.getByRole("button", { name: "Freeze for approval" }));
   await settle();
   expect(daemon.liveState("doc").version?.id).toBeGreaterThan(frozen.id);
   expect(daemon.liveState("doc").version?.signOffs).toEqual([]);
@@ -305,7 +305,7 @@ it("shows the live text, not the revision's, after Done editing, once frozen and
     fireEvent.click(screen.getByRole("button", { name: "Markdown" }));
   };
   showsTyped();
-  fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
+  fireEvent.click(screen.getByRole("button", { name: "Freeze for approval" }));
   await settle();
   showsTyped();
   fireEvent.click(screen.getByRole("button", { name: "Reopen" }));
@@ -389,7 +389,7 @@ it("types a suggestion only in Suggesting on unlocked text: in Viewing or once f
   await settle();
   expect(editor("Suggestion to Summary").state.doc.toString()).toBe("Agents run here.");
   // Frozen with its text as it was: nothing can be typed, and the suggestion can't be sent.
-  fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
+  fireEvent.click(screen.getByRole("button", { name: "Freeze for approval" }));
   await settle();
   expect(editable()).toBeNull();
   expect(preview().querySelector("ins")?.textContent).toBe("Agent");
@@ -402,7 +402,7 @@ it("types a suggestion only in Suggesting on unlocked text: in Viewing or once f
 it.each([
   ["viewing", () => {}],
   ["editing", () => fireEvent.click(screen.getByRole("radio", { name: "Editing" }))],
-  ["locked", () => fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }))],
+  ["locked", () => fireEvent.click(screen.getByRole("button", { name: "Freeze for approval" }))],
 ] as const)("shows the doc's Markdown %s", async (state, enter) => {
   const daemon = new FakeDaemon();
   const live = daemon.client();

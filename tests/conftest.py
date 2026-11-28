@@ -527,14 +527,18 @@ def no_claude_usage_command(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def no_intent_model(monkeypatch):
-    """A publication nothing allows never asks the real model about the
-    person's recent messages: the call answers nothing, so it is refused as
-    before, and no cached answer carries over (tests/test_plan_ask_intent.py
-    fakes the model)."""
+    """Model checks answer no ask, including checks from confirmed CLI input."""
     from brindle import intent
 
-    intent.forget()
-    monkeypatch.setattr(intent, "_ask", lambda prompt, budget: None)
+    monkeypatch.setattr(intent, "_ask", lambda prompt, budget: "0")
+    def local_prefetch(turn, kinds):
+        db = DB(turn.path)
+        try:
+            intent.prefetch_turn(db, turn.root, turn.number, kinds)
+        finally:
+            db.conn.close()
+
+    monkeypatch.setattr(intent, "prefetch_from_hook", local_prefetch)
 
 
 @pytest.fixture(autouse=True)

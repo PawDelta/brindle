@@ -10,6 +10,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from brindle import plan_docs, plans, visual_offers
+from brindle.approval_sources import PERSON_IN_APP
 from brindle.daemon.app import build_app
 from brindle.pro import review_policies
 from brindle.pro import shared_docs as sd
@@ -104,7 +105,7 @@ def test_an_own_answer_survives_a_reopen(db, session):
 def test_the_verdict_carries_the_answers_text(db, session):
     pid = _plan(db, session)
     _add(pid)
-    plans.decide(db, pid, 1, True, person=True)
+    plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
     assert f"they chose their own answer, \"{TEXT}\"" in messages(db)[-1]
 
 

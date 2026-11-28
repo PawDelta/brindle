@@ -26,6 +26,7 @@ from starlette.requests import Request
 from starlette.background import BackgroundTask
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route, WebSocketRoute
+from starlette.types import Receive, Scope, Send
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from brindle import visuals, visual_offers
@@ -402,15 +403,64 @@ def plan(db: DB, request: Request) -> Any:
     return plans.to_dto(db, p)
 
 
-def decide_plan(db: DB, params: dict, body: dict) -> Any:
+class _DecidePlan:
     """The person's Approve or Redirect. The daemon serves the app and people,
     never agents (its Guard refuses an agent's process), so this is the person."""
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        from brindle import approval_sources, plans
+
+        reply = plans.ApprovalReply()
+
+        @_endpoint
+        def decide_plan(db: DB, params: dict, body: dict) -> Any:
+            p = plans.decide(db, params["id"], body.get("rev"), _get(body, "approved", bool, required=True),
+                             body.get("picks"), body.get("comments"), _get(body, "note"),
+                             approval=approval_sources.PERSON_IN_APP,
+                             attachments=_get(body, "attachments", list), version=body.get("version"), reply=reply)
+            return plans.to_dto(db, p)
+
+        request = Request(scope, receive, send)
+        # Read the body before shielding the action. An abandoned upload
+        # should end without waiting for data that will never arrive.
+        await request.body()
+
+        # Cancelling the ASGI task cannot stop the action thread, which may
+        # still commit. Leave cleanup attached until that thread is done.
+        async def finish() -> None:
+            await asyncio.gather(action, return_exceptions=True)
+            await asyncio.to_thread(reply.finish)
+
+        action = asyncio.create_task(decide_plan(request))
+        try:
+            response = await asyncio.shield(action)
+            await _send_plan_reply(response, scope, receive, send)
+        finally:
+            await asyncio.shield(finish())
+
+
+async def _send_plan_reply(response: Response, scope: Scope, receive: Receive, send: Send) -> None:
+    async def wait_for_disconnect() -> None:
+        while (await receive())["type"] != "http.disconnect":
+            pass
+
+    # Deadlines forwards the disconnect even when the server leaves send
+    # blocked. Race those events so the approval can release its queue.
+    write = asyncio.create_task(response(scope, receive, send))
+    disconnect = asyncio.create_task(wait_for_disconnect())
+    try:
+        done, _ = await asyncio.wait((write, disconnect), return_when=asyncio.FIRST_COMPLETED)
+        await (write if write in done else disconnect)
+    finally:
+        write.cancel()
+        disconnect.cancel()
+        await asyncio.gather(write, disconnect, return_exceptions=True)
+
+
+def withdraw_plan_approval(db: DB, params: dict, body: dict) -> Any:
     from brindle import plans
 
-    p = plans.decide(db, params["id"], body.get("rev"), _get(body, "approved", bool, required=True),
-                     body.get("picks"), body.get("comments"), _get(body, "note"), person=True,
-                     attachments=_get(body, "attachments", list), version=body.get("version"))
-    return plans.to_dto(db, p)
+    return plans.to_dto(db, plans.withdraw_approval(db, params["id"], _get(body, "rev", int, required=True)))
 
 
 def cancel_plan(db: DB, params: dict, body: dict) -> Any:
@@ -873,14 +923,13 @@ def review_policies_impact(db: DB, params: dict, body: dict) -> Any:
 
 
 # A design shared by someone else (brindle.pro.shared_reader), by its Library
-# doc id. Only the person reaches these; each answers with the design as the
-# Library has it now, and nothing is kept here.
+# doc id. The person's review writes can return an outbox receipt while offline.
 
 
 def _shared_design(repo: str | None, work: Callable[[Any], Any], *, require_entitlement: bool = True) -> Any:
     from pydantic import ValidationError
 
-    from brindle import airgap, config, keystore
+    from brindle import airgap, config, keystore, plan_outbox
     from brindle.daemon import routes_actions as actions
     from brindle.pro import analysis_docs, auth, shared_reader
 
@@ -891,13 +940,17 @@ def _shared_design(repo: str | None, work: Callable[[Any], Any], *, require_enti
             actions._docs_entitlement(repo, None if airgap.enabled() else analysis_docs._session()[1])
         return work(shared_reader)
     except (RuntimeError, auth.AuthError, keystore.KeychainReadBlocked, ValidationError) as e:
-        raise actions.upstream_error(e) from e
+        error = actions.upstream_error(e)
+        if isinstance(e, plan_outbox.AccessLost):
+            error.extra["refused_changes"] = e.receipts
+            error.extra["unconfirmed_changes"] = e.unconfirmed
+        raise error from e
 
 
 @_json
 def shared_design(db: DB, request: Request) -> Any:
     doc = request.path_params["doc_id"]
-    return _shared_design(request.query_params.get("repo") or None, lambda r: r.read(doc))
+    return _shared_design(request.query_params.get("repo") or None, lambda r: r.read(doc, db=db))
 
 
 @_json
@@ -975,15 +1028,29 @@ def shared_design_comparison(db: DB, request: Request) -> Any:
                           lambda r: r.comparison(request.path_params["doc_id"], request.path_params["n"]))
 
 
+def _plan_change(db, body, work):
+    from brindle import plan_outbox
+
+    with plan_outbox.writing(db, body.get("client_id"), _get(body, "repo")):
+        return _shared_design(_get(body, "repo"), work)
+
+
+def shared_design_receipts(db: DB, params: dict, body: dict) -> Any:
+    return _shared_design(_get(body, "repo"), lambda r: r.acknowledge_receipts(
+        db, params["doc_id"], body.get("owner"), body.get("client_ids")))
+
+
 def shared_design_comment(db: DB, params: dict, body: dict) -> Any:
     """A comment, a reply (``parent``), or a question for the person's own
     supervisor, which starts it only once this answer has been written."""
     doc, repo, parent = params["doc_id"], _get(body, "repo"), _get(body, "parent", int)
     if parent is not None:
-        return _shared_design(repo, lambda r: r.reply(doc, body.get("rev"), parent, body.get("text")))
+        return _plan_change(db, body, lambda r: r.reply(doc, body.get("rev"), parent, body.get("text")))
     question = _get(body, "question", bool, default=False)
-    design = _shared_design(repo, lambda r: r.comment(doc, body.get("rev"), _get(body, "anchor", dict), body.get("text"),
-                                                      question=question))
+    def work(r):
+        return r.comment(doc, body.get("rev"), _get(body, "anchor", dict), body.get("text"), question=question)
+
+    design = _shared_design(repo, work) if question else _plan_change(db, body, work)
     if not question:
         return design
     from brindle.pro import doc_questions, shared_reader
@@ -997,7 +1064,7 @@ def shared_design_comment(db: DB, params: dict, body: dict) -> Any:
 
 
 def shared_design_suggest(db: DB, params: dict, body: dict) -> Any:
-    return _shared_design(_get(body, "repo"), lambda r: r.suggest(
+    return _plan_change(db, body, lambda r: r.suggest(
         params["doc_id"], body.get("rev"), body.get("section"), body.get("start"), body.get("before"), body.get("after"),
         body.get("text", "")))
 
@@ -1007,7 +1074,7 @@ def shared_design_thread(db: DB, params: dict, body: dict) -> Any:
 
 
 def shared_design_vote(db: DB, params: dict, body: dict) -> Any:
-    return _shared_design(_get(body, "repo"), lambda r: r.vote(params["doc_id"], body.get("rev"), body.get("decision"),
+    return _plan_change(db, body, lambda r: r.vote(params["doc_id"], body.get("rev"), body.get("decision"),
                                                                body.get("option")))
 
 
@@ -1029,7 +1096,7 @@ def shared_design_sign_off(db: DB, params: dict, body: dict) -> Any:
     screen: that version is what they read (its own text), so it is the one
     signed, even if their read of the revision came before the freeze."""
     version = body.get("version")
-    return _shared_design(_get(body, "repo"), lambda r: r.sign_off(
+    return _plan_change(db, body, lambda r: r.sign_off(
         params["doc_id"], body.get("rev") if version is None else version))
 
 
@@ -1269,7 +1336,8 @@ ROUTES = [
     Route("/v1/visuals/{id}/read", _endpoint(mark_read), methods=["POST"]),
     Route("/v1/visuals/{id}/snapshot", _endpoint(snapshot), methods=["POST"]),
     Route("/v1/plans/{id}", plan),
-    Route("/v1/plans/{id}/decide", _endpoint(decide_plan), methods=["POST"]),
+    Route("/v1/plans/{id}/decide", _DecidePlan(), methods=["POST"], name="decide_plan"),
+    Route("/v1/plans/{id}/approval/withdraw", _endpoint(withdraw_plan_approval), methods=["POST"]),
     Route("/v1/plans/{id}/cancel", _endpoint(cancel_plan), methods=["POST"]),
     Route("/v1/plans/{id}/alongside/{task}/stop", _endpoint(stop_alongside), methods=["POST"]),
     Route("/v1/plans/{id}/revisions/{n}", plan_revision),
@@ -1301,6 +1369,7 @@ ROUTES = [
     Route("/v1/library/people", library_people),
     Route("/v1/share-links/design", _endpoint(share_link_design), methods=["POST"]),
     Route("/v1/shared-designs/{doc_id}", shared_design),
+    Route("/v1/shared-designs/{doc_id}/receipts", _endpoint(shared_design_receipts), methods=["POST"]),
     Route("/v1/shared-designs/{doc_id}/history", shared_design_history),
     Route("/v1/shared-designs/{doc_id}/revisions/{n:int}/changes", shared_design_comparison),
     Route("/v1/shared-designs/{doc_id}/comments", _endpoint(shared_design_comment), methods=["POST"]),

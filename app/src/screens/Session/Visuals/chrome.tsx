@@ -84,9 +84,9 @@ export function KeepButton({ client, visual, onKept }: { client: VisualsClient; 
   return (
     <>
       {keepError && <span className="text-xs text-sap">{keepError}</span>}
-      <LoadingButton className={`${button} pl-2.5 ${visual.kept ? "border-branch/45 bg-branch-soft" : ""}`} busy={keeping} disabled={keeping} aria-pressed={visual.kept} title={visual.kept ? "Kept in Library › Kept docs (click to remove)" : "Keep a copy in Library › Kept docs"} data-testid="visual-keep" onClick={() => void keep()}>
-        <BookmarkIcon size={15} filled={visual.kept} className={visual.kept ? "text-branch" : "text-ink-2"} />
-        {visual.kept ? "Kept" : "Keep"}
+      <LoadingButton className={`${button} ${visual.kind === "plan" ? "gap-1.5 px-2 text-xs" : "pl-2.5"} ${visual.kept ? "border-branch/45 bg-branch-soft" : ""}`} busy={keeping} disabled={keeping} aria-pressed={visual.kept} title={visual.kept ? "Kept in Library › Kept docs (click to remove)" : "Keep a copy in Library › Kept docs"} data-testid="visual-keep" onClick={() => void keep()}>
+        <BookmarkIcon size={visual.kind === "plan" ? 13 : 15} filled={visual.kept} className={visual.kept ? "text-branch" : "text-ink-2"} />
+        {visual.kept && visual.kind !== "plan" ? "Kept" : "Keep"}
       </LoadingButton>
     </>
   );

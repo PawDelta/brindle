@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from starlette.testclient import TestClient
 
 from brindle import identity_lock, mcp_server, plan_docs, plans, tasks, visual_offers
+from brindle.approval_sources import PERSON_IN_APP
 from brindle.crdt import SharedDoc
 from brindle.daemon import holds
 from brindle.daemon.app import build_app
@@ -296,10 +297,11 @@ def test_ask_the_supervisor_routes_to_the_teammates_session(db, parts, monkeypat
     lib.comment({"rev": 1, "anchor": {"kind": "section", "section": "summary"},
                  "text": "Why these workers?", "question": True}, {})
     repo = db.get_workspace(own.workspace_id).repo_root
+    before = messages(db)
     first = dq.dispatch(db, DOC, 1, repo_root=repo, **net)
     assert first["agent_id"] == own.id
     assert dq.dispatch(db, DOC, 1, repo_root=repo, **net) == first
-    assert db.pending_count(own.id) == 1 and not messages(db)
+    assert db.pending_count(own.id) == 1 and messages(db) == before
     with pytest.raises(ServiceError):
         dq.reply(db, boss, DOC, 1, "Not my question.", **net)
     dq.reply(db, own, DOC, 1, "They keep execution on your machines.", **net)
@@ -371,8 +373,9 @@ def test_ask_the_supervisor_without_a_session(db, parts, monkeypatch, provider, 
             db_.conn.execute("INSERT INTO startup_prompts (agent_id, pane, launched_at) VALUES (?,'pane',1)", (a.id,))
 
     monkeypatch.setattr(agents, "_launch", launch)
+    before = messages(db)
     got = dq.dispatch(db, DOC, 1, **net)
-    assert not messages(db)
+    assert messages(db) == before
     if provider and not failed:
         a, ws = launches[0]
         assert got["agent_id"] == a.id
@@ -438,9 +441,10 @@ def test_ask_the_supervisor_author_gets_immediate_answer_and_questions_are_not_f
     monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
     original = sd._require_team
     monkeypatch.setattr(sd, "_require_team", lambda store: original(net["store"]))
+    before = messages(db)
     response = plan_comment(db, {"id": pid}, {"rev": 1, "anchor": {"kind": "section", "section": "summary"},
                                              "text": "Why these workers?", "question": True})
-    assert not messages(db)
+    assert messages(db) == before
 
     async def transport():
         entered, release = asyncio.Event(), asyncio.Event()
@@ -452,18 +456,18 @@ def test_ask_the_supervisor_author_gets_immediate_answer_and_questions_are_not_f
 
         task = asyncio.create_task(response({"type": "http"}, None, send))
         await entered.wait()
-        assert not messages(db)
+        assert messages(db) == before
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert not messages(db)
+        assert messages(db) == before
         # A new request whose body reaches the person releases the dispatch.
         release.set()
         await response({"type": "http"}, None, send)
 
     asyncio.run(transport())
     got = json.loads(response.body)
-    assert messages(db) and got["threads"][0]["question"]
+    assert messages(db)[len(before):] and got["threads"][0]["question"]
     plans.reply(db, db.get_agent("boss"), pid, got["threads"][0]["id"], "An answer.")
     lib.threads.append({"id": 99, "kind": "comment", "rev": 1, "author": "teammate", "question": True,
                         "text": "Teammate private question", "status": "open", "replies": [],
@@ -524,8 +528,9 @@ def test_ask_the_supervisor_on_a_local_doc(db, parts):
 
     pid, _, _ = parts
     tid = plan_docs.comment(db, pid, 1, {"kind": "section", "section": "summary"}, "Why?", question=True)
+    pending = db.pending_count("boss")
     dq.ask_plan(db, pid, tid)
-    assert db.pending_count("boss") == 1
+    assert db.pending_count("boss") == pending + 1
     before = messages(db)
     plans.reply(db, db.get_agent("boss"), pid, tid, "To keep execution local.")
     assert plans.to_dto(db, plans.get(db, pid))["threads"][0]["replies"][0]["from_supervisor"]
@@ -600,7 +605,7 @@ def test_required_reviewers_share_sign_off_and_build_through_the_daemon_routes(d
 
 
 def test_required_reviewers_are_synced_in_the_background(monkeypatch):
-    from brindle.daemon import lifecycle
+    from brindle.daemon import health, lifecycle
     from brindle.daemon.session_review import ReadinessWatch
 
     now, synced = [0.0], []
@@ -610,17 +615,24 @@ def test_required_reviewers_are_synced_in_the_background(monkeypatch):
 
     async def elapse(seconds):
         now[0] += lifecycle.SHARED_DOCS_EVERY + 1
-        await asyncio.to_thread(int)            # lets the sync's own task run
-        if synced:
-            Server.should_exit = True
+        Server.should_exit = True
+
+    async def watch():
+        await lifecycle._watch(Server(), lifecycle.Activity(build_app(TOKEN, port=8123)), False,
+                               wait=elapse, clock=lambda: now[0])
+        # Finish the background tasks dispatched by this watch tick.
+        await asyncio.gather(*(asyncio.all_tasks() - {asyncio.current_task()}))
 
     monkeypatch.setattr(lifecycle, "_sync_shared_docs", lambda: synced.append(True))
+    monkeypatch.setattr(health.Monitor, "tick", lambda *args: None)
+    monkeypatch.setattr(lifecycle, "_send_share_invites", lambda: None)
+    monkeypatch.setattr(lifecycle, "_provider_switch_sweep", lambda: None)
+    monkeypatch.setattr(lifecycle, "_provider_update_sweep", lambda refresh_policy: None)
     monkeypatch.setattr(ReadinessWatch, "sweep_safely", lambda self: None)
     monkeypatch.setattr(lifecycle, "_purge_typed_words", lambda: None)
     monkeypatch.setattr(lifecycle, "_keep_codex_hook", lambda settle=0.0: None)
     monkeypatch.setattr(lifecycle, "_cull_sweep", lambda: None)
-    asyncio.run(lifecycle._watch(Server(), lifecycle.Activity(build_app(TOKEN, port=8123)), False, wait=elapse,
-                                 clock=lambda: now[0]))
+    asyncio.run(watch())
     assert synced
 
 
@@ -762,7 +774,7 @@ def test_a_shared_plan_goes_to_the_library_and_what_teammates_write_comes_back(d
     assert plan_docs.fields(db, plans.get(db, pid))["threads"][-1]["text"] == "Name the VM rule."
 
     # Request changes carries teammates' open comments and replies to the supervisor.
-    plans.decide(db, pid, 3, False, person=True)
+    plans.decide(db, pid, 3, False, approval=PERSON_IN_APP)
     said = messages(db)[-1]
     assert "Name the VM rule." in said and "Yes." in said
     assert "u_a" not in said and "u_b" not in said
@@ -1114,7 +1126,7 @@ def test_a_teammates_edit_comes_in_as_a_revision_and_later_sends_go_on_it(db, pa
 
     # A redirected plan is the supervisor's to revise, who hears about the teammate's edit.
     lib.content["sections"][0].update(kind="markdown", markdown="Back to text.")
-    plans.decide(db, pid, 3, False, note="Tighten it.", person=True)
+    plans.decide(db, pid, 3, False, note="Tighten it.", approval=PERSON_IN_APP)
     assert "A teammate" in messages(db)[-1] and "u_e" not in messages(db)[-1]
     sd.sync(db, pid, **net)
     assert plans.get(db, pid)["rev"] == 3
@@ -1267,8 +1279,14 @@ def test_a_comment_the_library_committed_before_a_server_error_stays_one_thread(
     mine = plan_docs.comment(db, pid, 1, {"kind": "section", "section": "summary"}, "Which ones?")
     lib.answer_status = 500
     sd.sync(db, pid, **net)
+    def delivery():
+        return next(item["state"] for item in plans.to_dto(db, plans.get(db, pid))["outbox"]
+                    if item["body"]["thread_item"] == mine)
+
+    assert delivery() == "waiting"
     lib.answer_status = 200
     sd.sync(db, pid, **net)
+    assert delivery() == "sent"
     assert len(lib.threads) == 1 and len(sent(backend, f"POST {DESIGN}/comments")) == 1
     assert [t["author"] for t in plan_docs.fields(db, plans.get(db, pid))["threads"]] == ["person"]
 
@@ -1316,7 +1334,7 @@ def test_a_plan_that_isnt_shared_still_files_its_approval_record(db, parts, monk
     pid, _, _ = parts
     uploads = []
     monkeypatch.setattr(ad, "on_merged", lambda *a: uploads.append(a))
-    plans.decide(db, pid, 1, True, person=True)
+    plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
     assert len(uploads) == 1
 
 
@@ -1442,7 +1460,8 @@ def test_lapsed_plan_becomes_a_personal_doc(db, parts, session, backend, monkeyp
         assert got["gate"] is None and got["team_ended"] is True and plans.gate_shut(db, root) is None
         assert got["threads"][0]["text"] == "Which VM?"
 
-        # Work queued behind the doc, then the app goes away: only a current confirmation may release it.
+        # Work queued behind the doc, then the app goes away: only a current confirmation lifts the review
+        # gate, and the work still waits for the person's approval.
         assert "behind plan" in asyncio.run(mcp_server.assign("developer", "build it", **work(db))) and started == []
         monkeypatch.setattr(holds, "app_connected", lambda: False)
 
@@ -1453,7 +1472,8 @@ def test_lapsed_plan_becomes_a_personal_doc(db, parts, session, backend, monkeyp
             db.conn.execute("UPDATE plan_shares SET lapsed_at=? WHERE plan_id=?", (time.time() - seconds, plan))
 
         def released():
-            assert plans.holding(db, root) is None and tasks.build_gate_refusal(db, boss.id) is None
+            assert plans.gate_shut(db, root) is None and tasks.build_gate_refusal(db, boss.id) is None
+            assert plans.holding(db, root)["id"] == pid and started == []
 
         def held():
             assert plans.holding(db, root) and plans.gate_shut(db, root) and tasks.build_gate_refusal(db, boss.id)

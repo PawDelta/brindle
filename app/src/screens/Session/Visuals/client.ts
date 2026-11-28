@@ -6,7 +6,7 @@ import type { DaemonClient } from "../../../api/client";
 export type VisualsClient = Pick<DaemonClient, "visuals" | "answerVisual" | "dismissVisual" | "keepVisual" | "unkeepVisual" | "markVisualRead">;
 
 /* A planning doc's reads and the person's verdict (brindle/plans.py). */
-export type PlansClient = Pick<DaemonClient, "plan" | "decidePlan">;
+export type PlansClient = Pick<DaemonClient, "plan" | "decidePlan"> & Partial<Pick<DaemonClient, "withdrawPlanApproval">>;
 /* What the person writes on the design doc (brindle/plan_docs.py): comments and replies,
    suggestions and their answers, direct edits, and their pick on a decision. */
 export type PlanDocClient = Pick<DaemonClient, "commentPlan" | "replyPlan" | "resolvePlanThread" | "suggestPlan" | "acceptPlanSuggestion" | "rejectPlanSuggestion" | "editPlan" | "confirmPlan"> & Partial<Pick<DaemonClient, "planHistory" | "planRevisionChanges" | "addPlanAnswer" | "changePlanAnswer">>;
@@ -18,7 +18,7 @@ export type PlanSharingClient = Pick<DaemonClient, "sharePlan" | "setPlanReviewe
 export type PlanAccessCalls = "planAccess" | "syncPlanAccess" | "invitePlanPerson" | "setPlanPersonAccess" | "setPlanPersonSignOff" | "removePlanPerson" | "removePlanScope" | "unsharePlan" | "planInvites" | "ackPlanInvites" | "dismissPlanInvite";
 
 /* A design someone else shared, read and reviewed from the Library (brindle/pro/shared_reader.py). */
-export type SharedDesignClient = Pick<DaemonClient, "sharedDesign" | "writeSharedDesign" | "libraryPeople"> & Partial<Pick<DaemonClient, "sharedDesignHistory" | "sharedDesignRevisionChanges" | "designPeople" | DesignAccessCalls>>;
+export type SharedDesignClient = Pick<DaemonClient, "sharedDesign" | "writeSharedDesign" | "libraryPeople"> & Partial<Pick<DaemonClient, "acknowledgeDesignReceipts" | "sharedDesignHistory" | "sharedDesignRevisionChanges" | "designPeople" | DesignAccessCalls>>;
 /* The same, for an editor of a design someone else shared. */
 export type DesignAccessCalls = "designAccess" | "inviteDesignPerson" | "setDesignPersonAccess" | "setDesignPersonSignOff" | "removeDesignPerson" | "removeDesignScope";
 

@@ -4,7 +4,7 @@
    pinned on top whatever the grouping; the rest follow in groups (a folder as repo / folder, a
    stage, or none), newest first. A row opens the design. */
 
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import type { AnalysisDoc, BulkDocResult, BulkDocsRequest, DaemonClient, DocScope } from "../../api/client";
 import type { RepoDTO } from "../../api/schema";
 import { plain } from "../../api/wording";
@@ -16,6 +16,8 @@ import { scopeLabel, SignOffs, StagePill, WorkItem } from "./parts";
 
 /* The table's columns: design, stage, sign-offs, open, shared with, changed. */
 export const COLUMNS = "grid grid-cols-[minmax(0,1fr)_150px_120px_150px_124px_76px] items-center gap-x-4 px-8";
+// A 1400px window leaves 1048px for the Library beside the 352px sidebar.
+const TABLE_MIN_WIDTH = 1048;
 const checkbox = "absolute left-2 top-1/2 size-4 -translate-y-1/2 accent-branch";
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -26,7 +28,7 @@ function openLine(doc: AnalysisDoc, record?: DesignRecord | null): string {
   return parts.length ? parts.join(" · ") : "—";
 }
 
-function Row({ doc, record, queue, scopes, match, check, failure, onOpen }: { doc: AnalysisDoc; record?: DesignRecord | null; queue: Queue; scopes: DocScope[]; match?: string | null; check: ReactNode; failure?: BulkDocResult; onOpen(): void }) {
+function Row({ doc, record, queue, scopes, match, check, failure, stacked, onOpen }: { doc: AnalysisDoc; record?: DesignRecord | null; queue: Queue; scopes: DocScope[]; match?: string | null; check: ReactNode; failure?: BulkDocResult; stacked: boolean; onOpen(): void }) {
   const stage = stageOf(doc.id, queue, record);
   const need = needsYou(doc.id, queue);
   const work = record?.work_item ?? doc.work_item;
@@ -34,23 +36,39 @@ function Row({ doc, record, queue, scopes, match, check, failure, onOpen }: { do
     : record?.can_edit !== undefined || record?.can_comment !== undefined ? record : doc;
   const access = grants?.can_edit ? "you can edit" : grants?.can_comment ? "you can comment"
     : grants?.can_edit === false && grants.can_comment === false ? "you can view" : null;
+  const changed = (
+    <span data-field="changed" className={`text-right text-xs text-ink-3 ${stacked ? "whitespace-nowrap" : ""}`}>
+      {changedAgo(doc.updated_at ?? doc.created_at)}
+    </span>
+  );
+  const metadata = (
+    <>
+      <span data-field="stage" className={stacked ? "flex flex-wrap items-center gap-x-s1 gap-y-1" : "grid justify-items-start gap-1"}>
+        <StagePill stage={stage} need={need} record={record} />
+        <WorkItem item={work} />
+      </span>
+      <span data-field="sign-offs" className={stacked ? undefined : "contents"}><SignOffs record={record} /></span>
+      <span data-field="open" className={`text-xs text-ink-3 ${stacked ? "wrap-anywhere" : "truncate"}`}>{openLine(doc, record)}</span>
+      <span data-field="shared-with" className={`text-xs text-ink-2 ${stacked ? "wrap-anywhere" : ""}`}>
+        {scopeLabel(doc.scope, scopes)}{access && <span className="block text-ink-3">{access}</span>}
+      </span>
+    </>
+  );
   return (
-    <li className="group border-b border-line" data-doc={doc.id} data-stage={stage} data-needs-you={need ?? undefined} data-to-decide={openItems(doc, record).decide}>
+    <li className="group border-b border-line" data-doc={doc.id} data-layout={stacked ? "stacked" : "table"} data-stage={stage} data-needs-you={need ?? undefined} data-to-decide={openItems(doc, record).decide}>
       <div className="relative">
         {check}
-        <button type="button" className={`${COLUMNS} w-full py-[9px] text-left hover:bg-surface-2`} onClick={onOpen}>
-          <span className="min-w-0">
-            <span className="block truncate text-[13.5px] font-semibold text-ink">{doc.title || doc.id}</span>
+        <button type="button" className={`${stacked ? "grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-s2 gap-y-1 px-8" : COLUMNS} w-full py-[9px] text-left hover:bg-surface-2`} onClick={onOpen}>
+          <span data-field="title" className="min-w-0">
+            <span data-plan-title className={`block text-[13.5px] font-semibold text-ink ${stacked ? "wrap-anywhere" : "truncate"}`}>{doc.title || doc.id}</span>
             {(match || doc.summary) && <span className="block truncate text-[12.5px] text-ink-3">{match || doc.summary}</span>}
           </span>
-          <span className="grid justify-items-start gap-1">
-            <StagePill stage={stage} need={need} record={record} />
-            <WorkItem item={work} />
-          </span>
-          <SignOffs record={record} />
-          <span className="truncate text-xs text-ink-3">{openLine(doc, record)}</span>
-          <span className="text-xs text-ink-2">{scopeLabel(doc.scope, scopes)}{access && <span className="block text-ink-3">{access}</span>}</span>
-          <span className="text-right text-xs text-ink-3">{changedAgo(doc.updated_at ?? doc.created_at)}</span>
+          {stacked ? (
+            <>
+              {changed}
+              <span data-field="metadata" className="col-span-2 flex min-w-0 flex-wrap items-center gap-x-s2 gap-y-1">{metadata}</span>
+            </>
+          ) : <>{metadata}{changed}</>}
         </button>
       </div>
       {failure && (
@@ -115,6 +133,7 @@ const outcome: Record<Action, [string, string]> = {
 };
 
 export function LibraryList({ client, repo, groups, queue, records, scopes, folders, repos, matches, onOpen }: LibraryListProps) {
+  const [stacked, setStacked] = useState(true);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [menu, setMenu] = useState<Menu | null>(null);
   const [busy, setBusy] = useState(false);
@@ -122,8 +141,21 @@ export function LibraryList({ client, repo, groups, queue, records, scopes, fold
   const [failures, setFailures] = useState<Map<string, BulkDocResult>>(() => new Map());
   const deleteDescription = useId();
   const moveDescription = useId();
+  const list = useRef<HTMLDivElement>(null);
   const anchor = useRef<string | null>(null);
   const running = useRef(false);
+  const visible = groups.length > 0 || Boolean(said);
+
+  useLayoutEffect(() => {
+    const node = list.current;
+    if (!node || typeof ResizeObserver === "undefined") return;
+    setStacked(node.clientWidth < TABLE_MIN_WIDTH);
+    const observer = new ResizeObserver(([entry]) => {
+      setStacked(entry.contentRect.width < TABLE_MIN_WIDTH);
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [visible]);
 
   const rows = groups.flatMap((group) => group.docs);
   const picked = rows.filter((doc) => selected.has(doc.id));
@@ -254,9 +286,9 @@ export function LibraryList({ client, repo, groups, queue, records, scopes, fold
   });
   const unlabelled = groups.find((group) => !group.label);
 
-  if (!groups.length && !said) return null;
+  if (!visible) return null;
   return (
-    <div className="flex flex-col" data-testid="library-list">
+    <div ref={list} className="flex min-w-0 flex-col" data-testid="library-list">
       <div className="sticky top-0 z-[2] bg-canvas">
         {hasSelection && (
           <div className={`${card} mx-8 mb-2 flex flex-col gap-1 pt-2`}>
@@ -301,14 +333,16 @@ export function LibraryList({ client, repo, groups, queue, records, scopes, fold
           </div>
         )}
         {said && <p role="status" className={`${notice} mx-8 mb-2`}>{said}</p>}
-        {groups.length > 0 && <div className={`${COLUMNS} relative border-b border-line-strong pb-1.5 text-[11px] font-medium uppercase tracking-[0.07em] text-ink-3`}>
+        {groups.length > 0 && (!stacked || unlabelled) && <div className={`${stacked ? "px-8" : COLUMNS} relative border-b border-line-strong pb-1.5 text-[11px] font-medium uppercase tracking-[0.07em] text-ink-3`}>
           {unlabelled && groupCheck(unlabelled)}
           <span>Plan</span>
-          <span>Stage</span>
-          <span>Sign-offs</span>
-          <span>Open</span>
-          <span>Shared with</span>
-          <span className="text-right text-branch" title="Most recently changed first">Changed ↓</span>
+          {!stacked && <>
+            <span>Stage</span>
+            <span>Approvals</span>
+            <span>Open</span>
+            <span>Shared with</span>
+            <span className="text-right text-branch" title="Most recently changed first">Changed ↓</span>
+          </>}
         </div>}
       </div>
       {groups.map((group) => (
@@ -316,7 +350,7 @@ export function LibraryList({ client, repo, groups, queue, records, scopes, fold
           <GroupHead group={group} queue={queue} check={groupCheck(group)} />
           <ul className="flex flex-col">
             {group.docs.map((d) => (
-              <Row key={d.id} doc={d} record={records.get(d.id)} queue={queue} scopes={scopes} match={matches?.get(d.id)} failure={failures.get(d.id)} onOpen={() => onOpen(d.id)}
+              <Row key={d.id} doc={d} record={records.get(d.id)} queue={queue} scopes={scopes} match={matches?.get(d.id)} failure={failures.get(d.id)} stacked={stacked} onOpen={() => onOpen(d.id)}
                 check={<input type="checkbox" aria-label={`Select ${d.title || d.id}`} checked={selected.has(d.id)} disabled={busy}
                   className={`${checkbox} ${hasSelection ? "" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"}`}
                   onChange={(event) => selectRow(d, event.currentTarget.checked, (event.nativeEvent as MouseEvent).shiftKey)} />} />

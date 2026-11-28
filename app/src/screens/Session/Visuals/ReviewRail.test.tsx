@@ -1,0 +1,149 @@
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, expect, it, vi } from "vitest";
+import { toBase64, type Plan, type TrackerLink, type VisualDTO } from "../../../api/client";
+import { FakeDaemon } from "../../../test/fakeDaemon";
+import { PlanReader } from "./PlanReader";
+import { SharedDesignReader } from "./SharedDesignReader";
+import type { Work } from "./WorkPanel";
+
+afterEach(cleanup);
+const visual: VisualDTO = { id: "plan", kind: "plan", session: "boss", by: "supervisor", title: "Delivery", rev: 1, created_at: 1, unread: false, kept: false };
+function read(extra: Partial<Plan> = {}, reviewer = false, hold?: Promise<void>, work?: Work) {
+  const plan: Plan = { ...visual, state: "open", markdown: "# Delivery", lede: "", queued: 0, sections: [{ id: "context", title: "Context", markdown: "Notes" }], decisions: [], split: [], threads: [], ...extra };
+  const daemon = new FakeDaemon();
+  const doc = daemon.seedLive(plan.id, { context: "Notes" }, { plan, author: "sam", me: reviewer ? "alice" : "sam" });
+  const signOffs = plan.gate?.reviewers?.flatMap(r => r.sub && r.status === "signed_off" ? [r.sub] : []) ?? [];
+  daemon.setLiveState(plan.id, { lock: "sign_off", version: { id: plan.rev, snapshot: toBase64(doc.export({ mode: "snapshot" })), writers: [], signOffs } });
+  const client = daemon.client();
+  if (hold) {
+    const decide = client.decidePlan.bind(client);
+    vi.spyOn(client, "decidePlan").mockImplementation(async (...args) => { await hold; return decide(...args); });
+  }
+  if (reviewer) return render(<SharedDesignReader docId={plan.id} client={client} onBack={() => {}} work={work} />);
+  return render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+}
+
+const gate: Plan["gate"] = { state: "waiting", required: 1, signed: 0, waiting_on: ["alice"], reviewers: [
+  { sub: "alice", required: true, status: "waiting" }, { sub: "bob", required: false, status: "waiting" },
+] };
+
+const decision: Plan["decisions"][number] = { id: "transport", title: "Transport", confirmed: "http", options: [{ id: "http", label: "HTTP", pros: [], cons: [] }] };
+const pick: NonNullable<Plan["outbox"]>[number] = { client_id: "pick", tail: "/votes", state: "waiting", body: { rev: 1, decision: "transport", option: "http" } };
+
+it("shows the author's gate and groups its signers by their effect on approval", async () => {
+  read({ gate, decisions: [decision] });
+  const rail = await screen.findByTestId("review-rail");
+  expect(within(rail).getByTestId("plan-build")).toHaveProperty("disabled", true);
+  expect(within(rail).getByTestId("signoff-alice").closest("[data-group]")?.getAttribute("data-group")).toBe("required");
+  expect(within(rail).getByTestId("signoff-bob").closest("[data-group]")?.getAttribute("data-group")).toBe("optional");
+});
+
+it("gives a reviewer the sign-off action in their rail", async () => {
+  read({ gate }, true);
+  const rail = within(await screen.findByTestId("review-rail"));
+  fireEvent.click(rail.getByRole("button", { name: "Comment" }));
+  expect(within(rail.getByTestId("thread-draft")).getByRole("textbox")).toBeTruthy();
+  await waitFor(() => expect(rail.getByTestId("plan-sign-off")).toHaveProperty("disabled", false));
+  fireEvent.click(rail.getByTestId("plan-sign-off"));
+  await waitFor(() => expect(rail.getByTestId("signoff-alice").dataset.state).toBe("signed"));
+});
+
+it("groups queued rail items under a single delivery status", async () => {
+  read({ gate, decisions: [decision], outbox: [pick,
+    { client_id: "reply", tail: "/comments", state: "sending", body: { rev: 1, parent: 1, thread_item: 2 } },
+  ] });
+  const rail = within(await screen.findByTestId("review-rail"));
+  const groups = rail.getAllByTestId("rail-queue");
+  expect(groups).toHaveLength(1);
+  expect(groups[0].querySelectorAll("[data-state] [data-state]")).toHaveLength(0);
+  expect(within(groups[0]).getByRole("heading").dataset.queueCount).toBe("2");
+  expect(groups[0].querySelectorAll("[data-state]")).toHaveLength(2);
+});
+
+it("shows a waiting author pick in the decision status slot", async () => {
+  read({ gate, decisions: [decision], outbox: [pick] });
+  const card = within(await screen.findByTestId("plan-decision"));
+  const header = card.getByRole("heading").previousElementSibling;
+  expect(header?.querySelector("[data-state=waiting]")).toBeTruthy();
+  expect(card.queryByTestId("plan-decision-approval")).toBeNull();
+});
+
+it("shows the linked item's title beside its tracker chip", async () => {
+  const epic = {
+    link_id: "link", tracker: "jira", key: "WEB-311", display: "WEB-311",
+    title: "Team webhooks", target: { kind: "design" }, state: "Active",
+  } satisfies TrackerLink;
+  const write = async () => {};
+  read({ gate }, true, undefined, {
+    state: { epic, items: [epic], connected: { jira: true }, done: 0, total: 0 },
+    error: null, busy: false, link: write, create: write, unlink: write,
+  });
+  const rail = within(await screen.findByTestId("review-rail"));
+  const title = rail.getByText(epic.title);
+  expect(title.parentElement?.querySelector("[data-work-item]")?.getAttribute("data-work-item")).toBe(epic.key);
+});
+
+it("fills the sign-off track from the left when the second reviewer signs first", async () => {
+  read({ gate: { ...gate!, required: 2, signed: 1, reviewers: [
+    { sub: "alice", required: true, status: "waiting" },
+    { sub: "bob", required: true, status: "signed_off" },
+  ] } });
+  const rail = await screen.findByTestId("review-rail");
+  await waitFor(() => expect(within(rail).getByTestId("signoff-bob").dataset.state).toBe("signed"));
+  const segments = rail.querySelectorAll(":scope > div > span:nth-child(2) > span[aria-hidden] > i");
+  expect(Array.from(segments, segment => segment.classList.contains("bg-pass"))).toEqual([true, false]);
+  expect(segments[0].parentElement?.parentElement?.getAttribute("aria-current")).toBe("step");
+  expect(within(rail).getByTestId("plan-build")).toHaveProperty("disabled", true);
+});
+
+it("withdraws approval and keeps the current revision waiting for its signer", async () => {
+  const rev = 7;
+  const heldGate = { ...gate!, can_hold_approval: true, approval_held: { rev, waiting_on: ["alice"] } };
+  read({ rev, gate: heldGate });
+  const rail = within(await screen.findByTestId("review-rail"));
+  const approve = rail.getByTestId("plan-build");
+  await waitFor(() => expect(approve.dataset.state).toBe("pressed"));
+  fireEvent.click(rail.getByRole("button", { name: "Withdraw" }));
+  await waitFor(() => expect(approve.dataset.state).toBe("ready"));
+  expect(approve.dataset.gate).toBe("waiting");
+  expect(rail.queryByRole("button", { name: "Withdraw" })).toBeNull();
+});
+
+it("keeps the approval label when the verdict is in flight", async () => {
+  let finish!: () => void;
+  read({ gate: { state: "ready", required: 0, signed: 0, reviewers: [], waiting_on: [] } }, false, new Promise<void>(resolve => { finish = resolve; }));
+  const approve = await screen.findByTestId("plan-build");
+  const label = approve.textContent;
+  await waitFor(() => expect(approve.dataset.state).toBe("ready"));
+  fireEvent.click(approve);
+  expect(approve.dataset.state).toBe("pressed");
+  expect(approve.textContent).toBe(label);
+  await act(async () => finish());
+});
+
+it("folds the rail into the document when its container narrows", async () => {
+  let resize!: (width: number) => void;
+  vi.stubGlobal("ResizeObserver", class {
+    constructor(private callback: ResizeObserverCallback) {}
+    observe(el: HTMLElement) { if (el.dataset.testid === "plan-design-doc") resize = width => this.callback([{ contentRect: { width } } as ResizeObserverEntry], this as unknown as ResizeObserver); }
+    disconnect() {}
+  });
+  try {
+    read();
+    const rail = await screen.findByTestId("review-rail");
+    act(() => resize(760));
+    expect(rail.dataset.folded).toBe("true");
+    expect(within(screen.getByTestId("plan-doc")).getByTestId("review-summary")).toBeTruthy();
+    expect(within(rail).getByTestId("plan-build")).toBeTruthy();
+  } finally { vi.unstubAllGlobals(); }
+});
+
+it("places library actions in the planning toolbar and switches source from its mode menu", async () => {
+  read();
+  const toolbar = (await screen.findByTestId("plan-outline")).closest("[data-testid=plan-reader]")!.querySelector("header")!;
+  expect(within(toolbar).getByTestId("visual-keep")).toBeTruthy();
+  expect(within(toolbar).getByTestId("visual-export")).toBeTruthy();
+  fireEvent.click(within(toolbar).getByText("Viewing", { exact: false }));
+  await act(async () => fireEvent.click(within(screen.getByTestId("plan-mode-menu")).getByTestId("doc-markdown-switch")));
+  expect(screen.getByTestId("doc-markdown")).toBeTruthy();
+});

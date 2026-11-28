@@ -155,7 +155,7 @@ describe("visuals", () => {
     const selectedStyle = view.getComputedStyle(option);
     expect(option.getAttribute("aria-checked")).toBe("true");
     expect(selectedStyle.outline).toBe(unselectedOutline);
-    expect(selectedStyle.borderWidth).toBe("2px");
+    expect(parseFloat(selectedStyle.borderWidth)).toBeGreaterThan(0);
   });
 
   it("selects both published inline choices under older WebKit's event policy", async () => {

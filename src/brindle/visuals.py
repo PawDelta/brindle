@@ -255,9 +255,13 @@ def _unlocked(root_id: str) -> None:
 
 
 def for_session(db: DB, root_id: str) -> list[dict]:
-    """A session's visuals, newest first."""
-    rows = db.conn.execute("SELECT * FROM visuals WHERE root_id=? ORDER BY created_at DESC, id DESC",
-                           (root_id,)).fetchall()
+    """A session's visuals, most recently edited first."""
+    rows = db.conn.execute(
+        "SELECT v.* FROM visuals v WHERE v.root_id=?"
+        " ORDER BY MAX(v.updated_at, COALESCE((SELECT MAX(r.created_at) FROM plan_revisions r"
+        " WHERE v.kind='plan' AND r.plan_id=v.id), v.updated_at)) DESC, v.created_at DESC, v.id DESC",
+        (root_id,),
+    ).fetchall()
     return [_decode(r) for r in rows]
 
 
@@ -298,7 +302,7 @@ def _session(db: DB, caller: Agent | None) -> tuple[Agent, Workspace]:
 def publish(db: DB, caller: Agent | None, title: str, html: str, question: str | None = None,
             options: list[dict] | None = None, visual_id: str | None = None, kind: str = "visual",
             extra: Callable[[Any, str, int], None] | None = None, asked: str | None = None,
-            choices: list[dict] | None = None) -> dict:
+            choices: list[dict] | None = None, *, infer_intent: bool = True) -> dict:
     """Publish a new visual into ``caller``'s session, or (``visual_id``) a
     new revision of one of that session's visuals. A new revision is a new
     question: an answer to an earlier one is cleared. ``extra(c, id, rev)``
@@ -307,12 +311,17 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
 
     A supervisor's publication nothing allows yet gets one more chance: a small
     model reads the person's latest typed messages for an ask the regexes missed
-    (brindle.intent), and the one message it finds grants this publication."""
+    (brindle.intent), and the one message it finds grants this publication.
+    Input handlers that open plan drafts use the grant they already recorded."""
     args = (db, caller, title, html, question, options, visual_id, kind, extra, asked, choices)
     try:
         return _publish(*args)
     except ServiceError as e:
-        if e.code != "visual_request_required":
+        if not infer_intent:
+            raise
+        # A pending plan does not rule out a separate visual ask. An explicit
+        # quote that belongs to a plan still has to go through propose_plan.
+        if e.code != "visual_request_required" and not (e.code == "plan_requested" and asked is None):
             raise
         from brindle import intent
 

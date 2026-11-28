@@ -35,6 +35,7 @@ export interface ApiSchema {
   GcloudOptionsDTO: GcloudOptionsDTO;
   GitHubConnectionDTO: GitHubConnectionDTO;
   GoalDTO: GoalDTO;
+  HeldApprovalDTO: HeldApprovalDTO;
   InboxActionDTO: InboxActionDTO;
   InboxChoiceDTO: InboxChoiceDTO;
   InboxItemDTO: InboxItemDTO;
@@ -68,6 +69,7 @@ export interface ApiSchema {
   PlanCommentDTO: PlanCommentDTO;
   PlanDTO: PlanDTO;
   PlanDecisionDTO: PlanDecisionDTO;
+  PlanDeliveryItemDTO: PlanDeliveryItemDTO;
   PlanGateDTO: PlanGateDTO;
   PlanGatePolicyDTO: PlanGatePolicyDTO;
   PlanGateRowDTO: PlanGateRowDTO;
@@ -647,6 +649,14 @@ export interface PrStateDTO {
   unpushed?: number;
 }
 /**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "HeldApprovalDTO".
+ */
+export interface HeldApprovalDTO {
+  rev: number;
+  waiting_on: string[];
+}
+/**
  * A route the app can call to act on the item itself.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -1109,6 +1119,7 @@ export interface PlanDTO {
   id: string;
   lede: string;
   markdown: string;
+  outbox?: PlanDeliveryItemDTO[];
   queued: number;
   reference?: string | null;
   rev: number;
@@ -1169,7 +1180,9 @@ export interface PlanOptionDTO {
  * via the `definition` "PlanGateDTO".
  */
 export interface PlanGateDTO {
+  approval_held?: HeldApprovalDTO | null;
   approval_refused?: string | null;
+  can_hold_approval?: boolean;
   policies?: PlanGatePolicyDTO[];
   reason?: string | null;
   required: number;
@@ -1282,6 +1295,19 @@ export interface PlanUnconfirmedDTO {
   reason: "offline" | "sign_in" | "key_unavailable" | "library_error" | "other_account" | "access_refused";
 }
 /**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanDeliveryItemDTO".
+ */
+export interface PlanDeliveryItemDTO {
+  body: {
+    [k: string]: unknown;
+  };
+  client_id: string;
+  code?: string | null;
+  state: "waiting" | "sending" | "refused" | "unconfirmed" | "sent";
+  tail: string;
+}
+/**
  * One revision of a plan: the supervisor's proposal, the person's edit
  * or accepted suggestion, or a teammate's text from the Library (``author``
  * is teammate:<sub>); ``changed``, the sections it changed.
@@ -1295,6 +1321,7 @@ export interface PlanRevisionDTO {
   changed?: string[];
   rev: number;
   source: "proposal" | "edit" | "suggestion";
+  title?: string | null;
 }
 /**
  * One section of a plan's revision: what a comment anchors to.
@@ -1403,6 +1430,7 @@ export interface PlanRevisionDetailDTO {
   sections: PlanSectionDTO[];
   source: "proposal" | "edit" | "suggestion";
   split: PlanWorkerDTO[];
+  title?: string | null;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -1795,6 +1823,7 @@ export interface SharedDesignDTO {
   lede: string;
   markdown: string;
   me: string;
+  outbox?: PlanDeliveryItemDTO[];
   queued: number;
   reference?: string | null;
   rev: number;

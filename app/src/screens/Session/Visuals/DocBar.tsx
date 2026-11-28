@@ -49,13 +49,14 @@ export function Popover({ label, open, onOpenChange, children, testid }: { label
   );
 }
 
-export function ReaderBar({ lead, version, badges, presence, markdown, modes, share, actions }: {
+export function ReaderBar({ lead, version, badges, presence, markdown, queue, modes, share, actions }: {
   /* Back and the title. */
   lead: ReactNode;
   /* "rev 3" or "Version 2". */
   version?: ReactNode;
   badges?: ReactNode;
   presence?: ReactNode;
+  queue?: ReactNode;
   markdown?: { pressed: boolean; onToggle(): void };
   modes?: { picker: ReactNode; current: Mode };
   share?: ReactNode;
@@ -63,15 +64,21 @@ export function ReaderBar({ lead, version, badges, presence, markdown, modes, sh
 }) {
   return (
     <header className="flex min-h-[45px] flex-wrap items-center gap-x-2 gap-y-1 border-b border-line px-s2 py-2">
-      {lead}
-      {version}
-      {badges}
-      <span className="flex-1" />
-      {presence}
-      {markdown && <MarkdownButton pressed={markdown.pressed} onToggle={markdown.onToggle} />}
-      {modes?.picker}
-      {share}
-      {actions}
+      <div className="flex min-w-[min(230px,100%)] flex-1 items-center gap-2">
+        {lead}
+        {version}
+        {badges}
+      </div>
+      {(presence || markdown || queue || modes || share || actions) && (
+        <div data-testid="plan-toolbar-trailing" className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-x-2 gap-y-1">
+          {presence}
+          {markdown && <MarkdownButton pressed={markdown.pressed} onToggle={markdown.onToggle} />}
+          {queue}
+          {modes?.picker}
+          {share}
+          {actions}
+        </div>
+      )}
     </header>
   );
 }

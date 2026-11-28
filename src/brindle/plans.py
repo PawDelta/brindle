@@ -28,18 +28,31 @@ signed off the revision on screen. One sign-off counts for every rule it
 meets. A reviewer's or rule signer's open comment or suggestion written after
 their sign-off is how they ask for changes (the Library has no verdict of its
 own), and blocks it too. While the gate is closed Approve is refused and
-assign is refused. A shared plan's queued tasks wait for its approval even
-with no app connected: only that approval checks the Library, starts them and
-closes the review."""
+assign is refused. A shared plan's queued tasks wait for its approval like
+any plan's: only that approval checks the Library, starts them and closes the
+review.
+
+Queued plan work waits even while the app is closed or the daemon restarts:
+nothing starts unapproved. Who may approve is brindle.approval_sources.
+Closing a session closes its unapproved plan and leaves the tasks it held
+queued for the supervisor's decision (plan_cancel_holds), as a cancel does,
+so continuing the session starts none of them on its own."""
 
 from __future__ import annotations
 
+import fcntl
 import html as html_lib
 import json
 import logging
 import re
 import time
-from typing import Any
+from collections.abc import Callable
+from contextlib import closing
+from functools import partial
+from pathlib import Path
+from sqlite3 import Row
+from tempfile import NamedTemporaryFile
+from typing import IO, Any
 
 from brindle import bus, doc_templates, redact, visual_offers, visuals
 from brindle.db import DB, Agent, Task
@@ -152,8 +165,7 @@ def _title(markdown: str) -> str | None:
 
 
 def _queue_message(c, root_id: str, text: str) -> int:
-    """Queue the person's verdict for the supervisor in the verdict's own
-    transaction ``c`` (as ``DB.enqueue`` would, without a transaction of its own)."""
+    """Queue a plan update for the supervisor in the same transaction ``c``."""
     return int(c.execute("INSERT INTO inbox (agent_id, sender_id, body, created_at) VALUES (?,NULL,?,?)",
                          (root_id, redact.mask(text), time.time())).lastrowid)
 
@@ -273,14 +285,34 @@ def open_offer_id(offer: str | None) -> str | None:
     return offer[len(OFFER_OPEN):] if offer and offer.startswith(OFFER_OPEN) else None
 
 
-def close_with_session(db: DB, root_id: str) -> None:
-    """Close unfinished plans without approving work or withdrawing shared copies."""
+def close_with_session(db: DB, root_id: str, dismissed_at: float | None = None) -> None:
+    """Close session ``root_id``'s unfinished plans without approving work or
+    withdrawing shared copies. The queued tasks its open plan held stay
+    queued for the supervisor's decision, as after a cancel
+    (_hold_for_supervisor), whatever the visuals setting is now, so
+    continuing the session starts none of them; the supervisor is told which
+    at its next turn. ``dismissed_at`` dismisses the supervisor in the same
+    transaction (agents.close): a dismissed supervisor's plan reads as
+    closed, so a sweep must never see the dismissal without the holds."""
     from brindle import plan_docs
 
+    at = time.time()
+    queued = None
     with db.tx() as c:
+        # The stored row, not open_plan: a dismissed supervisor's plan already reads as closed.
+        row = c.execute(f"SELECT id, rev FROM plans WHERE root_id=? AND state IN ({','.join('?' * len(HOLDING))})"
+                        " ORDER BY created_at LIMIT 1", (root_id, *HOLDING)).fetchone()
+        plan = dict(row) if row else None
+        held = _hold_for_supervisor(c, root_id, plan["id"], at) if plan else []
+        if dismissed_at is not None:
+            c.execute("UPDATE agents SET dismissed_at=? WHERE id=?", (dismissed_at, root_id))
         changed = c.execute("UPDATE plans SET state=?, updated_at=? WHERE root_id=?"
                             " AND state IN ('open','redirected','writing') RETURNING id, rev",
-                            (CLOSED, time.time(), root_id)).fetchall()
+                            (CLOSED, at, root_id)).fetchall()
+        if held:
+            queued = _queue_message(c, root_id, _cancelled_message(plan, held, None))
+    if queued is not None:
+        bus.publish_agent(db, "message.queued", root_id, message_id=queued, sender_id=None)
     for row in changed:
         plan_docs._changed(db, get(db, row["id"]), row["rev"])
 
@@ -449,7 +481,12 @@ def _gate(c, p: dict) -> dict | None:
                        "approval_held": row["approve_wanted"] is not None,
                        "can_stop_sharing": shared_docs.may_stop(row, shared_docs.account()),
                        "can_edit_reviewers": row["doc_id"] is not None}
+    wanted = json.loads(row["approve_wanted"] or "{}")
+    can_hold = (is_open and current and state == WAITING and bool(unmet) and held is None
+                and all(policy["status"] in _MET for policy in policies))
     return {"state": state, "reason": reason, "required": len(required), "signed": met, "waiting_on": unmet,
+            "can_hold_approval": can_hold, "approval_held": {"rev": wanted["rev"], "waiting_on": unmet}
+            if wanted.get("signoffs") and is_open else None,
             "reviewers": rows, "policies": policies, "unconfirmed": unconfirmed,
             "approval_refused": row["approve_refused"] if is_open else None}
 
@@ -483,52 +520,90 @@ def holding(db: DB, root_id: str) -> dict | None:
     """What session ``root_id``'s queued tasks wait on, if anything: its plan
     the person hasn't approved yet or, before one is proposed, brindle's
     offer to plan the goal first, unanswered or accepted (``{"offer": state}``).
-    None while the visuals capability is off or the app is disconnected, so
-    nothing waits on a verdict nobody can give. This also releases work if
-    the app disconnects after opening an offer or redirecting a plan; the
-    saved plan and its decision remain available when it reconnects. A plan
-    shared for review is held with or without the app: only the approval
-    checks the sign-offs with the Library and closes the review."""
-    from brindle.daemon import holds
-
-    if not visuals.enabled() or not root_id:
+    During an approval's response write, ``{"approval_reply": True, "plan": plan}``
+    briefly holds the session queue. Otherwise, None while the visuals
+    capability is off. An app that is closed,
+    restarting or not answering holds the work too: it waits until an
+    approval source (brindle.approval_sources) releases it, never because
+    nobody can answer right now. A plan shared for review is held the same
+    way; only the approval checks the sign-offs with the Library and closes
+    the review."""
+    if not root_id:
         return None
-    plan = open_plan(db, root_id)
-    if plan is not None and gate(db, plan) is not None:
-        return plan
-    if not holds.app_connected():
-        return None
-    if plan is not None:
+    enabled = visuals.enabled()
+    plan = open_plan(db, root_id) if enabled else None
+    # Read the delivery hold after the open plan. If approval committed while
+    # reading the plan, the same transaction published its hold.
+    if _approval_reply_held(db, root_id):
+        return {"approval_reply": True, "plan": plan}
+    if plan is not None or not enabled:
         return plan
     row = db.conn.execute("SELECT offer FROM goal_doc_requests WHERE root_id=? AND (offer LIKE ? OR offer=?)",
                           (root_id, OFFER_OPEN + "%", OFFER_ACCEPTED)).fetchone()
     return {"offer": row["offer"]} if row else None
 
 
-def _queued(db: DB, root_id: str) -> int:
-    from brindle import autopilot, tasks
+def _approval_reply_held(db: DB, root_id: str) -> bool:
+    leases = db.conn.execute(
+        "SELECT h.lease FROM plans p JOIN plan_reply_holds h ON h.plan_id=p.id"
+        " WHERE p.root_id=? AND p.state='approved'", (root_id,)
+    )
+    for row in leases:
+        try:
+            with open(row["lease"], "rb") as lease:
+                fcntl.flock(lease, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except FileNotFoundError:
+            continue
+    return False
 
-    return sum(1 for t in db.list_tasks(state="pending")
-               if t.caller_id and autopilot.root_of(db, t.caller_id) == root_id and tasks.plan_holds(db, t))
+
+# Use the agent lineage, since nested callers and callers in attached repos
+# belong to the same session. UNION also bounds the walk on a cyclic lineage.
+_SESSION_CALLERS = (
+    "WITH RECURSIVE callers(id) AS ("
+    " SELECT ? UNION SELECT a.id FROM agents a JOIN callers c ON a.parent_id=c.id) "
+)
+_PLAN_WORK = (
+    "(EXISTS (SELECT 1 FROM plan_tasks WHERE plan_id=? AND task_id=t.id)"
+    " OR EXISTS (SELECT 1 FROM task_milestones WHERE task_id=t.id))"
+)
+_CANCELLED_HOLD = "EXISTS (SELECT 1 FROM plan_cancel_holds WHERE task_id=t.id)"
+
+
+def _queued(db: DB, root_id: str, held: dict | None) -> int:
+    plan_id = held.get("id") if held else None
+    return db.conn.execute(
+        _SESSION_CALLERS +
+        "SELECT COUNT(*) FROM tasks t WHERE t.state='pending' AND t.caller_id IN (SELECT id FROM callers)"
+        f" AND ({_CANCELLED_HOLD} OR (? AND (? OR {_PLAN_WORK})))",
+        (root_id, held is not None, plan_id is None, plan_id),
+    ).fetchone()[0]
 
 
 def holding_count(db: DB, root_id: str, plan_id: str) -> int:
     """Queued tasks plan ``plan_id`` holds for session ``root_id``: 0 unless it
     is the plan that :func:`holding` names (the one the tasks wait on)."""
     held = holding(db, root_id)
-    return _queued(db, root_id) if held and held.get("id") == plan_id else 0
+    if held and held.get("approval_reply"):
+        held = held["plan"]
+    return _queued(db, root_id, held) if held and held.get("id") == plan_id else 0
 
 
 def to_dto(db: DB, p: dict) -> dict:
     from brindle import plan_docs
+    from brindle.pro.shared_docs import author_delivery
     from brindle.service.dto import PlanDTO
 
+    root = p["root_id"]
+    queued = _queued(db, root, holding(db, root)) if p["state"] in HOLDING else 0
     return PlanDTO(id=p["id"], session=p["root_id"], title=p["visual"]["title"], rev=p["rev"],
                    state=p["state"], ask=p.get("ask"), markdown=p["markdown"], split=[],
-                   verdict=p["decision"], queued=_queued(db, p["root_id"]) if p["state"] in HOLDING else 0,
+                   verdict=p["decision"], queued=queued,
                    created_at=p["created_at"], gate=gate(db, p), team_ended=_team_ended(db, p),
                    reference=doc_templates.reference_of(db, p["id"]), alongside=alongside(db, p["id"]),
-                   **plan_docs.fields(db, p)).to_json()
+                   outbox=author_delivery(db, p["id"]), **plan_docs.fields(db, p)).to_json()
 
 
 def assignment(db: DB, caller: Agent, ref: str) -> tuple[str, str]:
@@ -672,6 +747,73 @@ def _page(title: str, markdown: str) -> str:
 # -- the supervisor proposes ------------------------------------------------------------
 
 
+_REV_BASE = re.compile(r"r(\d+)")
+
+
+def _rev_base(base: Any) -> int | None:
+    """The revision a ``r<N>`` base names (a solo plan's, from :func:`read_draft`), else None."""
+    m = _REV_BASE.fullmatch(base) if isinstance(base, str) else None
+    return int(m.group(1)) if m else None
+
+
+def _keep_acknowledged(parts: list[dict], given: list[dict], ack: dict) -> list[dict]:
+    """``parts`` (the proposal after the spine and template filled and pruned
+    it) with every section the supervisor passed on unchanged from ``ack``,
+    the revision it read, exactly as it is there: a section the person
+    cleared stays cleared, rather than coming back as "None." or dropping out."""
+    was = {s["id"]: s for s in ack["sections"]}
+    same = [s["id"] for s in given if s["id"] in was and all(
+        s.get(k) == was[s["id"]].get(k) for k in ("title", "kind", "markdown", "caption"))]
+    if not same:
+        return parts
+    out = [was[s["id"]] if s["id"] in same else s for s in parts]
+    order = [s["id"] for s in given]
+    for sid in same:
+        if any(s["id"] == sid for s in out):
+            continue
+        # Dropped by the spine or template: back after the section it followed in the proposal.
+        before = {*order[:order.index(sid)]}
+        at = max((i + 1 for i, s in enumerate(out) if s["id"] in before), default=0)
+        out.insert(at, was[sid])
+    return out
+
+
+def _revised_from(db: DB, p: dict, base: Any) -> int:
+    """The revision a supervisor's revision of plan ``p`` (no live draft) was
+    written from: the ``r<N>`` base :func:`read_draft` gave it, else its own
+    last proposal (it has read nothing newer) as of ``p``, the plan as this
+    proposal found it: a proposal published since never becomes its base."""
+    from brindle import plan_docs
+
+    n = _rev_base(base)
+    if n is not None:
+        if n > p["rev"]:
+            raise ServiceError("invalid", f"base {base} isn't a revision of this plan; read it with read_plan", 400)
+        return n
+    last = db.conn.execute("SELECT MAX(rev) FROM plan_revisions WHERE plan_id=? AND author=? AND rev<=?",
+                           (p["id"], plan_docs.SUPERVISOR, p["rev"])).fetchone()[0]
+    return p["rev"] if last is None else last
+
+
+def _refuse_overwrite(c, p: dict, cur: dict, revised_from: int) -> None:
+    """In the revision's transaction: refuse it (``stale``) when the person
+    (or a teammate) made revisions since ``revised_from``, which it would
+    silently overwrite. Names the sections they changed."""
+    from brindle import plan_docs
+
+    rows = c.execute("SELECT rev, changed FROM plan_revisions WHERE plan_id=? AND rev>? AND author!=? ORDER BY rev",
+                     (p["id"], revised_from, plan_docs.SUPERVISOR)).fetchall()
+    if not rows:
+        return
+    ids = list(dict.fromkeys(s for r in rows for s in json.loads(r["changed"])))
+    titles = [plan_docs._title(p, cur, {"kind": "text", "section": s}) for s in ids]
+    revs = ", ".join(f"r{r['rev']}" for r in rows)
+    raise ServiceError("stale", f"{', '.join(titles)} changed in the person's edits ({revs}) since r{revised_from}, "
+                       f"the revision yours was written from, and it would overwrite them: read the plan with "
+                       f"read_plan(plan_id=\"{p['id']}\"), revise its text and pass the base it gives", 409,
+                       rev=rows[-1]["rev"], sections=ids)
+
+
 def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, split: Any = None,
             title: str | None = None, plan_id: str | None = None, ask: Any = None,
             sections: Any = None, base: Any = None) -> dict:
@@ -688,7 +830,10 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     A shared plan with a live draft takes no revision: the supervisor writes
     into the draft, against ``base``, the text :func:`read_draft` handed it
     (plan_docs.supervise), and the plan is open for the person again. The
-    result's ``draft_write`` says what went in and what became suggestions."""
+    result's ``draft_write`` says what went in and what became suggestions.
+    Any other revision replaces the doc: it is written from ``base`` (the
+    ``r<N>`` :func:`read_draft` gave), or else from the supervisor's own last
+    revision, and is refused (``stale``) if the person edited it since."""
     from brindle import plan_docs
 
     visuals.require_enabled()
@@ -697,13 +842,19 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         raise ServiceError("forbidden", "only the session's supervisor proposes a plan", 403)
     if sections is not None:
         parts = plan_docs.parse_sections(sections)
-        lede = plan_docs._body_text(markdown, "markdown", MAX_MARKDOWN).strip()
+        # The bodies as sent, before trimming: a section carried forward verbatim from read_plan
+        # (an indented code block, say) is recognised by its exact text (_keep_acknowledged).
+        sent = [{**s, "markdown": plan_docs._body_text(raw.get("markdown"), f"section {s['id']}",
+                                                       plan_docs.MAX_SECTION)} for s, raw in zip(parts, sections)]
+        sent_lede = plan_docs._body_text(markdown, "markdown", MAX_MARKDOWN)
+        lede = sent_lede.strip()
         markdown = plan_docs.render(lede, parts)
     elif not isinstance(markdown, str) or not markdown.strip():
         raise ServiceError("invalid", "markdown is required", 400)
     else:
         markdown = markdown.strip()
         lede, parts = plan_docs.from_markdown(markdown)
+        sent, sent_lede = parts, None
     # The empty draft opened when the person asked: the first proposal (with or without its id)
     # fills that plan instead of creating another.
     draft_row = db.conn.execute("SELECT id FROM plans WHERE root_id=? AND state=?", (root.id, WRITING)).fetchone()
@@ -719,6 +870,15 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     # design-doc spine (an older free-form plan keeps its sections as they are).
     on_spine = plan_id is not None and any(
         s["id"] in plan_docs.SPINE for s in plan_docs.revision(db, plan_id)["sections"])
+    # A solo plan revised from the revision read_plan gave (base r<N>): what the supervisor passed
+    # on unchanged keeps that revision's text through the spine and template below.
+    acknowledged = None
+    if plan_id is not None and _rev_base(base) is not None:
+        try:
+            acknowledged = plan_docs.revision(db, plan_id, _rev_base(base))
+        except ServiceError:
+            acknowledged = None
+    passed = plan_docs.design_doc(sent, map_only=True) if acknowledged else []
     if plan_id is None or on_spine:
         parts = plan_docs.design_doc(parts, force=not template, map_only=bool(template))
         markdown = plan_docs.render(lede, parts)
@@ -735,6 +895,12 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         kept = [s for s in parts if not plan_docs.empty_extra(s) or doc_templates._key(s["title"]) in required]
         added = added or len(kept) != len(parts)
         parts = kept
+    if acknowledged is not None:
+        restored = _keep_acknowledged(parts, passed, acknowledged)
+        added = added or restored != parts
+        parts = restored
+        if sent_lede is not None and sent_lede == acknowledged["lede"] and lede != sent_lede:
+            lede, added = sent_lede, True    # the lede carried forward verbatim, whitespace and all
     if added:
         markdown = plan_docs.render(lede, parts)
     if len(markdown.encode("utf-8")) > MAX_MARKDOWN:
@@ -779,6 +945,9 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     if replica is not None and not base:
         raise ServiceError("base_required", "this plan is co-edited in a live draft: read it with "
                            "read_plan and pass the base it gives, so what others wrote since stays", 409)
+    # A plan with no live draft: the revision this one was written from, so the person's own
+    # edits since (which it would overwrite) refuse it instead of being lost.
+    revised_from = _revised_from(db, current, base) if plan_id and replica is None else None
     drafted: dict = {}
     # A draft holds only text: what else the supervisor changed is named, not applied.
     off_draft = [name for name, new in (("decisions", decisions), ("split", split), ("ask", ask))
@@ -819,6 +988,8 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
                 "UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND (offer IS NULL OR offer LIKE ? OR offer=?)",
                 (OFFER_PLANNED, root.id, OFFER_OPEN + "%", OFFER_ACCEPTED)).rowcount)
         else:
+            if revised_from is not None:
+                _refuse_overwrite(c, current, replaced, revised_from)
             # Only a plan still waiting on the person takes a revision: one
             # approved since the check above stays approved.
             changed = c.execute("UPDATE plans SET rev=?, markdown=?, decisions=?, split=?, ask=?, updated_at=?,"
@@ -828,7 +999,8 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
                 raise ServiceError("approved", "that plan is approved; propose a new plan instead", 409)
             plan_docs.keep(c, replaced)
         plan_docs.insert_revision(c, vid, rev, plan_docs.SUPERVISOR, "proposal", lede, parts, markdown, decisions,
-                                  split, ask, [s["id"] for s in parts if previous.get(s["id"]) != s], now)
+                                  split, ask, [s["id"] for s in parts if previous.get(s["id"]) != s], now,
+                                  title=title)
 
     try:
         if replica is not None:
@@ -876,43 +1048,57 @@ def begin(db: DB, root_id: str, asked_at: float | None = None) -> str | None:
         bus.publish_agent(db, "plan.requested", root_id, visual=current["id"])
         return current["id"]
 
+    queued: list[int] = []
+
     def write(c, vid: str, visual_rev: int) -> None:
-        if c.execute("SELECT 1 FROM plans WHERE root_id=? AND state=?", (root_id, WRITING)).fetchone():
-            raise ServiceError("exists", "a plan is already being written", 409)
+        if c.execute("SELECT 1 FROM plans WHERE root_id=? AND state IN ('writing','open','redirected')",
+                     (root_id,)).fetchone():
+            raise ServiceError("exists", "a plan is already open", 409)
         newest = c.execute("SELECT MAX(created_at) FROM plans WHERE root_id=?", (root_id,)).fetchone()[0]
         if asked_at is not None and newest is not None and asked_at <= newest:
             raise ServiceError("exists", "that ask already has its plan", 409)
         now = time.time()
         c.execute("INSERT INTO plans (id, root_id, rev, markdown, decisions, split, ask, state, created_at,"
                   " updated_at) VALUES (?,?,0,'','[]','[]',NULL,?,?,?)", (vid, root_id, WRITING, now, now))
+        visual_offers._grant(c, root_id, "plan")    # the one revision that fills it
+        queued.append(_queue_message(
+            c, root_id, f"Planning draft {vid} is open. If the person explicitly asked for a planning document "
+            f"or accepted a planning offer, fill the draft with propose_plan using plan_id={vid!r}. "
+            f"If neither happened, close the draft with withdraw_plan(plan_id={vid!r})."))
 
     try:
         v = visuals.publish(db, root, "Plan", _page("Plan", "The supervisor is writing this plan."),
-                            kind="plan", extra=write)
-    except ServiceError:
-        return None
-    with db.tx() as c:
-        visual_offers._grant(c, root_id, "plan")    # the one revision that fills it
+                            kind="plan", extra=write, infer_intent=False)
+    except ServiceError as e:
+        if e.code == "exists":
+            return None
+        log.warning("brindle: couldn't open a planning draft for %s (%s): %s", root_id, e.code, e.message)
+        raise
+    bus.publish_agent(db, "message.queued", root_id, message_id=queued[0], sender_id=None)
     bus.publish_agent(db, "autopilot.goal", root_id)
     bus.publish_agent(db, "plan.requested", root_id, visual=v["id"])   # listed already (visual.published); the person opens it
     return v["id"]
 
 
 def cancel_draft(db: DB, root_id: str) -> None:
-    """The person called the plan off before the supervisor wrote it: close the empty draft,
-    so it holds no work."""
-    with db.tx() as c:
-        c.execute("UPDATE plans SET state=?, updated_at=? WHERE root_id=? AND state=?",
-                  (SUPERSEDED, time.time(), root_id, WRITING))
-    bus.publish_agent(db, "autopilot.goal", root_id)
+    """Call off an empty draft from chat, leaving its tasks for the supervisor."""
+    draft = db.conn.execute("SELECT id, rev FROM plans WHERE root_id=? AND state=?", (root_id, WRITING)).fetchone()
+    if draft is not None:
+        try:
+            cancel(db, draft["id"], draft["rev"], person=True)
+        except ServiceError as e:
+            if e.code not in ("stale", "decided"):  # the draft was filled or closed meanwhile
+                raise
 
 
 def read_draft(db: DB, caller: Agent | None, plan_id: str) -> dict:
-    """The session's supervisor reads its shared plan's live draft, once the
-    person has sent it back (Request changes): the text others write there
-    reaches it only then. Returns the doc as propose takes it (lede, sections
-    with their ids, decisions, split, ask) and ``base``, the id its revision
-    names (plan_docs.hand_over)."""
+    """The session's supervisor reads its plan as it stands. A shared plan's
+    live draft is read once the person has sent it back (Request changes):
+    the text others write there reaches it only then. Any other plan reads
+    its current revision, the person's own edits included. Returns the doc as
+    propose takes it (lede, sections with their ids, decisions, split, ask)
+    and ``base``, which the revision names: the draft's (plan_docs.hand_over),
+    or ``r<N>``, the revision read."""
     from brindle import plan_docs
 
     visuals.require_enabled()
@@ -922,10 +1108,12 @@ def read_draft(db: DB, caller: Agent | None, plan_id: str) -> dict:
         raise ServiceError("not_found", "no such plan in this session", 404)
     replica = plan_docs.draft(db, p)
     if replica is None:
-        raise ServiceError("no_draft", "this plan has no live draft: revise it from your last revision", 409)
-    if p["state"] != "redirected":
+        cur = plan_docs.revision(db, p["id"])
+        base = f"r{cur['rev']}"
+    elif p["state"] != "redirected":
         raise ServiceError("not_sent", "the person hasn't sent this plan back to you; wait for Request changes", 409)
-    base, cur = plan_docs.hand_over(db, p, replica)
+    else:
+        base, cur = plan_docs.hand_over(db, p, replica)
     return {"plan_id": p["id"], "rev": p["rev"], "base": base, "lede": cur["lede"], "ask": cur["ask"],
             "sections": [{k: s[k] for k in ("id", "title", "kind", "markdown", "caption")} for s in cur["sections"]],
             "decisions": cur["decisions"], "split": cur["split"]}
@@ -1096,23 +1284,50 @@ def _hold_approval(db: DB, p: dict, why: str, was_ready: bool, wanted: dict) -> 
     return held
 
 
-def _drop_held_approval(db: DB, p: dict, why: str) -> None:
+def withdraw_signoffs(c, plan_id: str, why: str, *, rev: int | None = None) -> bool:
+    """Invalidate the saved verdict in the same transaction as the edit or cancellation."""
+    if c.execute("UPDATE plan_shares SET approve_wanted=NULL, approve_refused=? WHERE plan_id=?"
+                 " AND json_extract(approve_wanted,'$.signoffs')=1"
+                 " AND (? IS NULL OR json_extract(approve_wanted,'$.rev')=?)", (why, plan_id, rev, rev)).rowcount:
+        root = c.execute("SELECT root_id FROM plans WHERE id=?", (plan_id,)).fetchone()[0]
+        _queue_message(c, root, why)
+        return True
+    return False
+
+
+def withdraw_on_objection(c, p: dict) -> None:
+    if c.execute("SELECT 1 FROM plan_shares WHERE plan_id=? AND json_extract(approve_wanted,'$.signoffs')=1",
+                 (p["id"],)).fetchone():
+        found = _gate(c, p)
+        if found and found["state"] == CHANGES:
+            withdraw_signoffs(c, p["id"], f"Your held approval was withdrawn. {found['reason']}", rev=p["rev"])
+
+
+def _drop_held_approval(db: DB, p: dict, why: str, expected: str) -> None:
     from brindle import plan_docs
 
     with db.tx() as c:
-        c.execute("UPDATE plan_shares SET approve_wanted=NULL, approve_refused=? WHERE plan_id=?", (why, p["id"]))
+        if not c.execute("UPDATE plan_shares SET approve_wanted=NULL, approve_refused=?"
+                         " WHERE plan_id=? AND approve_wanted=?", (why, p["id"], expected)).rowcount:
+            return
+        if json.loads(expected).get("signoffs"):
+            _queue_message(c, p["root_id"], why)
     plan_docs._changed(db, p, p["rev"])
 
 
-def settle_held_approval(db: DB, plan_id: str) -> None:
+def settle_held_approval(db: DB, plan_id: str, *, signoffs_only: bool = False) -> None:
     """After a sync the Library answered: apply the Approve it couldn't confirm
     earlier if the gate reads ready for that same revision. If it doesn't, the
     person is told and nothing is approved. While the Team plan's end stands
     there is no gate to read, and the approval keeps waiting."""
+    from brindle import approval_sources
+
     row = db.conn.execute("SELECT approve_wanted FROM plan_shares WHERE plan_id=?", (plan_id,)).fetchone()
     if row is None or row["approve_wanted"] is None:
         return
     wanted = json.loads(row["approve_wanted"])
+    if signoffs_only and not wanted.get("signoffs"):
+        return
     p = get(db, plan_id)
     try:
         visuals.require_enabled()
@@ -1129,15 +1344,21 @@ def settle_held_approval(db: DB, plan_id: str) -> None:
     if wanted["rev"] != p["rev"]:
         what = f"version {version}" if version is not None else f"r{wanted['rev']}"
         _drop_held_approval(db, p, f"Your approval of {what} wasn't applied: the plan has changed since "
-                                   "you approved it. Read the new revision and approve again.")
+                                   "you approved it. Read the new revision and approve again.", row["approve_wanted"])
     elif found["state"] != "ready":
-        _drop_held_approval(db, p, f"Your approval wasn't applied: {found['reason']}")
+        if wanted.get("signoffs") and found["state"] == WAITING:
+            return
+        _drop_held_approval(db, p, f"Your approval wasn't applied: {found['reason']}", row["approve_wanted"])
     else:
         try:
+            # The source the held approval was made with; one held before sources were recorded came
+            # from the app's route, the only one that could hold it.
+            made_by = approval_sources.Approval(wanted.get("source", approval_sources.APP))
             decide(db, plan_id, wanted["rev"], True, wanted["picks"], wanted["comments"], wanted["note"],
-                   person=True, attachments=wanted["attachments"], confirmed=True, version=version)
+                   approval=made_by, attachments=wanted["attachments"], confirmed=True, version=version,
+                   expected_hold=row["approve_wanted"])
         except ServiceError as e:
-            _drop_held_approval(db, p, f"Your approval wasn't applied: {e.message}")
+            _drop_held_approval(db, p, f"Your approval wasn't applied: {e.message}", row["approve_wanted"])
 
 
 def _version(version: Any) -> int | None:
@@ -1178,13 +1399,68 @@ def _is_version(c, plan_id: str, rev: int, version: int) -> bool | None:
     return None if share is None else share["remote_rev"] == version and share["local_rev"] == rev
 
 
+def withdraw_approval(db: DB, plan_id: str, rev: int) -> dict:
+    from brindle import plan_docs
+
+    visuals.require_enabled()
+    p = get(db, plan_id)
+    visuals._unlocked(p["root_id"])
+    with db.tx() as c:
+        if not c.execute("SELECT 1 FROM plans WHERE id=? AND state='open' AND rev=?",
+                         (plan_id, rev)).fetchone():
+            raise ServiceError("stale", "Read the current plan before withdrawing approval.", 409)
+        c.execute("UPDATE plan_shares SET approve_wanted=NULL WHERE plan_id=? AND"
+                  " json_extract(approve_wanted,'$.rev')=? AND json_extract(approve_wanted,'$.signoffs')=1",
+                  (plan_id, rev))
+    plan_docs._changed(db, p, p["rev"])
+    return get(db, plan_id)
+
+
+class ApprovalReply:
+    """Hold a committed approval's work until the response write settles.
+
+    The verdict transaction publishes the lease to other processes. The file
+    lock expires when its owner dies, so a crash cannot keep approved work
+    held. The transport calls finish on either outcome of the response write.
+    """
+
+    def __init__(self) -> None:
+        self._finish: Callable[[], None] | None = None
+
+    def hold(self, db: DB, plan_id: str, root_id: str) -> None:
+        lease = NamedTemporaryFile(dir=Path(db.path).parent, prefix="plan-reply-")
+        self._finish = partial(_finish_approval_reply, db.path, plan_id, root_id, lease)
+        fcntl.flock(lease, fcntl.LOCK_EX)
+        db.conn.execute("INSERT INTO plan_reply_holds (plan_id, lease) VALUES (?,?)", (plan_id, lease.name))
+
+    def finish(self) -> None:
+        if self._finish is not None:
+            finish, self._finish = self._finish, None
+            finish()
+
+
+def _finish_approval_reply(db_path: str, plan_id: str, root_id: str, lease: IO[bytes]) -> None:
+    from brindle import spawn
+
+    with lease, spawn.after_response():
+        db = DB(db_path)
+        with closing(db.conn):
+            released = db.conn.execute("DELETE FROM plan_reply_holds WHERE plan_id=? AND lease=?",
+                                       (plan_id, lease.name)).rowcount
+            if released:
+                _dispatch_approved_tasks(db, root_id)
+
+
 def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, comments: Any = None,
-           note: Any = None, *, person: bool, attachments: Any = None, confirmed: bool = False,
-           version: Any = None) -> dict:
+           note: Any = None, *, approval: Any, attachments: Any = None, confirmed: bool = False,
+           version: Any = None, expected_hold: str | None = None,
+           reply: ApprovalReply | None = None) -> dict:
     """The person's verdict on the revision on their screen (``rev``):
-    approve, or redirect with their picks and per-section comments. Only the
-    person (the app, through the daemon's guarded route) decides: anyone
-    else is refused.
+    approve, or redirect with their picks and per-section comments. Only a
+    verdict an approval source vouches for (brindle.approval_sources) is
+    taken: ``approval``, as the trusted caller that received it states it
+    (the daemon's guarded route hands ``PERSON_IN_APP``). Anyone else,
+    ``approval`` None, is refused.
 
     One transaction makes the verdict: the plan's state (claimed only from
     'open', so a second click is refused instead of delivered twice), the
@@ -1194,7 +1470,8 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     starts unless the supervisor's message is queued with it. Pushing the
     message to the supervisor's terminal comes after, and failing that loses
     nothing: it stays queued for its next turn. Then an approval releases the
-    session's queued tasks.
+    session's queued tasks. HTTP handlers supply ``reply`` so the verdict
+    commits with a hold that lasts through the response write.
 
     The verdict starts from the decisions the person confirmed on the doc
     (``picks`` given here win), and carries what they wrote on it that the
@@ -1208,10 +1485,12 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     transaction. Once the Library has answered, the verdict is on the plan as
     that answer left it (:func:`caught_up`): on a live doc, ``version`` (the
     frozen version on screen) approves the revision it came in as."""
-    from brindle import agents, plan_docs, tasks
+    from brindle import agents, approval_sources, plan_docs
 
     visuals.require_enabled()
-    if not person:
+    if not isinstance(approval, approval_sources.Approval):
+        approval = None
+    if not approval_sources.may_release(approval_sources.Release(plan_id, approval)):
         raise ServiceError("forbidden", "only the person approves or redirects a plan, from the app", 403)
     p = get(db, plan_id)
     visuals._unlocked(p["root_id"])
@@ -1231,6 +1510,8 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     unconfirmed, was_ready = None, False
     if approved and not confirmed:
         before = gate(db, p)            # what the person pressed Approve on, before asking can change it
+        if before and before["approval_held"]:
+            return p
         was_ready = before is not None and before["state"] == "ready"
         unconfirmed = _check_with_library(db, p)
         if unconfirmed is None:
@@ -1256,7 +1537,8 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     if unconfirmed is not None:
         held = _hold_approval(db, p, unconfirmed, was_ready, {"rev": rev, "version": version, "picks": picks,
                                                               "comments": comments, "note": note,
-                                                              "attachments": attachments})
+                                                              "attachments": attachments,
+                                                              "source": approval.source})
         raise ServiceError("gate_unverified", UNCONFIRMED[unconfirmed], 503, reason=unconfirmed, approval_held=held)
     files = plan_docs._attachments(db, p, attachments)
     at = time.time()
@@ -1268,20 +1550,37 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     text = _message(p, approved, picks, comments, note, titles, doc, [f["ref"] for f in files],
                     drafting=not approved and plan_docs.draft(db, p) is not None, answers=own,
                     teammates=plan_docs.teammate_names(db, p["id"]))
+    held_for_signoffs = False
     with db.tx() as c:
         if approved:
             # In the verdict's own transaction: a sync landing a new reviewer can't slip in between.
             shut = _gate(c, p)
-            if shut is not None and shut["state"] in GATE_SHUT:
-                raise ServiceError("gate_closed", shut["reason"], 409)
+            if expected_hold and shut is None:
+                raise ServiceError("gate_unverified", "The review gate is unavailable.", 409)
             # A frozen version is approved only while it is still this revision here: a share
             # dropped since (no versions any more) or moved on is a plan to read again.
             if version is not None and _is_version(c, p["id"], rev, version) is not True:
                 raise ServiceError("stale", f"version {version} isn't the one out for sign-off now; read the plan "
                                    "again", 409, rev=rev)
-        claimed = c.execute("UPDATE plans SET state=?, decision=?, updated_at=? WHERE id=? AND rev=? AND state='open'",
-                            (state, record, at, p["id"], rev)).rowcount == 1
+            if expected_hold is not None and not c.execute(
+                    "SELECT 1 FROM plan_shares WHERE plan_id=? AND approve_wanted=?", (plan_id, expected_hold)).fetchone():
+                raise ServiceError("withdrawn", "The held approval has changed.", 409)
+            if shut and shut["can_hold_approval"] and not confirmed and all(d["id"] in picks for d in p["decisions"]):
+                wanted = dict(signoffs=True, source=approval.source, rev=rev, version=version, picks=picks, comments=comments,
+                              note=note, attachments=attachments, at=at)
+                if not c.execute("UPDATE plan_shares SET approve_wanted=COALESCE(approve_wanted,?), approve_refused=NULL"
+                                 " WHERE plan_id=? AND EXISTS (SELECT 1 FROM plans WHERE id=? AND rev=? AND state='open')",
+                                 (json.dumps(wanted), plan_id, plan_id, rev)).rowcount:
+                    raise ServiceError("stale", "Read the current revision before approving.", 409)
+                held_for_signoffs = True
+            elif shut is not None and shut["state"] in GATE_SHUT:
+                raise ServiceError("gate_closed", shut["reason"], 409)
+        claimed = not held_for_signoffs and c.execute(
+            "UPDATE plans SET state=?, decision=?, updated_at=? WHERE id=? AND rev=? AND state='open'",
+            (state, record, at, p["id"], rev)).rowcount == 1
         if claimed:
+            if approved and reply is not None:
+                reply.hold(db, plan_id, p["root_id"])
             plan_docs.record_event(c, p["id"], f"verdict:{rev}", "sign_off" if approved else "changes",
                                    plan_docs.PERSON, at, rev=rev)
             plan_docs.mark_sent(c, threads, rev)
@@ -1291,6 +1590,9 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
             if not approved:
                 visual_offers._grant(c, p["root_id"], "plan")   # the one revision the redirect asks for
             queued = _queue_message(c, p["root_id"], text)
+    if held_for_signoffs:
+        plan_docs._changed(db, p, rev)
+        return get(db, plan_id)
     if not claimed:
         now = _row(db, p["id"])
         if now["rev"] != rev:
@@ -1308,12 +1610,30 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     if approved:
         if gate(db, p) is None:             # a shared plan's one Library entry is its document
             _to_library(p, picks, comments, note, titles, doc_record, answers=own)
-        tasks.on_resumed(db, p["root_id"], why="the person's approval of the plan")
+        if reply is None:
+            _dispatch_approved_tasks(db, p["root_id"])
     return get(db, p["id"])
 
 
+def _dispatch_approved_tasks(db: DB, root_id: str) -> None:
+    """Give the session's pending tasks to the regular detached start helper."""
+    from brindle import tasks
+
+    pending = db.conn.execute(
+        _SESSION_CALLERS +
+        "SELECT t.id FROM tasks t WHERE t.state='pending' AND t.caller_id IN (SELECT id FROM callers)"
+        f" AND NOT {_CANCELLED_HOLD} ORDER BY t.created_at",
+        (root_id,),
+    ).fetchall()
+    for task in pending:
+        try:
+            tasks.start_in_background(task["id"])
+        except Exception:  # noqa: BLE001 - dispatch can be recovered by the queue sweep
+            log.exception("brindle: couldn't schedule task %s after plan approval", task["id"])
+
+
 def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None = None) -> dict:
-    """Close an open or redirected plan as cancelled, approving nothing: the
+    """Close a writing, open or redirected plan as cancelled, approving nothing: the
     person's Cancel (``person``, with the revision on screen as ``rev``), or the
     session's supervisor withdrawing its own (``caller``; ``rev`` optional).
     Whatever the review state, a shared plan's share is dropped
@@ -1324,7 +1644,7 @@ def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None
     (plan_cancel_holds): they neither start nor get dropped until the
     supervisor decides each one, with start_now or cancel_task. One message
     to the supervisor names them."""
-    from brindle import agents, autopilot, plan_docs, tasks
+    from brindle import agents, plan_docs
     from brindle.pro import shared_docs
 
     visuals.require_enabled()
@@ -1337,28 +1657,28 @@ def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None
         raise ServiceError("forbidden", "only the session's supervisor withdraws its plan", 403)
     if rev is not None and rev != p["rev"]:
         raise ServiceError("stale", f"the plan has a newer revision (r{p['rev']}); read that one", 409, rev=p["rev"])
-    if p["state"] == WRITING:
-        raise ServiceError("writing", "the supervisor is still writing this plan", 409)
-    if p["state"] not in ("open", "redirected"):
+    if p["state"] not in HOLDING:
         raise ServiceError("decided", "this plan is already decided", 409)
     root = p["root_id"]
     at = time.time()
     with db.tx() as c:
-        # Selected before the plan's state changes, in the same write transaction: a task queued
-        # by an assign whose reply is still going out (unanswered) is held too, and nothing
-        # committed after this read can slip past the cancel.
-        held = [t for t in db.list_tasks(state="pending") + db.list_tasks(state=tasks.UNANSWERED)
-                if t.caller_id and autopilot.root_of(db, t.caller_id) == root and tasks.open_plan_holds(db, t)]
-        if not c.execute("UPDATE plans SET state=?, updated_at=? WHERE id=? AND rev=? AND state IN ('open','redirected')",
+        held = _hold_for_supervisor(c, root, p["id"], at)
+        if not c.execute("UPDATE plans SET state=?, updated_at=? WHERE id=? AND rev=?"
+                         " AND state IN ('writing','open','redirected')",
                          (CANCELLED, at, p["id"], p["rev"])).rowcount:
             raise ServiceError("decided", "this plan is already decided", 409)
+        if p["state"] == WRITING:
+            c.execute("DELETE FROM visual_scoped_grants WHERE root_id=? AND scope='plan'", (root,))
+            c.execute("DELETE FROM visual_person_words WHERE root_id=? AND source='grant:plan'", (root,))
+            # An outstanding offer would otherwise hold work again once the draft closes.
+            c.execute("UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND (offer LIKE ? OR offer=?)",
+                      (OFFER_DISMISSED, root, OFFER_OPEN + "%", OFFER_ACCEPTED))
         row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
         if row is not None:
+            notice = "Your held approval was withdrawn because the plan was cancelled."
+            if withdraw_signoffs(c, p["id"], notice):
+                c.execute("UPDATE plans SET approval_notice=? WHERE id=?", (notice, p["id"]))
             shared_docs.drop_share(c, row)
-        for t in held:
-            c.execute("INSERT OR REPLACE INTO plan_cancel_holds (task_id, plan_id, created_at)"
-                      " SELECT id, ?, ? FROM tasks WHERE id=? AND state IN ('pending', ?)",
-                      (p["id"], at, t.id, tasks.UNANSWERED))
         queued = _queue_message(c, root, _cancelled_message(p, held, person))
     bus.publish_agent(db, "message.queued", root, message_id=queued, sender_id=None)
     try:
@@ -1372,16 +1692,42 @@ def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None
     return p
 
 
-def _cancelled_message(p: dict, held: list, person: bool) -> str:
-    lines = [f"{'The person cancelled' if person else 'You withdrew'} plan {p['id']} (r{p['rev']}): it is closed, "
+def _hold_for_supervisor(c, root: str, plan_id: str, at: float) -> list[Row]:
+    """Mark session ``root``'s queued tasks that are plan ``plan_id``'s own
+    work (tasks.plan_work) as held behind the plan's end (plan_cancel_holds),
+    for the supervisor to decide each one (start_now or cancel_task); returns
+    them. Call it in the write transaction that ends the plan, before its
+    state changes: a task queued by an assign whose reply is still going out
+    (unanswered) is held too, and nothing committed after this read can slip
+    past."""
+    from brindle import tasks
+
+    held = c.execute(
+        _SESSION_CALLERS +
+        "SELECT t.id, t.branch, t.task_text FROM tasks t"
+        " WHERE t.state IN ('pending', ?) AND t.caller_id IN (SELECT id FROM callers)"
+        f" AND {_PLAN_WORK} ORDER BY t.state, t.created_at",
+        (root, tasks.UNANSWERED, plan_id),
+    ).fetchall()
+    c.executemany("INSERT OR REPLACE INTO plan_cancel_holds (task_id, plan_id, created_at) VALUES (?,?,?)",
+                  [(t["id"], plan_id, at) for t in held])
+    return held
+
+
+def _cancelled_message(p: dict, held: list[Row], person: bool | None) -> str:
+    """What the supervisor is told when plan ``p`` ends unapproved: the
+    person's cancel (``person``), its own withdrawal, or (None) its session
+    being closed."""
+    lead = {True: "The person cancelled", False: "You withdrew", None: "Your session was closed with"}[person]
+    lines = [f"{lead} plan {p['id']} (r{p['rev']}): it is closed, "
              "nothing was approved, and it won't go to the Library."]
     if not held:
         return "\n".join([*lines, "It held no queued tasks."])
     lines.append(f"{len(held)} task(s) it held stay queued: none starts or is dropped on its own. Decide each one: "
                  "start_now(task_id) starts it, cancel_task(task_id) gives it up.")
     for t in held:
-        brief = next((ln.strip() for ln in t.task_text.splitlines() if ln.strip()), "")[:120]
-        lines.append(f"- {t.id} (branch {t.branch or 'none'}): {brief}")
+        brief = next((ln.strip() for ln in t["task_text"].splitlines() if ln.strip()), "")[:120]
+        lines.append(f"- {t['id']} (branch {t['branch'] or 'none'}): {brief}")
     return "\n".join(lines)
 
 

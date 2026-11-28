@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { DaemonClient, type AnalysisDoc, type BulkDocResult, type BulkDocsRequest, type DocScope } from "../../api/client";
 import { DocsView, type DocsClient } from "../Knowledge/DocsView";
@@ -21,7 +21,7 @@ const archiveBytes = "PK\x03\x04";
 const archiveName = "selected-plans.zip";
 const repo = "/repo with spaces";
 
-function library({ failure, hiddenShare }: { failure?: BulkDocResult; hiddenShare?: string } = {}) {
+async function library({ failure, hiddenShare }: { failure?: BulkDocResult; hiddenShare?: string } = {}) {
   let remaining = docs;
   const inFolder = new Set(["first", "second"]);
   const shared = new Set(["second"]);
@@ -82,7 +82,7 @@ function library({ failure, hiddenShare }: { failure?: BulkDocResult; hiddenShar
     bulkDocs: daemon.bulkDocs.bind(daemon),
     exportDocs: daemon.exportDocs.bind(daemon),
   };
-  render(<DocsView client={client} repo={repo} />);
+  await act(async () => { render(<DocsView client={client} repo={repo} />); });
 }
 
 const rowCheck = (id: string) => within(document.querySelector<HTMLElement>(`[data-doc="${id}"]`)!).getByRole<HTMLInputElement>("checkbox");
@@ -98,8 +98,8 @@ function confirmDelete() {
 }
 
 it("shift-selects a range and confirms one bulk delete for the shared selection", async () => {
-  library();
-  await screen.findByRole("region", { name: "Engine" });
+  await library();
+  expect(screen.getByRole("region", { name: "Engine" })).toBeTruthy();
   fireEvent.click(rowCheck("first"));
   fireEvent.click(rowCheck("third"), { shiftKey: true });
   expect(checkedRows()).toEqual(["first", "second", "third"]);
@@ -109,8 +109,8 @@ it("shift-selects a range and confirms one bulk delete for the shared selection"
 });
 
 it("selects only the rows in the chosen group and clears them on Escape", async () => {
-  library();
-  const group = await screen.findByRole("region", { name: "Engine" });
+  await library();
+  const group = screen.getByRole("region", { name: "Engine" });
   const [all] = within(group).getAllByRole("checkbox");
   fireEvent.click(all);
   expect(checkedRows()).toEqual(["first", "second"]);
@@ -119,8 +119,7 @@ it("selects only the rows in the chosen group and clears them on Escape", async 
 });
 
 it("refreshes the list and keeps only the failed row selected after a partial delete", async () => {
-  library({ failure: { id: "second", ok: false, code: "forbidden", error: "Only the owner can delete this plan." } });
-  await screen.findByRole("region", { name: "Engine" });
+  await library({ failure: { id: "second", ok: false, code: "forbidden", error: "Only the owner can delete this plan." } });
   fireEvent.click(rowCheck("first"));
   fireEvent.click(rowCheck("second"));
   confirmDelete();
@@ -133,8 +132,7 @@ it("refreshes the list and keeps only the failed row selected after a partial de
 });
 
 it("asks for shared deletion confirmation when the bulk API discovers a share", async () => {
-  library({ hiddenShare: "first" });
-  await screen.findByRole("region", { name: "Engine" });
+  await library({ hiddenShare: "first" });
   fireEvent.click(rowCheck("first"));
   confirmDelete();
   const row = document.querySelector<HTMLElement>('[data-doc="first"]')!;
@@ -145,7 +143,7 @@ it("asks for shared deletion confirmation when the bulk API discovers a share", 
 });
 
 it("downloads the selected plans as a ZIP through the daemon client", async () => {
-  library();
+  await library();
   let blob: Blob | undefined;
   let filename = "";
   vi.stubGlobal("URL", class extends URL {
@@ -155,7 +153,6 @@ it("downloads the selected plans as a ZIP through the daemon client", async () =
   vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
     filename = this.download;
   });
-  await screen.findByRole("region", { name: "Engine" });
   fireEvent.click(rowCheck("first"));
   fireEvent.click(rowCheck("third"));
   fireEvent.click(screen.getByRole("button", { name: "Download" }));
@@ -165,8 +162,8 @@ it("downloads the selected plans as a ZIP through the daemon client", async () =
 });
 
 it("moves selected plans into the chosen folder and refreshes the groups", async () => {
-  library();
-  const group = await screen.findByRole("region", { name: "Engine" });
+  await library();
+  const group = screen.getByRole("region", { name: "Engine" });
   const third = rowCheck("third");
   expect(group.contains(third)).toBe(false);
   fireEvent.click(third);
@@ -176,8 +173,7 @@ it("moves selected plans into the chosen folder and refreshes the groups", async
 });
 
 it("offers to stop sharing a plan after it has been bulk shared", async () => {
-  library();
-  await screen.findByRole("region", { name: "Engine" });
+  await library();
   fireEvent.click(rowCheck("first"));
   fireEvent.click(screen.getByRole("button", { name: "Share / Stop sharing" }));
   fireEvent.click(within(screen.getByRole("group", { name: "Share with" })).getByRole("button", { name: /^Share with / }));

@@ -66,6 +66,22 @@ it.each(["shared", "author"])("keeps reviewers in Share and bounds the %s reader
   expect(within(decision).getByTitle(name).textContent).toBe("DJ");
 });
 
+it("shows an author's local comment waiting until the shared plan syncs", async () => {
+  const plan = doc(1, "Read this", { threads: [{ id: 4, rev: 1, author: "person", at: 1, text: "Check this",
+    kind: "comment", status: "open", anchor: { kind: "section", section: "summary" } }] });
+  const change = { client_id: "local-4", tail: "/comments", body: { thread_item: 4 } };
+  const open = (state: "waiting" | "sent") => {
+    const shown = { ...plan, outbox: [{ ...change, state }] };
+    const client = { ...visuals, ...docWrites(() => shown), plan: async () => shown, decidePlan: async () => shown };
+    return <PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />;
+  };
+  const view = render(open("waiting"));
+  const comment = await screen.findByText("Check this");
+  expect(comment.dataset.state).toBe("waiting");
+  await act(async () => view.rerender(open("sent")));
+  expect(screen.getByText("Check this").dataset.state).toBe("sent");
+});
+
 /* Who reviews the doc, and sharing it, open over the page from the toolbar's Share. */
 const openShare = async () => fireEvent.click(await screen.findByRole("button", { name: "Share" }));
 
@@ -311,6 +327,7 @@ it("design doc reader", async () => {
   expect(screen.queryByTestId("thread-draft")).toBeNull();
   expect(screen.getByTestId("thread-2").getAttribute("data-kind")).toBe("comment");
   expect(doc.querySelectorAll('[data-thread="2"]').length).toBe(2);
+  expect(doc.querySelector('[data-thread="2"]')?.closest("p")?.nextElementSibling?.contains(screen.getByTestId("thread-2"))).toBe(true);
 
   // A suggestion shows its before and after, on its card and in the text; accepted, the text
   // is the new revision's and the card moves under Resolved.
@@ -365,25 +382,29 @@ it("design doc reader", async () => {
 const doc = (rev: number, text: string, more: Partial<Plan> = {}): Plan => ({ id: visual.id, session: "boss", title: "Cloud workers", rev, state: "open", markdown: "…", lede: "", queued: 0, created_at: 1, split: [],
   sections: [{ id: "summary", title: "Summary", markdown: text }], decisions: [], threads: [], ...more });
 
-it("a redirected plan can be cancelled from the reader, and the same reader then shows it closed", async () => {
-  const redirected = doc(1, "Workers run on your machine.", { state: "redirected", verdict: { approved: false, at: 13, rev: 1 } });
-  const cancelled: Plan = { ...redirected, state: "cancelled" };
+it.each([
+  doc(1, "Workers run on your machine.", { state: "redirected", verdict: { approved: false, at: 13, rev: 1 } }),
+  doc(0, "", { state: "writing", sections: [] }),
+])("a $state plan can be cancelled from the reader, and the same reader then shows it closed", async (initial) => {
+  const cancelled: Plan = { ...initial, state: "cancelled" };
   // The engine's answer to the cancel is what the reader reads from then on.
-  let current: Plan = redirected;
-  const cancels: number[] = [];
+  let current: Plan = initial;
   const client: PlansClient & PlanDocClient & VisualsClient & Pick<DaemonClient, "cancelPlan"> = {
     ...visuals, ...docWrites(() => current),
-    plan: async () => current, decidePlan: async () => redirected,
-    cancelPlan: async (_id, rev) => { cancels.push(rev); current = cancelled; return cancelled; },
+    plan: async () => current, decidePlan: async () => initial,
+    cancelPlan: async (_id, rev) => {
+      if (rev !== current.rev) throw new Error("Stale plan revision");
+      current = cancelled;
+      return current;
+    },
   };
   render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
-  await screen.findByText("Workers run on your machine.");
+  expect((await screen.findByTestId("plan-decided")).dataset.state).toBe(initial.state);
   expect(screen.getByTestId("plan-verdict").querySelector("[data-testid=plan-build]")).toBeNull();
   expect(screen.queryByTestId("plan-closed")).toBeNull();
   fireEvent.click(screen.getByTestId("plan-cancel"));
   // Same mounted reader: the closed presentation appears from the cancel's answer.
   await screen.findByTestId("plan-closed");
-  expect(cancels).toEqual([1]);
   expect(screen.queryByTestId("plan-cancel")).toBeNull();
   // The status is rendered in its closed presentation, not the changes-requested one.
   expect(screen.getByTestId("plan-status").dataset.presentation).toBe("closed");
@@ -546,7 +567,7 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   await openShare();
   expect(screen.getByTestId("share-person-u_a").dataset.state).toBe("waiting");
   expect(screen.getByTestId("share-person-u_c").dataset.signOff).toBe("optional");
-  await act(async () => fireEvent.click(within(screen.getByTestId("share-person-u_a")).getByRole("button", { name: "Sign off" })));
+  await act(async () => fireEvent.click(within(screen.getByTestId("share-person-u_a")).getByRole("button", { name: "Approve" })));
   expect(screen.getByTestId("share-person-u_a").dataset.state).toBe("signed_off");
   expect(screen.getByTestId("plan-build").dataset.gate).toBe("ready");
   await act(async () => fireEvent.click(screen.getByTestId("plan-build")));
@@ -683,6 +704,24 @@ it("a design doc whose Team plan ended says so, once, and only then", async () =
   expect(await screen.findAllByTestId("plan-team-ended")).toHaveLength(1);
 });
 
+it("keeps the Build label when a build request is held and withdrawn", async () => {
+  const gate = { state: "waiting" as const, required: 1, signed: 0, waiting_on: ["Maya"], can_hold_approval: true };
+  let plan = doc(1, "Ready for review", { gate, decisions: [] });
+  const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...docWrites(() => plan), plan: async () => plan,
+    decidePlan: async (_id, verdict) => (plan = { ...plan, gate: { ...gate,
+      approval_held: verdict.approved ? { rev: plan.rev, waiting_on: ["Maya"] } : null } }),
+    withdrawPlanApproval: async () => (plan = { ...plan, gate }) };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const approve = await screen.findByTestId("plan-build");
+  const label = approve.textContent;
+  await act(async () => fireEvent.click(approve));
+  expect(approve.textContent).toBe(label);
+  expect(approve.getAttribute("aria-pressed")).toBe("true");
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Withdraw" })));
+  expect(approve.textContent).toBe(label);
+  expect(approve.getAttribute("aria-pressed")).toBe("false");
+});
+
 it("the author's plan opened in its session offers its Library link by plan id, and none when it isn't in the Library", async () => {
   const url = "https://pawdelta.com/api/brindle/v1/share-links/dsl_p";
   let plan = doc(1, "Workers run on your machine.");
@@ -814,7 +853,7 @@ it("an admin can name themself as the only stand-in, and the rule waits until th
   await act(async () => fireEvent.click(within(screen.getByTestId("plan-policy-override-security")).getByRole("button", { name: "Name stand-in" })));
   expect(screen.getByTestId("plan-policy-security").dataset.status).toBe("waiting");
 
-  await act(async () => fireEvent.click(within(screen.getByTestId("plan-policy-security")).getByRole("button", { name: "Sign off" })));
+  await act(async () => fireEvent.click(within(screen.getByTestId("plan-policy-security")).getByRole("button", { name: "Approve" })));
   expect(screen.getByTestId("plan-policy-security").dataset.status).toBe("signed_off");
 });
 

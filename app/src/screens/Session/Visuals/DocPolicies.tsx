@@ -127,7 +127,7 @@ export function Policies({ plan, client, directory, adminOrg, me, busy, nameOf, 
               <span className="text-[11px] text-ink-3">{`${p.name} · ${why(p)}`}</span>
               <Standing p={p} nameOf={label} />
               {!!client && !closed && unmet && standing.some((s) => s.stand_in === me) && (
-                <button type="button" className={`${quiet} -my-0.5 text-xs`} disabled={busy} onClick={() => void write(() => client.signOffPlan(plan.id, plan.rev))}>Sign off</button>
+                <button type="button" className={`${quiet} -my-0.5 text-xs`} disabled={busy} onClick={() => void write(() => client.signOffPlan(plan.id, plan.rev))}>Approve</button>
               )}
               {canOverride && (
                 <>

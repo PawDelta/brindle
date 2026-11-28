@@ -6,6 +6,7 @@ import { DaemonError, type Plan, type PlanAnchor, type PlanChange, type SharedDe
 import type { PlanDocClient, PlansClient, PlanSharingClient, ShareLinkDesignClient, SharedDesignClient } from "./client";
 import type { SharePeopleTarget } from "./SharePanel";
 import type { HistoryClient } from "./DocHistory";
+import type { PlanDeliveryItem as Delivery } from "../../../api/client";
 
 export interface DocSource<P extends Plan = Plan> {
   /* The doc's own id there: a plan's, or a Library doc's. Anything kept about a doc is keyed by it. */
@@ -89,8 +90,21 @@ export function linkSource(client: ShareLinkDesignClient, token: string, id: str
   };
 }
 
-export function sharedSource(client: SharedDesignClient, id: string, repo?: string): DocSource<SharedDesign> {
-  const send = (tail: string, body: Record<string, unknown>) => client.writeSharedDesign(id, tail, repo ? { ...body, repo } : body);
+export function sharedSource(client: SharedDesignClient, id: string, repo?: string,
+                             sending?: (item: Delivery | null) => void): DocSource<SharedDesign> {
+  const send = async (tail: string, body: Record<string, unknown>) => {
+    const payload = repo ? { ...body, repo } : body;
+    if (body.question || !["comments", "suggestions", "votes", "sign-offs"].includes(tail))
+      return client.writeSharedDesign(id, tail, payload);
+    const client_id = crypto.randomUUID();
+    const target = tail === "sign-offs" && typeof body.version === "number" ? { ...body, rev: body.version } : body;
+    sending?.({ client_id, tail: "/" + tail, body: target, state: "waiting" });
+    try {
+      return await client.writeSharedDesign(id, tail, { ...payload, client_id });
+    } finally {
+      sending?.(null);
+    }
+  };
   return {
     id,
     people: client.designAccess && client.inviteDesignPerson && client.setDesignPersonAccess && client.setDesignPersonSignOff

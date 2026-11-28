@@ -145,7 +145,7 @@ export function taskProgress(record?: DesignRecord | null): { merged: number; re
    on the reviewer list, then the listed reviewers who have not signed. `signed` is for the revision on screen. */
 export function signOffRows(design?: DesignReview | null): { sub: string; role: string; rev?: number; signed: boolean }[] {
   if (!design) return [];
-  const role = (sub: string) => { const r = design.reviewers?.find((x) => x.sub === sub); return r ? (r.required === false ? "optional" : "required") : "signed off"; };
+  const role = (sub: string) => { const r = design.reviewers?.find((x) => x.sub === sub); return r ? (r.required === false ? "optional" : "required") : "reviewer"; };
   const rows = (design.sign_offs ?? []).map((s) => ({ sub: s.sub, role: role(s.sub), rev: s.rev, signed: s.rev === undefined || s.rev === design.rev }));
   for (const r of design.reviewers ?? []) if (!rows.some((x) => x.sub === r.sub && x.signed)) rows.push({ sub: r.sub, role: role(r.sub), rev: undefined, signed: false });
   return rows;

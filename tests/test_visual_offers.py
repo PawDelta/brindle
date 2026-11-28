@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 import pytest
 from starlette.testclient import TestClient
 
-from brindle import agents, config, mcp_server, visual_offers as offers, visuals
+from brindle import agents, config, intent, mcp_server, visual_offers as offers, visuals
 from brindle.daemon.app import build_app
 from brindle.daemon.events import Feed
 from brindle.db import DB, Agent, Workspace
@@ -416,6 +416,8 @@ def test_legacy_unscoped_grants_are_revoked(db, session):
     agents.send_message(db, boss.id, "Make a visual", person=True)
     observer = offers.begin_input(db, boss)
     db.conn.execute("ALTER TABLE visual_grants DROP COLUMN scope")
+    db.conn.execute("INSERT INTO visual_grants SELECT root_id, remaining, explicit FROM visual_scoped_grants")
+    db.conn.execute("DROP TABLE visual_scoped_grants")
     db.conn.execute("ALTER TABLE visual_input_state DROP COLUMN observer")
     db.conn.execute("ALTER TABLE visual_input_state DROP COLUMN invalidated_at")
     reopened = DB(db.path)
@@ -426,6 +428,30 @@ def test_legacy_unscoped_grants_are_revoked(db, session):
                 offers.consume(c, boss.id)
     finally:
         reopened.conn.close()
+
+
+@pytest.mark.parametrize("case", [
+    pytest.param("quoted", marks=pytest.mark.variant("a quoted visual ask must not spend a standing plan ask")),
+    pytest.param("legacy", marks=pytest.mark.variant("migration preserves an existing unspent plan grant")),
+    pytest.param("model", marks=pytest.mark.variant("a standing plan grant must allow a separate model-confirmed visual ask")),
+])
+def test_visual_ask_preserves_the_unspent_plan_ask(db, session, monkeypatch, case):
+    boss, _ = session
+    offers.person_spoke(db, boss, "Make a planning doc.", typed=True)
+    if case == "legacy":
+        db.conn.execute("INSERT INTO visual_grants SELECT root_id, remaining, explicit, scope FROM visual_scoped_grants")
+        db.conn.execute("DROP TABLE visual_scoped_grants")
+        db.conn.close()
+        db = DB(db.path)
+    text = "would you perhaps show me that diagram?" if case == "model" else "show me a visual"
+    if case == "model":
+        monkeypatch.setattr(intent, "_ask", lambda prompt, budget: "1")
+    offers.person_spoke(db, boss, text, typed=True)
+    visuals.publish(db, boss, "Visual", "<p>Visual</p>", asked=None if case == "model" else text)
+    visuals.publish(db, boss, "Plan", "<p>Plan</p>", kind="plan")
+    with pytest.raises(ServiceError) as refused:
+        visuals.publish(db, boss, "Another visual", "<p>Visual</p>", asked=text)
+    assert refused.value.code == "visual_request_required"
 
 
 def app_vouches(boss, text, expires_at, submitted_at=None):

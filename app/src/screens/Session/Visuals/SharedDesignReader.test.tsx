@@ -167,7 +167,7 @@ it("a teammate signs off through the Library, keeps a draft across a stale write
 
   answer = async () => (doc = { ...doc, signed_off: true });
   await act(async () => fireEvent.click(screen.getByTestId("plan-sign-off")));
-  expect(sent.at(-1)).toEqual(["sign-offs", { rev: 2 }]);
+  expect(sent.at(-1)).toMatchObject(["sign-offs", { rev: 2 }]);
   expect(screen.queryByTestId("plan-sign-off")).toBeNull();
 
   // An outage says nothing about access: what was on screen stays.
@@ -180,10 +180,17 @@ it("a teammate signs off through the Library, keeps a draft across a stale write
   let reply!: (d: SharedDesign) => void;
   answer = () => new Promise<SharedDesign>((resolve) => { reply = resolve; });
   await act(async () => fireEvent.click(within(screen.getByTestId("thread-draft")).getByRole("button", { name: "Comment" })));
-  reading = async () => { throw new DaemonError("forbidden", "no access", 403); };
+  reading = async () => {
+    const lost = new DaemonError("forbidden", "no access", 403);
+    lost.refusedChanges = [{ client_id: "comment", tail: "/comments", rev: 2 }];
+    lost.unconfirmedChanges = [{ client_id: "reply", tail: "/comments", rev: 1 }];
+    throw lost;
+  };
   await nextRead();
   expect(screen.queryByText("Workers run here.")).toBeNull();
   expect(screen.getByRole("alert")).toBeTruthy();
+  expect(screen.getByText("Not sent").closest('[data-state="refused"]')).toBeTruthy();
+  expect(screen.getByTestId("shared-design-reader").querySelector('[data-state="unconfirmed"]')?.textContent).toContain("Revision 1");
 
   let granted!: (d: SharedDesign) => void;
   reading = () => new Promise<SharedDesign>((resolve) => { granted = resolve; });

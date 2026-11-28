@@ -2693,6 +2693,13 @@ export class FakeDaemon {
       can_comment: true, can_suggest: true, can_sign_off: true, signed_off: live.state.version?.signOffs.includes(review.me) ?? false };
     if ((method === "GET" && !route[3]) || (method === "POST" && route[3] === "sync")) return json(result());
     if (method !== "POST") return null;
+    if (route[1] === "plans" && route[3] === "approval/withdraw") {
+      if (!review.gate || body.rev !== review.plan.rev) return error("stale", "The plan revision changed", 409);
+      const gate = { ...review.gate, approval_held: null };
+      review.gate = gate;
+      this.setLiveState(route[2], {});
+      return json(result());
+    }
     if (route[3] === "sign-off" || route[3] === "sign-offs" || route[3] === "decide") {
       const version = live.state.version;
       if (!version || body.version !== version.id || body.rev !== review.plan.rev || live.state.lock !== "sign_off") return error("stale", "This live version is no longer in review", 409);

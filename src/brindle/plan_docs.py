@@ -131,14 +131,15 @@ def from_markdown(markdown: str) -> tuple[str, list[dict]]:
 
 
 def render(lede: str, sections: list[dict]) -> str:
-    """A revision as one markdown text (the library's copy, and the plans row)."""
-    out = [lede] if lede else []
+    """A revision as one markdown text (the library's copy, and the plans row).
+    A lede's leading indentation stays: the person may have made it a code block."""
+    out = [lede.lstrip("\n")] if lede and lede.strip() else []
     for s in sections:
         body = s["markdown"] if s["kind"] == "markdown" else f"```{s['kind']}\n{s['markdown']}\n```"
         if s.get("caption"):
             body += f"\n\n*{s['caption']}*"
         out.append(f"## {s['title']}\n\n{body}".rstrip())
-    return "\n\n".join(out).strip()
+    return "\n\n".join(out).rstrip()
 
 
 def _svg(body: str, where: str) -> None:
@@ -299,11 +300,22 @@ def _spine(parts: list[dict]) -> list[dict]:
 
 def insert_revision(c, plan_id: str, rev: int, author: str, source: str, lede: str, sections: list[dict],
                     markdown: str, decisions: list, split: list, ask: str | None, changed: list[str],
-                    at: float) -> None:
+                    at: float, *, title: str | None = None) -> None:
     c.execute("INSERT INTO plan_revisions (plan_id, rev, author, source, lede, sections, markdown, decisions,"
-              " split, ask, changed, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+              " split, ask, changed, created_at, title) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
               (plan_id, rev, author, source, lede, json.dumps(sections), markdown, json.dumps(decisions),
-               json.dumps(split), ask, json.dumps(changed), at))
+               json.dumps(split), ask, json.dumps(changed), at, title))
+    from brindle import plans
+
+    plans.withdraw_signoffs(c, plan_id, f"Your held approval was withdrawn. Read revision {rev} before approving.")
+
+
+def _current_visual_title(db: DB, plan_id: str, rev: int) -> str | None:
+    # Match the revision in the same read so a concurrent proposal can't lend
+    # its visual title to the revision being replaced.
+    row = db.conn.execute("SELECT v.title FROM plans p JOIN visuals v ON v.id=p.id WHERE p.id=? AND p.rev=?",
+                          (plan_id, rev)).fetchone()
+    return row["title"] if row is not None else None
 
 
 def revision(db: DB, plan_id: str, rev: int | None = None) -> dict:
@@ -314,12 +326,16 @@ def revision(db: DB, plan_id: str, rev: int | None = None) -> dict:
     n = p["rev"] if rev is None else rev
     row = db.conn.execute("SELECT * FROM plan_revisions WHERE plan_id=? AND rev=?", (p["id"], n)).fetchone()
     if row is not None:
-        return _decode(row)
+        stored = _decode(row)
+        if n == p["rev"] and stored["title"] is None:
+            stored["title"] = _current_visual_title(db, p["id"], n)
+        return stored
     if n != p["rev"]:
         raise ServiceError("not_found", "no such revision", 404)
     # A plan from before revisions were kept: its current revision is the plans row.
     lede, parts = from_markdown(p["markdown"])
     return {"plan_id": p["id"], "rev": n, "author": SUPERVISOR, "source": "proposal", "lede": lede,
+            "title": _current_visual_title(db, p["id"], n),
             "sections": parts, "markdown": p["markdown"], "decisions": p["decisions"], "split": p["split"],
             "ask": p.get("ask"), "changed": [s["id"] for s in parts], "created_at": p["updated_at"],
             "stored": False}
@@ -359,16 +375,18 @@ def _with_draft(cur: dict, replica) -> dict:
 
 
 def keep(c, cur: dict) -> None:
-    """In the transaction that replaces revision ``cur``: if it is a plan's
-    from before revisions were kept (read from the plans row), store it
-    first, so the history keeps it once the plans row moves on."""
+    """Preserve the current revision and its recoverable title in the
+    transaction that replaces it."""
     if cur.get("stored", True):
+        if cur.get("title") is not None:
+            c.execute("UPDATE plan_revisions SET title=? WHERE plan_id=? AND rev=? AND title IS NULL",
+                      (cur["title"], cur["plan_id"], cur["rev"]))
         return
     c.execute("INSERT OR IGNORE INTO plan_revisions (plan_id, rev, author, source, lede, sections, markdown,"
-              " decisions, split, ask, changed, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+              " decisions, split, ask, changed, created_at, title) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
               (cur["plan_id"], cur["rev"], cur["author"], cur["source"], cur["lede"], json.dumps(cur["sections"]),
                cur["markdown"], json.dumps(cur["decisions"]), json.dumps(cur["split"]), cur["ask"],
-               json.dumps(cur["changed"]), cur["created_at"]))
+               json.dumps(cur["changed"]), cur["created_at"], cur.get("title")))
 
 
 def _history(db: DB, p: dict) -> list[dict]:
@@ -376,6 +394,8 @@ def _history(db: DB, p: dict) -> list[dict]:
         "SELECT * FROM plan_revisions WHERE plan_id=? ORDER BY rev", (p["id"],))]
     if not rows or rows[-1]["rev"] != p["rev"]:
         rows.append(revision(db, p["id"]))
+    elif rows[-1]["title"] is None:
+        rows[-1]["title"] = _current_visual_title(db, p["id"], p["rev"])
     return rows
 
 
@@ -613,6 +633,10 @@ def _add(db: DB, p: dict, rev: int, kind: str, anchor: dict | None, author: str,
     with db.tx() as c:
         tid = file_thread(c, p["id"], rev, kind, anchor, author, text, attachments, parent=parent, after=after,
                           question=question, origin=origin)
+        if not question and parent is None:
+            from brindle import plans
+
+            plans.withdraw_on_objection(c, p)
     _changed(db, p, p["rev"])
     return tid
 
@@ -785,7 +809,7 @@ def _apply(db: DB, p: dict, cur: dict, sid: str, pos: int, before: str, after: s
         if claimed:
             keep(c, cur)
             insert_revision(c, p["id"], rev, PERSON, source, lede, sections, markdown, cur["decisions"],
-                            cur["split"], cur["ask"], [sid], now)
+                            cur["split"], cur["ask"], [sid], now, title=cur.get("title"))
             if thread_id is not None and not c.execute(
                     "UPDATE plan_threads SET status='accepted', updated_at=? WHERE id=? AND status='open'",
                     (now, thread_id)).rowcount:
@@ -1048,7 +1072,8 @@ def pending(db: DB, p: dict) -> tuple[list[str], list[str], list[int]]:
         titles = [_title(p, cur, {"kind": "text", "section": s}) for s in json.loads(r["changed"])]
         how = "accepted a suggestion in" if r["source"] == "suggestion" else "edited"
         who = "They" if r["author"] == PERSON else teammate_names(db, p["id"]).get(r["author"][len(TEAMMATE):], "A teammate")
-        line = f"{who} {how} {', '.join(titles)} (r{r['rev']}); revise from the current text."
+        line = (f"{who} {how} {', '.join(titles)} (r{r['rev']}); read the current text with "
+                f"read_plan(plan_id=\"{p['id']}\") and revise that, passing the base it gives.")
         message.append(line)
         record.append(line)
     return message, record, ids
@@ -1081,8 +1106,10 @@ def _thread_dto(t: dict, cur: dict, replies: list[dict], replica=None) -> dict:
 
 
 def _revision_dto(r: dict) -> dict:
+    from brindle.plans import _title
+
     return {"rev": r["rev"], "author": r["author"], "source": r["source"], "changed": r["changed"],
-            "at": r["created_at"]}
+            "at": r["created_at"], "title": r.get("title") or _title(r["markdown"])}
 
 
 def record_event(c, plan_id: str, key: str, kind: str, actor: str, at: float,

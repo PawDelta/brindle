@@ -7,6 +7,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from brindle import plan_docs, plans
+from brindle.approval_sources import PERSON_IN_APP
 from brindle.daemon.app import build_app
 from brindle.pro import analysis_docs as ad
 from brindle.pro import review_policies as rp
@@ -127,7 +128,7 @@ def test_a_rule_holds_the_build_and_shows_why_until_one_sign_off_meets_all_of_th
     security = now["policies"][0]
     assert (security["needs_name"], security["eligible"], security["matched"]) == ("Security", 6, ["billing/meter.py"])
     with pytest.raises(ServiceError) as e:
-        plans.decide(db, pid, 1, True, person=True)
+        plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
     assert e.value.code == "gate_closed"
 
     lib.rules = [{**r, "status": "met", "met_by": ["u_s"]} for r in lib.rules]
@@ -155,7 +156,7 @@ def test_a_rule_that_cant_be_believed_closes_the_gate(db, shared, review):
     sd.sync(db, pid, **net)
     assert gate(db, pid)["state"] == "waiting"
     with pytest.raises(ServiceError) as e:
-        plans.decide(db, pid, 1, True, person=True)
+        plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
     assert e.value.code == "gate_closed" and plans.get(db, pid)["state"] == "open"
 
 
@@ -263,7 +264,7 @@ def test_a_refused_override_changes_nothing_and_a_closed_review_takes_none(db, s
     assert rp.REFUSED not in sd.link(db, pid)["review"]             # an admin check says nothing about the rules
 
     lib.rules = []
-    plans.decide(db, pid, 1, True, person=True)
+    plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
     with pytest.raises(ServiceError) as e:
         rp.override(db, pid, 1, ORG, "security", "waive", "r", **net)
     assert e.value.code == "review_closed"

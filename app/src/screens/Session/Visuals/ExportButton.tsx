@@ -26,11 +26,11 @@ export function ExportButton({ client, source, repo, open, onOpenChange, onReque
   };
   return (
     <div className="relative flex max-w-full flex-wrap items-center gap-2">
-      <button ref={toggle} type="button" className={`${button} pl-2.5 pr-2 ${open ? "bg-surface-2" : ""}`} aria-haspopup="true" aria-expanded={open} data-testid="visual-export" onKeyDown={esc} onClick={() => {
+      <button ref={toggle} type="button" className={`${button} ${source?.kind === "plan" ? "px-2 text-xs" : "pl-2.5 pr-2"} ${open ? "bg-surface-2" : ""}`} aria-haspopup="true" aria-expanded={open} data-testid="visual-export" onKeyDown={esc} onClick={() => {
         if (!open) onRequestSnapshot?.();
         onOpenChange(!open);
       }}>
-        <ShareIcon size={15} className="text-ink-2" />
+        <ShareIcon size={source?.kind === "plan" ? 13 : 15} className="text-ink-2" />
         Export
         <ChevronDownIcon size={14} className={`text-ink-3 transition-transform duration-150 ${open ? "rotate-180" : ""}`} />
       </button>

@@ -531,6 +531,7 @@ class PlanRevisionDTO(_DTO):
     source: Literal["proposal", "edit", "suggestion"]
     changed: list[str] = []
     at: float
+    title: str | None = None
 
 
 class PlanRevisionDetailDTO(PlanRevisionDTO):
@@ -628,6 +629,11 @@ class PlanUnconfirmedDTO(_DTO):
     can_edit_reviewers: bool = False
 
 
+class HeldApprovalDTO(_DTO):
+    rev: int
+    waiting_on: list[str]
+
+
 class PlanGateDTO(_DTO):
     """A shared plan's build gate (brindle.plans.gate). ``reason``: why it
     can't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:
@@ -643,6 +649,8 @@ class PlanGateDTO(_DTO):
     policies: list[PlanGatePolicyDTO] = []
     unconfirmed: PlanUnconfirmedDTO | None = None
     approval_refused: str | None = None
+    can_hold_approval: bool = False
+    approval_held: HeldApprovalDTO | None = None
 
 
 class LibraryFolderDTO(_DTO):
@@ -661,6 +669,14 @@ class DesignTaskDTO(_DTO):
     id: str
     title: str
     state: str
+
+
+class PlanDeliveryItemDTO(_DTO):
+    client_id: str
+    tail: str
+    state: Literal["waiting", "sending", "refused", "unconfirmed", "sent"]
+    body: dict[str, Any]
+    code: str | None = None
 
 
 class PlanDTO(_DTO):
@@ -683,6 +699,7 @@ class PlanDTO(_DTO):
     lede: str
     sections: list[PlanSectionDTO]
     decisions: list[PlanDecisionDTO]
+    outbox: list[PlanDeliveryItemDTO] = []
     split: list[PlanWorkerDTO]
     verdict: PlanVerdictDTO | None = None
     queued: int

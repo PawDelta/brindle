@@ -4,7 +4,8 @@ import type { LiveDocState, Plan } from "./client";
    gate includes org policy checks; without one, only explicit current signers can count. */
 export function liveReviewGate(gate: Plan["gate"], state: LiveDocState | null): Plan["gate"] {
   if (!gate) return gate;
-  if (state?.version && state.gate) return state.gate;
+  if (state?.version && state.gate) return { ...state.gate, approval_held: gate.approval_held,
+    can_hold_approval: gate.can_hold_approval && state.gate.state === "waiting" };
   const signed = new Set(state?.version?.signOffs ?? []);
   const reviewers = gate.reviewers?.map((row) => {
     const met_by = row.met_by?.filter((sub) => signed.has(sub));
@@ -20,7 +21,7 @@ export function liveReviewGate(gate: Plan["gate"], state: LiveDocState | null): 
   const ready = !!state?.version && required.length >= gate.required && !waiting.length && !policies?.some((row) => row.status !== "signed_off" && row.status !== "waived");
   return { ...gate, reviewers, policies, signed: required.length - waiting.length,
     state: gate.state === "closed" || gate.state === "conflict" ? gate.state : ready ? "ready" : "waiting",
-    waiting_on: waiting.map((row) => row.sub ?? row.name ?? ""), reason: ready ? null : state?.version ? "Waiting for sign-offs on this version" : "Freeze a version before sign-off",
+    waiting_on: waiting.map((row) => row.sub ?? row.name ?? ""), reason: ready ? null : state?.version ? "Waiting for approvals on this version" : "Freeze a version before approval",
     unconfirmed: gate.unconfirmed ? { ...gate.unconfirmed, approval_held: false } : gate.unconfirmed,
   };
 }

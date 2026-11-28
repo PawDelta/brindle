@@ -71,7 +71,7 @@ function Reader({ lib, onStopAll }: { lib: ReturnType<typeof library>; onStopAll
 const row = (sub: string) => screen.getByTestId(`share-person-${sub}`);
 const choose = async (sub: string, item: string) => {
   fireEvent.click(within(row(sub)).getByRole("button", { name: `What ${sub} can do` }));
-  await act(async () => fireEvent.click(within(screen.getByTestId(`share-menu-${sub}`)).getByRole(item === "Stop sharing" ? "menuitem" : item === "Must sign off" ? "menuitemcheckbox" : "menuitemradio", { name: new RegExp(`^${item}`) })));
+  await act(async () => fireEvent.click(within(screen.getByTestId(`share-menu-${sub}`)).getByRole(item === "Stop sharing" ? "menuitem" : item === "Must approve" ? "menuitemcheckbox" : "menuitemradio", { name: new RegExp(`^${item}`) })));
 };
 
 it("lists each person's access and sign-off, teams and the org as rows, with display names that fit", async () => {
@@ -106,18 +106,18 @@ it("adds a person at the access chosen, and changes sign-off without touching th
   fireEvent.click(within(screen.getByTestId("share-result-lena")).getByRole("button"));
   const add = screen.getByTestId("share-add");
   fireEvent.click(within(add).getByRole("menuitemradio", { name: /^Edit/ }));
-  fireEvent.click(within(add).getByRole("menuitemcheckbox", { name: /^Must sign off/ }));
+  fireEvent.click(within(add).getByRole("menuitemcheckbox", { name: /^Must approve/ }));
   await act(async () => fireEvent.click(screen.getByTestId("share-add-confirm")));
   expect(lib.calls).toEqual(["invite lena edit true"]);
   expect([row("lena").dataset.access, row("lena").dataset.signOff]).toEqual(["edit", "required"]);
   // Sign-off off: still an editor. Access down to view: the sign-off goes along.
-  await choose("lena", "Must sign off");
-  await choose("sam", "Must sign off");
+  await choose("lena", "Must approve");
+  await choose("sam", "Must approve");
   await choose("lena", "View");
   expect(lib.calls.slice(1)).toEqual(["signOff lena false", "signOff sam true", "change lena view"]);
   expect([row("lena").dataset.access, row("lena").dataset.signOff]).toEqual(["view", "none"]);
   expect([row("sam").dataset.access, row("sam").dataset.signOff]).toEqual(["comment", "required"]);
-  expect(screen.getByText("The build starts when sam signs off.")).toBeTruthy();
+  expect(row("sam").dataset.state).toBe("waiting");
 });
 
 it("keeps other people's changes when one fails, and sends only that one again", async () => {

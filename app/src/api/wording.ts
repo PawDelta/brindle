@@ -22,3 +22,12 @@ export function plain(text: string): string {
   if (out && !/[.!?]$/.test(out)) out += ".";
   return out;
 }
+
+/* Plan review messages can come from an engine or Library using the old copy. */
+export function planReviewMessage(text: string): string {
+  return text
+    .replace(/\bsign-offs\b/g, "approvals")
+    .replace(/\bsign-off\b/g, "approval")
+    .replace(/\bsigned off\b/g, "approved")
+    .replace(/\bsign off\b/g, "approve");
+}

@@ -320,15 +320,15 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
     const r = reviewerOf(p.sub);
     const must = p.signOff ?? (r ? (r.required ? "required" : "optional") : null);
     if (!must) return null;
-    if (r?.status === "signed_off") return { text: `Signed off r${plan.rev}`, tone: "ok" };
+    if (r?.status === "signed_off") return { text: `Approved r${plan.rev}`, tone: "ok" };
     if (r?.status === "changes_requested") return { text: "Asked for changes", tone: "wait" };
-    if (r?.status === "waived") return { text: "Sign-off waived", tone: "" };
-    return must === "required" ? { text: "Must sign off · not yet", tone: "wait" } : { text: "May sign off", tone: "" };
+    if (r?.status === "waived") return { text: "Approval waived", tone: "" };
+    return must === "required" ? { text: "Must approve · waiting", tone: "wait" } : { text: "May approve", tone: "" };
   };
   const waiting = people.filter((p) => (p.signOff ?? (reviewerOf(p.sub)?.required ? "required" : null)) === "required");
   const unsigned = waiting.filter((p) => reviewerOf(p.sub)?.status !== "signed_off").map((p) => firstWord(p.name));
   const signed = waiting.filter((p) => reviewerOf(p.sub)?.status === "signed_off").map((p) => firstWord(p.name));
-  const buildNote = unsigned.length ? `The build starts when ${list(unsigned)} sign${unsigned.length > 1 ? "" : "s"} off.${signed.length ? ` ${list(signed)} already ${signed.length > 1 ? "have" : "has"}.` : ""}` : null;
+  const buildNote = unsigned.length ? `Waiting for ${list(unsigned)} to approve.${signed.length ? ` ${list(signed)} already approved.` : ""}` : null;
 
   // A refused write keeps its row, its error and Try again; `cancel` drops one that never landed.
   const status = (key: string, label: string, cancel?: () => void) => {
@@ -377,7 +377,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
             : p.sent === "sharing" && p.why ? <span className="note wait" title={p.why}>Waiting to reach your Library</span>
             : note && <span className={`note ${note.tone}`}>{note.tone === "ok" && <ShareCheck />}{note.text}</span>}</span>
         {status(key, "Couldn't save", pending && !p.sent ? () => drop(p.sub) : undefined) ?? sentStatus() ?? (signOff?.sub === p.sub && r?.status !== "signed_off"
-          ? <button className="sp-btn q end" disabled={signOff.disabled} onClick={signOff.run}>Sign off</button> : null)}
+          ? <button className="sp-btn q end" disabled={signOff.disabled} onClick={signOff.run}>Approve</button> : null)}
         {pending ? !busy[key] && level && <span className="st">{CAN[level]}</span> : target && level ? <button className="sel" aria-haspopup="menu" aria-expanded={menu === key} aria-label={`What ${p.name} can do`} disabled={busy[key]?.state === "saving"} onClick={() => setMenu(menu === key ? null : key)}>{CAN[level]}<ShareChevron /></button>
           : level && <span className="st">{CAN[level]}</span>}
       </div>
@@ -386,7 +386,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
         {LEVELS.map((l) => <button key={l.id} className="mi" role="menuitemradio" aria-checked={level === l.id}
           onClick={() => level !== l.id && run(personWork(p.sub, "Couldn't change", (t) => t.change(p.sub, l.id)))}>{l.name}<span className="mx">{l.hint}{level === l.id && <ShareCheck />}</span></button>)}
         <button className="mi box" role="menuitemcheckbox" aria-checked={must} onClick={() => run(personWork(p.sub, "Couldn't change", (t) => t.signOff(p.sub, !must)))}>
-          <i className={`bx ${must ? "on" : ""}`} aria-hidden>{must && <ShareCheck />}</i><span className="grow">Must sign off<span className="mx"> · the build waits for {firstWord(p.name)}</span></span></button>
+          <i className={`bx ${must ? "on" : ""}`} aria-hidden>{must && <ShareCheck />}</i><span className="grow">Must approve<span className="mx"> · the build waits for {firstWord(p.name)}</span></span></button>
         <button className="mi sep" role="menuitem" onClick={() => run(personWork(p.sub, "Couldn't stop sharing", (t) => t.revoke(p.sub)))}>Stop sharing</button>
       </div>}
     </Fragment>;
@@ -438,7 +438,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
           <div className="ml">{firstWord(adding.name)} can</div>
           {LEVELS.map((l) => <button key={l.id} className="mi" role="menuitemradio" aria-checked={adding.access === l.id} onClick={() => setAdding({ ...adding, access: l.id })}>{l.name}<span className="mx">{l.hint}{adding.access === l.id && <ShareCheck />}</span></button>)}
           <button className="mi box sep" role="menuitemcheckbox" aria-checked={adding.signOff} onClick={() => setAdding({ ...adding, signOff: !adding.signOff })}>
-            <i className={`bx ${adding.signOff ? "on" : ""}`} aria-hidden>{adding.signOff && <ShareCheck />}</i><span className="grow">Must sign off<span className="mx"> · the build waits for {firstWord(adding.name)}</span></span></button>
+            <i className={`bx ${adding.signOff ? "on" : ""}`} aria-hidden>{adding.signOff && <ShareCheck />}</i><span className="grow">Must approve<span className="mx"> · the build waits for {firstWord(adding.name)}</span></span></button>
           {!listed && <p className="hint up">{access?.kept_here === false ? "Adding them shares this plan: it is saved to your Library on brindle servers." : "Adding them shares this plan: it is uploaded from this Mac to brindle servers. Your other plans stay here."}</p>}
           <div className="acts"><button className="sp-btn q" onClick={() => setAdding(null)}>Cancel</button>
             <button className="sp-btn main" data-testid="share-add-confirm" disabled={!accessReady || onPlan.has(adding.sub) || busy[`person:${adding.sub}`]?.state === "saving"} onClick={add}>Add {firstWord(adding.name)}</button></div>

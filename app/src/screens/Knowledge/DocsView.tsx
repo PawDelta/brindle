@@ -319,9 +319,9 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
               <h3 className={label}>Decisions taken</h3>
               {taken.map(({ decision: d, pick }) => <div key={d.id} data-decision={d.id}><b>{d.title}</b><p>{d.options.find((o) => o.id === pick)?.label ?? pick}</p></div>)}
             </section>}
-            {signOffRows(doc.design).length > 0 && <section className={`${card} flex flex-col gap-1 px-s2 py-s1`} aria-label="Sign-offs">
-              <h3 className={label}>Sign-offs</h3>
-              {signOffRows(doc.design).map((r) => <div key={`${r.sub}@${r.rev ?? "waiting"}`} data-signoff={r.sub} data-signed={r.signed ? "yes" : "no"} data-rev={r.rev ?? ""}><b>{r.sub}</b><span className="text-ink-3"> · {r.role}{r.rev !== undefined ? ` · signed rev ${r.rev}${r.signed ? "" : " (earlier)"}` : " · waiting"}</span></div>)}
+            {signOffRows(doc.design).length > 0 && <section className={`${card} flex flex-col gap-1 px-s2 py-s1`} aria-label="Approvals">
+              <h3 className={label}>Approvals</h3>
+              {signOffRows(doc.design).map((r) => <div key={`${r.sub}@${r.rev ?? "waiting"}`} data-signoff={r.sub} data-signed={r.signed ? "yes" : "no"} data-rev={r.rev ?? ""}><b>{r.sub}</b><span className="text-ink-3"> · {r.role}{r.rev !== undefined ? ` · approved rev ${r.rev}${r.signed ? "" : " (earlier)"}` : " · waiting"}</span></div>)}
             </section>}
             {!!doc.threads?.length && <section className={`${card} flex flex-col gap-1 px-s2 py-s1`} aria-label="Comments">
               <h3 className={label}>Comments</h3>
@@ -705,7 +705,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
       {(results || resultsError) && (
         <>
           {showResults && <div className="px-8 pt-s2"><ResultsPanel results={results} error={resultsError} docs={docs} /></div>}
-          <div className="sticky bottom-0 z-[2] mx-8 mt-auto flex flex-wrap items-center gap-[18px] border-t border-line bg-canvas pb-3.5 pt-3 text-[12.5px] text-ink-3" data-testid="results-line">
+          <div className="mx-8 mt-auto flex flex-wrap items-center gap-[18px] border-t border-line bg-canvas pb-3.5 pt-3 text-[12.5px] text-ink-3" data-testid="results-line">
             {results && <span className={label}>Last {results.days} days</span>}
             {results?.enough && results.with_brief !== null && results.without_brief !== null ? (
               <>

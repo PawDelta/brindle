@@ -5,9 +5,9 @@ docs/shared-designs-api.md in pawdelta-web.
 Everything here is keyed by the Library's document id. A teammate has no plan
 on this machine, so nothing is written to it: no plan row, no copy on disk. A
 read asks the Library each time and the app holds the answer in memory, so
-losing access means losing the doc. Writes go to the Library as the signed-in
-account, which decides what that account may do; its refusal (a 403, or a 409
-stale for a revision that moved) is passed on for the app to act on.
+losing access means losing the doc. Review changes stay in the signed-in
+account's outbox until the Library takes or refuses them. The reader gets
+delivery receipts for the revision and item it changed.
 
 A teammate reads, comments, suggests, votes and signs off. They never approve
 or build, and the reader has no edit mode: nothing here calls ``/edits`` or
@@ -18,6 +18,7 @@ suggestion makes a new revision.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
@@ -151,11 +152,14 @@ def _dto(doc_id: str, view: dict, me: str, *, review: bool = True, names: dict |
     sign_offs = [{"sub": s["sub"], "rev": s["rev"], "at": _at(s.get("at")), "optional": s.get("optional")}
                  for s in (raw_sign_offs or []) if isinstance(s, dict)
                  and isinstance(s.get("sub"), str) and isinstance(s.get("rev"), int)]
+    reference = view.get("reference")
     return SharedDesignDTO(
         id=doc_id, session="", title=view.get("title") or UNTITLED, rev=view["rev"], state="open", ask=content["ask"],
         markdown=content["markdown"], lede=content["lede"], sections=content["sections"], decisions=decisions,
         split=[], queued=0, created_at=_at(history[0].get("at")) if history else 0.0,
+        reference=mask(reference) if isinstance(reference, str) else None,
         revisions=[{"rev": r["rev"], "author": _who(r.get("author"), me), "source": r["source"],
+                    "title": mask(r["title"]) if isinstance(r.get("title"), str) else None,
                     "changed": r.get("changed") or [], "at": _at(r.get("at"))} for r in history],
         threads=threads, teammate_names=names or {},
         gate=_gate(view, me) if review else None, me=me,
@@ -188,7 +192,52 @@ def _titled(doc_id: str, view: dict, client, store) -> dict:
     return {**view, "title": title} if title else view
 
 
+def _deliver(db, me, doc_id, client, store, **options):
+    from brindle import plan_outbox
+
+    def call(path, payload):
+        return ad.api("POST", sd._path(doc_id, path), payload, client=client, store=store)
+
+    def load():
+        return ad.api("GET", sd._path(doc_id), client=client, store=store)
+
+    return plan_outbox.deliver(db, me, doc_id, call, load, **options)
+
+
+def acknowledge_receipts(db, doc_id, owner, client_ids):
+    from brindle import plan_outbox
+
+    me = ad.require_entitlement(ad._session(None, None)[1]).sub
+    if not isinstance(client_ids, list) or not all(isinstance(key, str) for key in client_ids):
+        raise ServiceError("invalid", "Expected a list of client IDs", 400)
+    if me == owner:
+        plan_outbox.acknowledge(db, me, doc_id, client_ids)
+    return {}
+
+
+def drain_pending(db, owner, client, store):
+    """Deliver a signed-in reviewer's changes on the daemon's shared-plan sync pass."""
+    docs = db.conn.execute("SELECT doc FROM plan_outbox WHERE owner=? AND state='waiting' "
+                           "GROUP BY doc ORDER BY min(seq)", (owner,)).fetchall()
+    for row in docs:
+        try:
+            _deliver(db, owner, row["doc"], client, store)
+        except RuntimeError:
+            logging.getLogger(__name__).warning("Library plan delivery is still pending for %s", row["doc"])
+
+
 def _ask(doc_id: str, method: str, tail: str, body: dict | None, client, store) -> dict:
+    from brindle import plan_outbox
+
+    if method == "POST" and tail in ("/comments", "/suggestions", "/votes", "/sign-offs") and not (body or {}).get("question"):
+        client, store = ad._session(client, store)
+        me = ad.require_entitlement(store).sub
+        with plan_outbox.destination() as (db, client_id, repo, legacy):
+            view, items = _deliver(db, me, doc_id, client, store, item=(client_id, tail, body, repo), legacy=legacy)
+        if view is None:
+            return {"id": doc_id, "me": me, "outbox": items}
+        names = sd.member_names(doc_id, client=client, store=store) if _can(view, me, "can_edit") else None
+        return {**_dto(doc_id, _titled(doc_id, view, client, store), me, names=names), "outbox": items}
     return _asked(doc_id, lambda call: call(method, tail, body), client, store)
 
 
@@ -215,18 +264,22 @@ def _text(text: Any) -> str:
     return text
 
 
-def read(doc_id: str, *, client=None, store=None) -> dict:
+def read(doc_id: str, *, client=None, store=None, db=None) -> dict:
     """The design as this account may read it now."""
     client, store = ad._session(client, store)
     me = ad.require_entitlement(store).sub
+    items = []
     with ThreadPoolExecutor(max_workers=1) as pool:
         title = pool.submit(copy_context().run, _title, doc_id, client, store)
-        view = ad.api("GET", sd._path(doc_id), client=client, store=store)
+        if db is None:
+            view = ad.api("GET", sd._path(doc_id), client=client, store=store)
+        else:
+            view, items = _deliver(db, me, doc_id, client, store, read=True)
         # The design carries the current permission. The directory requires edit access.
         names = sd.member_names(doc_id, client=client, store=store) if _can(view, me, "can_edit") else None
         if not (isinstance(view.get("title"), str) and view["title"].strip()) and (name := title.result()):
             view = {**view, "title": name}
-    return _dto(doc_id, view, me, names=names)
+    return {**_dto(doc_id, view, me, names=names), **({"outbox": items} if items else {})}
 
 
 def request_access(doc_id: str, role: Any, sub: str | None = None, *, action: str = "grant", client=None, store=None) -> dict:

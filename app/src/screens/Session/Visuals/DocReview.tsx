@@ -11,8 +11,10 @@
    comments, decisions still to take) and opens it again. */
 
 import { useState, type FormEvent, type ReactNode } from "react";
+import { usePlanDraft } from "./planDrafts";
 import type { Plan, PlanAnchor } from "../../../api/client";
 import type { PlanThreadDTO } from "../../../api/schema";
+import { NoteStatus, NoteText, PendingNote, PendingReplies, usePendingNotes } from "./PlanDelivery";
 import { ago } from "../../../components/ProviderConnect";
 import { ChevronRightIcon, CommentIcon } from "../../../components/icons";
 import { button, field, label, main, quiet } from "../../../components/ui";
@@ -25,7 +27,7 @@ export type ReviewTab = "comments" | "decisions" | "history" | "tasks";
 /* What the person is writing: a comment or a question on an anchor, or a suggested replacement
    for a range of a section. `where` names the place, as its card will. */
 export type Draft =
-  | { kind: "comment" | "ask"; anchor: PlanAnchor; where: string }
+  | { kind: "comment" | "ask"; anchor: PlanAnchor; where: string; rail?: boolean }
   | { kind: "suggest"; section: string; start: number; before: string; where: string };
 
 export interface TodoItem {
@@ -103,7 +105,7 @@ export function SupervisorReplying() {
   );
 }
 
-function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, judge, supervisorReplying }: {
+export function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, judge, supervisorReplying }: {
   thread: PlanThreadDTO;
   where: string;
   busy: boolean;
@@ -118,16 +120,18 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
   judge?: string;
   supervisorReplying: boolean;
 }) {
-  const [replying, setReplying] = useState(false);
-  const [text, setText] = useState("");
+  const [draft, setDraft, clearDraft] = usePlanDraft<string>(`reply:${t.id}`);
+  const [replying, setReplying] = useState(!!draft);
+  const text = draft ?? "";
   const open = t.status === "open";
+  const canReply = open && (!limits || limits.reply);
   const suggestion = t.kind === "suggestion";
   const canJudge = !limits;
   const canResolve = !limits || limits.resolve(t);
   const send = async (e: FormEvent) => {
     e.preventDefault();
     if (!text.trim() || !(await actions.reply(t.id, text.trim()))) return;
-    setText("");
+    clearDraft();
     setReplying(false);
   };
   return (
@@ -145,8 +149,10 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
         <time className="whitespace-nowrap" dateTime={new Date(t.at * 1000).toISOString()} title={new Date(t.at * 1000).toLocaleString()}>{ago(t.at)}</time>
       </button>
       <Who who={t.author_name ?? (t.author.startsWith("teammate:") ? "A teammate" : t.author)} />
-      {suggestion && <Change before={t.before ?? ""} after={t.after ?? ""} />}
-      {t.text && <span className="whitespace-pre-wrap break-words">{t.text}</span>}
+      {suggestion && <NoteText id={t.id}><Change before={t.before ?? ""} after={t.after ?? ""} /></NoteText>}
+      {t.text && <span className="whitespace-pre-wrap break-words"><NoteText id={t.id}>{t.text}</NoteText></span>}
+      <NoteStatus id={t.id} />
+      <PendingReplies thread={t.id} />
       {t.attachments?.map((name) => (
         <span key={name} title={name} className="max-w-full justify-self-start truncate rounded-sm border border-line px-1.5 py-px font-mono text-[11px] text-ink-2">{name}</span>
       ))}
@@ -158,22 +164,23 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
                 <Who who={r.from_supervisor ? (t.author_name ?? t.author) : (r.author_name ?? (r.author.startsWith("teammate:") ? "A teammate" : r.author))} supervisor={r.from_supervisor} />
                 <span className="ml-auto text-[11.5px] text-ink-3">{ago(r.at)}</span>
               </div>
-              <span className="whitespace-pre-wrap break-words">{r.text}</span>
+              <span className="whitespace-pre-wrap break-words"><NoteText id={r.id} parent={t.id}>{r.text}</NoteText></span>
+              <NoteStatus id={r.id} parent={t.id} />
             </div>
           ))}
           {supervisorReplying && <SupervisorReplying />}
         </div>
       )}
-      {replying && (
+      {canReply && replying && (
         <form className="flex items-center gap-2" onSubmit={(e) => void send(e)}>
-          <input className={`${field} min-w-0 flex-1 text-[12.5px]`} aria-label="Reply" placeholder="Reply…" autoFocus value={text} onChange={(e) => setText(e.target.value)} />
+          <input className={`${field} min-w-0 flex-1 text-[12.5px]`} aria-label="Reply" placeholder="Reply…" autoFocus value={text} onChange={(e) => setDraft(e.target.value || null)} />
           <button type="submit" className={`${button} text-xs`} disabled={busy || !text.trim()}>Send</button>
         </form>
       )}
       <div className="mt-0.5 flex gap-3.5">
         {open && suggestion && canJudge && <button type="button" className={`${act} font-medium !text-pass`} disabled={busy || !can || t.anchor.state === "detached"} onClick={() => void actions.accept(t.id)}>Accept</button>}
         {open && suggestion && canJudge && <button type="button" className={act} disabled={busy} onClick={() => void actions.reject(t.id)}>Reject</button>}
-        {open && (!limits || limits.reply) && <button type="button" className={act} onClick={() => setReplying((r) => !r)}>Reply</button>}
+        {canReply && <button type="button" className={act} onClick={() => setReplying((r) => !r)}>Reply</button>}
         {open && suggestion && !canJudge && <span className="text-xs text-ink-3">{`${judge ?? "The author"} accepts or rejects`}</span>}
         {open && !suggestion && canResolve && <button type="button" className={act} disabled={busy} onClick={() => void actions.resolve(t.id, true)}>Resolve</button>}
         {t.status === "resolved" && canResolve && <button type="button" className={act} disabled={busy} onClick={() => void actions.resolve(t.id, false)}>Reopen</button>}
@@ -188,15 +195,15 @@ const draftWords = {
   suggest: { name: "Why (optional)", placeholder: "Why (optional)", send: "Send suggestion" },
 };
 
-export function DraftCard({ draft, number, stale, busy, onSend, onCancel, change, className = `${card} bg-canvas-2` }: {
+export function DraftCard({ draft, number, stale, busy, text, onText, onSend, onCancel, change, className = `${card} bg-canvas-2` }: {
   draft: Draft; number: number; stale: boolean; busy: boolean;
   /* Its box: a card in the column, or (the planning doc) a note in the margin. */
   className?: string;
+  text: string; onText(text: string): void;
   onSend(text: string): void; onCancel(): void;
   /* A suggestion's change as it is typed on the page (null: nothing changed yet). */
   change?: { before: string; after: string } | null;
 }) {
-  const [text, setText] = useState("");
   const words = draftWords[draft.kind];
   const hasChange = !!change && (!!change.before || !!change.after);
   const asComment = draft.kind === "suggest" && !hasChange && !!text.trim();
@@ -217,7 +224,7 @@ export function DraftCard({ draft, number, stale, busy, onSend, onCancel, change
       {draft.kind === "suggest" && (change && hasChange
         ? <Change before={change.before} after={change.after} />
         : <p className="font-medium text-ink">Type your change in the plan: what you delete is struck through, what you type is green.</p>)}
-      <textarea className={`${field} ${draft.kind === "suggest" ? "min-h-8" : "min-h-16"} w-full text-[12.5px]`} aria-label={words.name} placeholder={words.placeholder} autoFocus={draft.kind !== "suggest"} value={text} onChange={(e) => setText(e.target.value)} />
+      <textarea className={`${field} ${draft.kind === "suggest" ? "min-h-8" : "min-h-16"} w-full text-[12.5px]`} aria-label={words.name} placeholder={words.placeholder} autoFocus={draft.kind !== "suggest"} value={text} onChange={(e) => onText(e.target.value)} />
       {stale && <p role="alert" className="text-xs text-sap">This part of the plan changed in a newer revision. Cancel, and start again on the new text.</p>}
       <div className="flex items-center gap-1.5">
         <button type="submit" className={`${draft.kind === "suggest" ? main : button} text-xs`} disabled={!ready || busy}>{asComment ? "Send as comment" : words.send}</button>
@@ -231,7 +238,7 @@ export function DraftCard({ draft, number, stale, busy, onSend, onCancel, change
 
 const TABS: [ReviewTab, string][] = [["comments", "Comments"], ["decisions", "Decisions"], ["history", "History"], ["tasks", "Tasks"]];
 
-export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, draftStale, busy, onDraftSend, onDraftCancel, draftChange, actions, limits, onShow, shared, onCollapse, active, judge, sheet, history, historyRev, onHistoryPick, historyPanel, workItems, work, canLink }: {
+export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, draftStale, busy, draftText, onDraftText, onDraftSend, onDraftCancel, draftChange, actions, limits, onShow, shared, onCollapse, active, judge, history, historyRev, onHistoryPick, historyPanel, workItems, work, canLink, inlineThreads }: {
   plan: Plan;
   /* The design's items in the tracker, with what can be done to them (WorkPanel); replaces `workItems`. */
   work?: Work;
@@ -246,6 +253,8 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
   /* A thread's place in the doc, in words. */
   where(thread: PlanThreadDTO): string;
   draft: Draft | null;
+  draftText: string;
+  onDraftText(text: string): void;
   /* What the draft is on changed in a newer revision: it can't be sent. */
   draftStale: boolean;
   busy: boolean;
@@ -262,15 +271,15 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
   active?: number | null;
   /* Who accepts or rejects suggestions, for someone who can't. */
   judge?: string;
-  /* The sign-off sheet, under the decisions, once the doc is in sign-off. */
-  sheet?: ReactNode;
   history?: HistoryEvent[] | null;
   historyPanel?: ReactNode;
   historyRev?: number | null;
   onHistoryPick?(rev: number): void;
   workItems?: WorkItem[] | null;
+  inlineThreads: ReadonlySet<number>;
 }) {
   const threads = plan.threads ?? [];
+  const pendingNotes = usePendingNotes();
   const open = threads.filter((t) => t.status === "open");
   const answered = threads.filter((t) => t.status !== "open");
   const counts: Record<ReviewTab, string | null> = { comments: String(open.length), decisions: todo.length ? `${decided}/${todo.length}` : null, history: null, tasks: null };
@@ -309,16 +318,16 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
               </button>
             ))}
           </div>
-        ) : !sheet && <p className="px-3.5 py-3 text-ink-3">This plan has no decisions to take.</p>}
-        {sheet}
+        ) : <p className="px-3.5 py-3 text-ink-3">This plan has no decisions to take.</p>}
       </>
     );
   } else {
     body = (
       <>
-        {draft && <DraftCard key={`${draft.kind}:${draft.where}`} draft={draft} number={nextNumber} stale={draftStale} busy={busy} onSend={onDraftSend} onCancel={onDraftCancel} change={draftChange} />}
-        {open.map(thread)}
-        {open.length === 0 && !draft && <p className="px-3.5 py-3 text-ink-3">No open comments. Highlight any text in the plan to comment on it.</p>}
+        {draft && <DraftCard key={`${draft.kind}:${draft.where}`} draft={draft} number={nextNumber} stale={draftStale} busy={busy} text={draftText} onText={onDraftText} onSend={onDraftSend} onCancel={onDraftCancel} change={draftChange} />}
+        {open.filter(t => !inlineThreads.has(t.id)).map(thread)}
+        {pendingNotes.map(item => <PendingNote key={item.client_id} item={item} />)}
+        {open.length === 0 && !pendingNotes.length && !draft && <p className="px-3.5 py-3 text-ink-3">No open comments. Highlight any text in the plan to comment on it.</p>}
         {answered.length > 0 && (
           <div data-testid="plan-resolved">
             <p className={`${label} border-b border-line px-3.5 pb-1.5 pt-3 text-[11px]`}>{`Resolved · ${answered.length}`}</p>
@@ -329,7 +338,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
     );
   }
   return (
-    <aside aria-label="Review" className="flex w-[324px] shrink-0 flex-col border-l border-line text-[12.5px]" data-testid="plan-review">
+    <aside aria-label="Review details" className="mx-auto flex w-full max-w-[740px] flex-col border-t border-line text-[12.5px]" data-testid="plan-review">
       <div className="flex items-center gap-4 border-b border-line pl-3.5 pr-1.5 text-ink-3">
         <div role="tablist" aria-label="Review column" className="flex min-w-0 flex-1 gap-4">
           {TABS.map(([id, name]) => (
@@ -360,38 +369,32 @@ export interface SignOffRow {
   note?: string;
 }
 
-export function SignOffSheet({ version, rows, since, onShowChanges }: {
+export function SignOffSheet({ version, rows, count }: {
   version: string;
   rows: SignOffRow[];
-  /* The revisions since the person last read, each with the sections it changed. */
-  since: { from: number; changes: { rev: number; sections: string[] }[] } | null;
-  onShowChanges?(): void;
+  count?: { signed: number; required: number } | null;
 }) {
   return (
     <>
-      <div className="grid gap-[7px] border-b border-line px-3.5 py-3" data-testid="plan-signoffs">
-        <span className={`${label} text-[11px]`}>{`Sign-offs on ${version}`}</span>
-        {rows.length === 0 && <span className="text-ink-3">Nobody is asked to sign it yet.</span>}
-        {rows.map((r) => (
+      <div className="grid gap-2.5" data-testid="plan-signoffs">
+        <h3 className="m-0 flex items-baseline justify-between gap-2">
+          <span className={`${label} text-[11px]`}>{`Approvals on ${version}`}</span>
+          {count && <small className="text-[11px] text-ink-3">{count.signed} of {count.required} required</small>}
+        </h3>
+        {rows.length === 0 && <span className="text-ink-3">Nobody has been asked to approve yet.</span>}
+        {(["required", "optional"] as const).map(group => <div key={group} data-group={group} className="grid gap-2">
+          <div className="text-[11.5px]"><b>{group === "required" ? "Required" : "Optional"}</b><span className="text-ink-3"> · {group === "required" ? "the build waits for them" : "recorded, never hold the build"}</span></div>
+        {rows.filter(r => r.required === (group === "required")).map((r) => (
           <span key={r.key} className="flex items-center gap-2 text-ink-2" data-testid={`signoff-${r.key}`} data-state={r.state} data-sign-off={r.required ? "required" : "optional"}>
-            <Avatar who={r.who} ring={r.state === "signed" ? "done" : r.state === "waiting" && r.required ? "wait" : r.required ? undefined : "dim"} />
-            <span className="min-w-0 truncate"><b className="font-medium text-ink">{r.name}</b>{` · ${r.required ? "required" : "optional"}`}</span>
+            <Avatar who={r.who} />
+            <span className="min-w-0 truncate font-medium text-ink">{r.name}</span>
             <span className="flex-1" />
-            <span className={`flex-none whitespace-nowrap ${r.state === "signed" ? "text-pass" : (r.state === "waiting" && r.required) || r.state === "changes" ? "text-sap" : "text-ink-3"}`}>
-              {r.state === "signed" ? `✓ signed${r.note ? ` ${r.note}` : ""}` : r.state === "changes" ? "changes requested" : r.state === "waived" ? "waived" : r.state === "earlier" ? r.note ?? "signed earlier" : r.required ? "waiting" : "not signed"}
+            <span className={`flex-none whitespace-nowrap ${r.state === "signed" ? "text-pass" : r.state === "changes" ? "text-sap" : "text-ink-3"}`}>
+              {r.state === "signed" ? `✓ approved${r.note ? ` ${r.note}` : ""}` : r.state === "changes" ? "changes requested" : r.state === "waived" ? "waived" : r.state === "earlier" ? r.note ?? "approved earlier" : r.required ? "waiting" : "not approved"}
             </span>
           </span>
-        ))}
+        ))}</div>)}
       </div>
-      {since && (
-        <div className="grid gap-[7px] border-b border-line px-3.5 py-3" data-testid="plan-since">
-          <span className={`${label} text-[11px]`}>{`Since you last read · rev ${since.from}`}</span>
-          {since.changes.length === 0 ? <span className="text-ink-3">Nothing has changed.</span> : since.changes.map((c) => (
-            <span key={c.rev} className="text-ink-2"><span className="font-mono text-[11.5px] text-ink-3">{`rev ${c.rev}`}</span>{` · ${c.sections.join(", ") || "the text"}`}</span>
-          ))}
-          {since.changes.length > 0 && onShowChanges && <button type="button" className={`${quiet} -ml-2 justify-self-start text-xs`} onClick={onShowChanges}>Show these changes in the plan</button>}
-        </div>
-      )}
     </>
   );
 }
