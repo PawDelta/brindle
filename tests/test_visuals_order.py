@@ -7,8 +7,8 @@ from brindle.db import Agent, Workspace
 
 
 @pytest.mark.parametrize("edit", [
-    "supervisor",
-    "person",
+    pytest.param("supervisor", marks=pytest.mark.variant("a supervisor revision moves its doc to the top")),
+    pytest.param("person", marks=pytest.mark.variant("the person's own edit moves its doc to the top")),
     pytest.param("suggestion", marks=pytest.mark.variant(
         "accepting a suggestion must reorder the doc just like a direct edit")),
 ])

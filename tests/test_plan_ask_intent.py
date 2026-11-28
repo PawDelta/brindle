@@ -139,6 +139,7 @@ def test_publish_first_failure_does_not_start_a_late_prefetch(db, session, monke
     assert len(failing.calls) == len(working.calls) == 1
 
 
+@pytest.mark.variant("a key that shares a prefix with another in-flight key must not wait on it")
 def test_prefetch_and_publish_do_not_wait_for_a_different_key_with_the_same_prefix(db, monkeypatch):
     plan_started, release = threading.Event(), threading.Event()
     visual_calls = []
@@ -193,7 +194,7 @@ def test_publisher_reopens_a_cache_entry_culled_between_open_and_lock(db, monkey
     assert intent.pick(messages, "plan", turn=turn, ask=model("1")) is None
 
 
-@pytest.mark.parametrize("stalled", [False, pytest.param(True, marks=pytest.mark.variant(
+@pytest.mark.parametrize("stalled", [pytest.param(False, marks=pytest.mark.variant("a detached prefetch with no publisher waiting must still record its failure")), pytest.param(True, marks=pytest.mark.variant(
     "a detached helper must record its own deadline even while the classifier is still running"))])
 def test_detached_prefetch_records_failure_without_a_publisher(db, session, monkeypatch, stalled):
     with monkeypatch.context() as setup:
@@ -236,6 +237,7 @@ def test_detached_prefetch_records_failure_without_a_publisher(db, session, monk
     assert not working.calls
 
 
+@pytest.mark.variant("the owner's case: a model answer that lands after typing still authorizes the later publish")
 def test_slow_background_answer_authorizes_publish(db, session, monkeypatch):
     started = threading.Event()
     finish = threading.Event()

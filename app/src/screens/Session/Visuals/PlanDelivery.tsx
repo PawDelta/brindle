@@ -8,7 +8,7 @@ const DismissSent = createContext<(id: string) => void>(() => {});
 
 export function QueueCount({ items = [] }: { items?: PlanChange[] }) {
   const count = items.filter(item => item.state === "waiting" || item.state === "sending").length;
-  return count ? <span className="text-xs text-ink-3">Offline · {count} waiting to send</span> : null;
+  return count ? <span data-queue-count={count} className="whitespace-nowrap text-xs text-ink-3">Offline · {count} waiting to send</span> : null;
 }
 
 export function UnattachedSentNotes() {
@@ -35,15 +35,21 @@ export function useQueuedPick(decision: string) {
   return useContext(PlanDelivery).filter(item => item.tail === "/votes" && item.body.rev === rev && item.body.decision === decision).at(-1);
 }
 
-export function DeliveryStatus({ item }: { item: PlanChange }) {
+export function RefusalDetails({ code }: { code: PlanChange["code"] }) {
   const showChanges = useContext(ShowPlanChanges);
+  return <>
+    <span>{code === "forbidden" ? "You no longer have access to make this change."
+      : code === "invalid" ? "The Library could not accept this change." : "The plan changed before this could be sent."}</span>
+    <button type="button" className="justify-self-start underline" onClick={showChanges}>See what changed</button>
+  </>;
+}
+
+export function DeliveryStatus({ item }: { item: PlanChange }) {
   const dismiss = useContext(DismissSent);
   if (item.state === "unconfirmed") return <span data-state="unconfirmed" className="text-xs text-ink-2">Delivery unconfirmed</span>;
   if (item.state === "refused") return <span data-state="refused" className="grid gap-1 text-xs text-ink-2">
     <strong>Not sent</strong>
-    {item.code === "forbidden" ? "You no longer have access to make this change."
-      : item.code === "invalid" ? "The Library could not accept this change." : "The plan changed before this could be sent."}
-    <button type="button" className="justify-self-start underline" onClick={showChanges}>See what changed</button>
+    <RefusalDetails code={item.code} />
   </span>;
   return <span data-state={item.state} onAnimationEnd={item.state === "sent" ? () => dismiss(item.client_id) : undefined}
     className={`inline-flex items-center gap-1 text-xs text-ink-3 ${item.state === "sent" ? "plan-delivery-sent" : ""}`}>
