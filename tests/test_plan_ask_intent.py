@@ -4,6 +4,7 @@ import time
 from concurrent.futures import wait
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -135,6 +136,60 @@ def test_publish_first_failure_does_not_start_a_late_prefetch(db, session, monke
     monkeypatch.setattr(intent, "_ask", working)
     assert proposed()
     assert len(failing.calls) == len(working.calls) == 1
+
+
+def test_prefetch_and_publish_do_not_wait_for_a_different_key_with_the_same_prefix(db, monkeypatch):
+    plan_started, release = threading.Event(), threading.Event()
+    visual_calls = []
+
+    def digest(data):
+        return SimpleNamespace(hexdigest=lambda: "ab" + ("1" if b'"visual"' in data else "2") * 62)
+
+    def ask(prompt, budget):
+        if "a planning doc" in prompt:
+            plan_started.set()
+            assert release.wait(5)
+        else:
+            visual_calls.append(prompt)
+        return "1"
+
+    monkeypatch.setattr(intent, "hashlib", SimpleNamespace(sha256=digest))
+    monkeypatch.setattr(intent, "_ask", ask)
+    turn = intent.Turn(db.path, "boss", 1)
+    messages = ["please explain the plan and show that diagram"]
+    [plan] = intent.prefetch(turn, messages, ["plan"])
+    try:
+        assert plan_started.wait(2)
+        [visual] = intent.prefetch(turn, messages, ["visual"])
+        assert visual.result(2) == 1
+        assert intent.pick(messages, "visual", turn=turn, budget=2) == 0
+        assert len(visual_calls) == 1
+        assert not plan.done()
+    finally:
+        release.set()
+        plan.result(2)
+
+
+def test_publisher_reopens_a_cache_entry_culled_between_open_and_lock(db, monkeypatch):
+    turn = intent.Turn(db.path, "boss", 1)
+    messages = ["please help me build this plan"]
+    assert intent.pick(messages, "plan", turn=turn, ask=model("1")) == 0
+    [entry] = list(Path(db.path + ".intent").iterdir())
+    now = entry.stat().st_mtime + visual_offers.FOLD + 1
+    flock = intent.fcntl.flock
+    culled = False
+
+    def cull_before_lock(slot, operation):
+        nonlocal culled
+        if not culled:
+            culled = True
+            intent.prune_cache(db.path, now)
+            assert not entry.exists()
+        flock(slot, operation)
+
+    monkeypatch.setattr(intent.fcntl, "flock", cull_before_lock)
+    assert intent.pick(messages, "plan", turn=turn, ask=model("0")) is None
+    assert intent.pick(messages, "plan", turn=turn, ask=model("1")) is None
 
 
 @pytest.mark.parametrize("stalled", [False, pytest.param(True, marks=pytest.mark.variant(

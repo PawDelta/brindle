@@ -29,10 +29,11 @@ import sys
 import threading
 import time
 from concurrent.futures import Future
+from contextlib import contextmanager, suppress
 from contextvars import Context, copy_context
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, TypeVar
+from typing import Callable, Iterator, TextIO, TypeVar
 
 from brindle.db import DB
 from brindle.service.errors import ServiceError
@@ -157,6 +158,52 @@ class Turn:
     number: int | None
 
 
+def _cache_dir(db_path: str) -> Path:
+    return Path(db_path + ".intent")
+
+
+@contextmanager
+def _slot(path: Path, *, block: bool, create: bool = True) -> Iterator[TextIO | None]:
+    flags = os.O_RDWR | os.O_NOFOLLOW | (os.O_CREAT if create else 0)
+    while True:
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileNotFoundError:
+            if create:
+                raise
+            yield None
+            return
+        with os.fdopen(fd, "r+", encoding="utf-8") as slot:
+            try:
+                fcntl.flock(slot, fcntl.LOCK_EX | (0 if block else fcntl.LOCK_NB))
+            except BlockingIOError:
+                yield None
+                return
+            # A cull can unlink the file between open and flock. Use the linked inode only.
+            if os.fstat(fd).st_nlink:
+                yield slot
+                return
+
+
+def prune_cache(db_path: str, now: float) -> None:
+    """Discard outcomes past the typed-message consent window during the normal cull."""
+    from brindle.visual_offers import FOLD
+
+    if db_path == ":memory:":
+        return
+    cutoff = now - FOLD
+    with suppress(OSError):
+        for path in _cache_dir(db_path).iterdir():
+            if not re.fullmatch(r"[0-9a-f]{64}|[0-9a-f]{2}", path.name):
+                continue
+            with suppress(OSError):
+                if path.stat(follow_symlinks=False).st_mtime > cutoff:
+                    continue
+                with _slot(path, block=False, create=False) as slot:
+                    if slot is not None and os.fstat(slot.fileno()).st_mtime <= cutoff:
+                        path.unlink()
+
+
 def _answer(turn: Turn, messages: list[str], kind: str, ask: Ask, deadline: float, warm: bool) -> int | None:
     shown = [m[:MAX_CHARS] for m in messages]
 
@@ -167,26 +214,22 @@ def _answer(turn: Turn, messages: list[str], kind: str, ask: Ask, deadline: floa
     if turn.path == ":memory:":
         return classify()
     key = hashlib.sha256(json.dumps([turn.root, turn.number, kind, MODEL, PROMPT, *shown]).encode()).hexdigest()
-    # The daemon, prompt hooks and MCP server can be separate processes. An OS lock lets a
-    # publisher wait for the worker without polling, and releases on process exit. Use 256
-    # slots to bound disk usage. Each slot holds only a digest and an answer or failure type.
-    cache = Path(turn.path + ".intent")
+    # The daemon, prompt hooks and MCP server can be separate processes. Lock the complete key
+    # so only publishers with the same candidates and scope wait for one another.
+    cache = _cache_dir(turn.path)
     try:
         cache.mkdir(mode=0o700, exist_ok=True)
-        fd = os.open(cache / key[:2], os.O_RDWR | os.O_CREAT, 0o600)
-        with os.fdopen(fd, "r+") as slot:
-            try:
-                fcntl.flock(slot, fcntl.LOCK_EX | (fcntl.LOCK_NB if warm else 0))
-            except BlockingIOError:
+        with _slot(cache / key, block=not warm) as slot:
+            if slot is None:
                 return None  # a publisher or another prefetch already owns the slot
 
             def remember(value: str) -> None:
                 slot.seek(0)
-                slot.write(f"{key} {value}")
+                slot.write(value)
                 slot.truncate()
 
-            cached_key, _, value = slot.read().partition(" ")
-            if cached_key == key and value:
+            value = slot.read()
+            if value:
                 if value.isdecimal():
                     return int(value)
                 if warm:
