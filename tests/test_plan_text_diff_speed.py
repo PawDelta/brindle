@@ -126,15 +126,35 @@ def test_retype_keeps_a_relay_replacement_when_local_inserts_long_edges(matching
     assert doc.text("s") == prefix + relay + suffix
 
 
-@pytest.mark.parametrize("delete_locally", [
-    pytest.param(False, id="relay-deletes-first-copy"),
-    pytest.param(True, id="local-deletes-first-copy",
-                 marks=pytest.mark.variant("Word hunks must delete the first copy and preserve the relay edit")),
+@pytest.mark.parametrize("wrap_locally, prefix, replacement", [
+    pytest.param(False, "w! ", "Qord000", id="relay-wrapper-shares-first-character"),
+    pytest.param(True, "word000 ! ", "word900", id="local-wrapper-shares-first-token",
+                 marks=pytest.mark.variant("A shared edge token must not split the local insertion")),
 ])
-def test_retype_edits_the_surviving_suffix_of_two_copies(matching_budget, delete_locally):
+def test_retype_keeps_the_first_word_edit_inside_a_partial_edge_wrapper(matching_budget, wrap_locally, prefix,
+                                                                        replacement):
+    body = " ".join(f"word{i:03}" for i in range(300))
+    edited = body.replace("word000", replacement)
+    wrapped = prefix + body + " ?"
+    local, relay = (wrapped, edited) if wrap_locally else (edited, wrapped)
+    doc = SharedDoc.new({"s": relay})
+
+    plan_drafts.retype(doc, {"s": body}, {"s": local})
+
+    assert doc.text("s") == prefix + edited + " ?"
+
+
+@pytest.mark.parametrize("delete_locally, leading", [
+    pytest.param(False, "", id="relay-deletes-first-copy"),
+    pytest.param(True, "", id="local-deletes-first-copy",
+                 marks=pytest.mark.variant("Word hunks must delete the first copy and preserve the relay edit")),
+    pytest.param(False, "w! ", id="relay-deletes-first-copy-with-partial-prefix",
+                 marks=pytest.mark.variant("A partial prefix can hide the exact suffix during edge trimming")),
+])
+def test_retype_edits_the_surviving_suffix_of_two_copies(matching_budget, delete_locally, leading):
     body = " ".join(f"word{i:03}" for i in range(300))
     expected = body.replace("word150", "replacement")
-    prefix = f"[{body}] "
+    prefix = f"{leading}[{body}] "
     base = prefix + body
     edited = prefix + expected
     local, relay = (body, edited) if delete_locally else (edited, body)
