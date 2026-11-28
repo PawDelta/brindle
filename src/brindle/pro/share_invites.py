@@ -44,7 +44,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from brindle.db import DB
-from brindle.service.errors import ServiceError, from_exception
+from brindle.service.errors import ServiceError
 
 log = logging.getLogger(__name__)
 
@@ -440,7 +440,7 @@ def _outcome(e: BaseException) -> tuple[bool, str]:
             # No answer to a create, or a claim still out: unknown, so asked again (MOST_TRIES bounds it).
             again = not isinstance(e, auth.AuthError)
     else:
-        err, again = from_exception(e), False
+        err, again = actions.upstream_error(e), False
     return again, redact.mask(err.message)
 
 

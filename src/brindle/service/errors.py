@@ -20,7 +20,7 @@ from brindle import (
 )
 from brindle import repos as repos_mod
 from brindle.cost import NotEntitled as CostNotEntitled
-from brindle.pro.auth import AuthError, TransportError
+from brindle.pro.auth import NETWORK_MESSAGES, AuthError, TransportError
 from brindle.pro.license import NotEntitled as LicenseNotEntitled
 
 
@@ -62,7 +62,7 @@ def network_error(exc: BaseException | None) -> ServiceError | None:
     seen = 0
     while exc is not None and seen < 16:
         if isinstance(exc, TransportError) and exc.network in NETWORK_CODES:
-            return ServiceError(NETWORK_CODES[exc.network], str(exc), 503)
+            return ServiceError(NETWORK_CODES[exc.network], NETWORK_MESSAGES[exc.network], 503)
         exc = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
         seen += 1
     return None
