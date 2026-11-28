@@ -473,8 +473,9 @@ def _visual_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
     out = []
     # An Approve held for the Library that couldn't be applied: the person was told nowhere else.
     refused = {r["plan_id"]: r["approve_refused"] for r in db.conn.execute(
-        "SELECT s.plan_id, s.approve_refused FROM plan_shares s JOIN plans p ON p.id=s.plan_id"
-        " JOIN agents a ON a.id=p.root_id WHERE s.approve_refused IS NOT NULL AND p.state='open'"
+        "SELECT p.id AS plan_id, COALESCE(p.approval_notice, s.approve_refused) AS approve_refused"
+        " FROM plans p LEFT JOIN plan_shares s ON p.id=s.plan_id JOIN agents a ON a.id=p.root_id"
+        " WHERE (p.approval_notice IS NOT NULL OR (s.approve_refused IS NOT NULL AND p.state='open'))"
         " AND a.dismissed_at IS NULL AND a.status <> 'done'")} if visuals.enabled() else {}
     pending = visuals.inbox_pending(db, repo_root)
     listed = {v["id"] for v in pending}

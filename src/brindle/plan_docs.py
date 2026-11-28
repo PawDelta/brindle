@@ -305,6 +305,9 @@ def insert_revision(c, plan_id: str, rev: int, author: str, source: str, lede: s
               " split, ask, changed, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
               (plan_id, rev, author, source, lede, json.dumps(sections), markdown, json.dumps(decisions),
                json.dumps(split), ask, json.dumps(changed), at))
+    from brindle import plans
+
+    plans.withdraw_signoffs(c, plan_id, f"Your held approval was withdrawn. Read revision {rev} before approving.")
 
 
 def revision(db: DB, plan_id: str, rev: int | None = None) -> dict:
@@ -614,6 +617,10 @@ def _add(db: DB, p: dict, rev: int, kind: str, anchor: dict | None, author: str,
     with db.tx() as c:
         tid = file_thread(c, p["id"], rev, kind, anchor, author, text, attachments, parent=parent, after=after,
                           question=question, origin=origin)
+        if not question and parent is None:
+            from brindle import plans
+
+            plans.withdraw_on_objection(c, p)
     _changed(db, p, p["rev"])
     return tid
 

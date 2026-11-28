@@ -414,6 +414,12 @@ def decide_plan(db: DB, params: dict, body: dict) -> Any:
     return plans.to_dto(db, p)
 
 
+def withdraw_plan_approval(db: DB, params: dict, body: dict) -> Any:
+    from brindle import plans
+
+    return plans.to_dto(db, plans.withdraw_approval(db, params["id"], _get(body, "rev", int, required=True)))
+
+
 def cancel_plan(db: DB, params: dict, body: dict) -> Any:
     """The person cancels an open or redirected plan (brindle.plans.cancel): closed, nothing approved."""
     from brindle import plans
@@ -1288,6 +1294,7 @@ ROUTES = [
     Route("/v1/visuals/{id}/snapshot", _endpoint(snapshot), methods=["POST"]),
     Route("/v1/plans/{id}", plan),
     Route("/v1/plans/{id}/decide", _endpoint(decide_plan), methods=["POST"]),
+    Route("/v1/plans/{id}/approval/withdraw", _endpoint(withdraw_plan_approval), methods=["POST"]),
     Route("/v1/plans/{id}/cancel", _endpoint(cancel_plan), methods=["POST"]),
     Route("/v1/plans/{id}/alongside/{task}/stop", _endpoint(stop_alongside), methods=["POST"]),
     Route("/v1/plans/{id}/revisions/{n}", plan_revision),

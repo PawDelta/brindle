@@ -4,7 +4,8 @@ import type { LiveDocState, Plan } from "./client";
    gate includes org policy checks; without one, only explicit current signers can count. */
 export function liveReviewGate(gate: Plan["gate"], state: LiveDocState | null): Plan["gate"] {
   if (!gate) return gate;
-  if (state?.version && state.gate) return state.gate;
+  if (state?.version && state.gate) return { ...state.gate, approval_held: gate.approval_held,
+    can_hold_approval: gate.can_hold_approval && state.gate.state === "waiting" };
   const signed = new Set(state?.version?.signOffs ?? []);
   const reviewers = gate.reviewers?.map((row) => {
     const met_by = row.met_by?.filter((sub) => signed.has(sub));
