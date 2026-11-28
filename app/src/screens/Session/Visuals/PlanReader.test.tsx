@@ -127,7 +127,7 @@ it.each(["author", "shared"])("opens %s history through the reader and shows the
     const before = reads;
     await act(async () => {
       if (reader === "shared") vi.advanceTimersByTime(30_000);
-      else store.dispatch({ type: "stream", message: { type: "event", id: reads, ts: reads, kind: "agent.status", root_id: "boss", repo_root: null, agent_id: "boss", workspace_id: null, task_id: null, payload: {} } });
+      else store.dispatch({ type: "stream", message: { type: "event", id: reads, ts: reads, kind: "visual.plan_changed", root_id: "boss", repo_root: null, agent_id: "boss", workspace_id: null, task_id: null, payload: { visual: plan.id } } });
     });
     expect(reads).toBe(before + 1);
   };
@@ -211,19 +211,19 @@ it("keeps an approved plan board live from recorded worker events and drops stal
   view.unmount();
 });
 
-it("asks immediately in the thread without turning the question into a change request", async () => {
-  let plan = doc(1, "Workers run on your machine.");
+it.each(["summary", "context"])("asks immediately in the %s thread without turning the question into a change request", async (section) => {
+  const passage = "Workers run on your machine.";
+  let plan = doc(1, passage, { sections: [{ id: section, title: "Where workers run", markdown: passage }] });
+  const store = createAppStore();
   const client: PlansClient & PlanDocClient & VisualsClient = {
     ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan,
     commentPlan: async (_id, rev, anchor, text, question) => (plan = { ...plan, threads: [
       { id: 1, kind: "comment", rev, anchor: { ...anchor, state: "current" }, author: "person", text,
-        question, status: "open", at: 1, replies: [
-          { id: 2, author: "person", text: "On your own machine.", at: 2, from_supervisor: true },
-        ] },
+        question, status: "open", at: 1 },
     ] }),
   };
-  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
-  const text = (await screen.findByText("Workers run on your machine.")).firstChild!;
+  render(inTestStore(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />, store));
+  const text = (await screen.findByText(passage)).firstChild!;
   const range = document.createRange();
   range.setStart(text, 0);
   range.setEnd(text, 7);
@@ -235,8 +235,20 @@ it("asks immediately in the thread without turning the question into a change re
   await act(async () => fireEvent.submit(screen.getByTestId("thread-draft")));
   const thread = screen.getByTestId("thread-1");
   expect(thread.dataset.question).toBe("true");
+  expect(thread.querySelector('[data-state="supervisor-replying"]')).toBeTruthy();
+  plan = { ...plan, threads: [{ ...plan.threads![0], replies: [
+    { id: 2, author: "person", text: "On your own machine.", at: 2, from_supervisor: true },
+  ] }] };
+  await act(async () => store.dispatch({ type: "stream", message: { type: "event", id: 1, ts: 2, kind: "visual.plan_changed", root_id: "boss", repo_root: null, agent_id: null, workspace_id: null, task_id: null, payload: {} } }));
   expect(thread.querySelector('[data-from-supervisor="true"]')).toBeTruthy();
-  expect((screen.getByRole("button", { name: "Request changes" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(thread.querySelector('[data-state="supervisor-replying"]')).toBeNull();
+  const request = screen.getByRole<HTMLButtonElement>("button", { name: "Request changes" });
+  if (section === "context") {
+    fireEvent.click(request);
+    expect(screen.getByTestId<HTMLButtonElement>("plan-send-back").disabled).toBe(true);
+  } else {
+    expect(request.disabled).toBe(true);
+  }
   expect((screen.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
 });
 
@@ -438,9 +450,12 @@ it("design doc writes go one at a time, a read sent before one came back can't u
   // The read sent before the reply came back lands after it, without the reply: it is dropped.
   await act(async () => reads[1](base));
   expect(screen.getByTestId("thread-1").textContent).toContain("Yes, rented too.");
+  const supervisorReplying = () => screen.getByTestId("thread-1").querySelector('[data-state="supervisor-replying"]');
+  expect(supervisorReplying()).toBeNull();
   // The reply alone is something to send back to the supervisor.
   await act(async () => fireEvent.click(bar().getByRole("button", { name: "Request changes" })));
   expect(sent).toEqual([false]);
+  expect(supervisorReplying()).toBeTruthy();
   // That verdict delivered the reply. One more, written while the supervisor revises, is not
   // delivered by the revision that follows: after the reader is closed and opened again on
   // revision 2, it is still feedback to send.
@@ -449,9 +464,13 @@ it("design doc writes go one at a time, a read sent before one came back can't u
   fireEvent.change(within(screen.getByTestId("thread-1")).getByRole("textbox"), { target: { value: "And spot instances." } });
   fireEvent.click(within(screen.getByTestId("thread-1")).getByRole("button", { name: "Send" }));
   await act(async () => reply({ ...redirected, threads: [{ ...redirected.threads![0], replies: again }] }));
+  expect(supervisorReplying()).toBeNull();
   view.unmount();
   const second: Plan = { ...base, rev: 2, revisions: [...base.revisions!, { rev: 2, author: "supervisor", source: "proposal", at: 20 }], threads: [{ ...base.threads![0], replies: again }] };
   const reopened = render(reader({ ...visual, rev: 2 }));
+  await act(async () => reads[reads.length - 1]({ ...second, threads: redirected.threads }));
+  expect(supervisorReplying()).toBeNull();
+  reopened.rerender(reader({ ...visual, rev: 2, answer: { option: "x", note: "", at: 20 } }));
   await act(async () => reads[reads.length - 1](second));
   await act(async () => fireEvent.click(bar().getByRole("button", { name: "Request changes" })));
   expect(sent).toEqual([false, false]);
@@ -534,6 +553,99 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   expect(decided).toEqual([true]);
 });
 
+/* A reader whose first verdict fails offline; `landed`: that verdict reached the Library anyway;
+   `design`: a design doc, whose Request changes is confirmed in a menu. Reads wait while `hold` is on. */
+const offlineVerdict = (landed: boolean, design = false) => {
+  let plan = doc(1, "Workers run on your machine.", design ? {
+    sections: [{ id: "context", title: "Context", markdown: "Workers run on your machine." }],
+    threads: [{ id: 1, kind: "comment", rev: 1, author: "supervisor", text: "Keep the API small.", status: "open", at: 1,
+      anchor: { kind: "text", section: "context", start: 0, end: 7, quote: "Workers", state: "current" } }],
+  } : {});
+  const sent: { rev: number; approved: boolean; note: string }[] = [];
+  const held: ((ok: boolean) => void)[] = [];
+  const reads = { hold: false };
+  const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...docWrites(() => plan),
+    plan: () => reads.hold ? new Promise<Plan>((resolve, reject) => held.push((ok) => ok ? resolve(plan)
+      : reject(new DaemonError("library_offline", "Couldn't reach brindle Pro.", 503)))) : Promise.resolve(plan),
+    decidePlan: async (_id, verdict) => {
+      sent.push({ rev: verdict.rev, approved: verdict.approved, note: verdict.note ?? "" });
+      if (sent.length === 1) {
+        if (landed) plan = { ...plan, state: "approved" };
+        throw new DaemonError("library_offline", "Couldn't reach brindle Pro.", 503);
+      }
+      return plan;   // still open: the drafted note is the action's own to clear
+    } };
+  return { sent, client, held, reads };
+};
+
+it("an approval the network stopped keeps the draft, and Try again sends it through Approve once the plan is read back", async () => {
+  const { sent, client, held, reads } = offlineVerdict(false);
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const build = await screen.findByTestId("plan-build");
+  const box = () => screen.getByRole("textbox", { name: "Note for the supervisor" }) as HTMLInputElement;
+  fireEvent.change(box(), { target: { value: "Keep the queue." } });
+  reads.hold = true;
+  await act(async () => fireEvent.click(build));
+  const note = screen.getByTestId("library-network");
+  expect(note.dataset.state).toBe("offline");
+  expect(box().value).toBe("Keep the queue.");     // the failed verdict keeps what was drafted
+  // It may have landed: nothing is offered until the plan has been read back.
+  expect(within(note).queryByRole("button")).toBeNull();
+  // The read back fails too: Try again only reads the plan again, and sends nothing.
+  await act(async () => { for (const settle of held.splice(0)) settle(false); });
+  await act(async () => fireEvent.click(within(screen.getByTestId("library-network")).getByRole("button", { name: "Try again" })));
+  expect(sent).toHaveLength(1);
+  expect(held).toHaveLength(1);
+  expect(within(screen.getByTestId("library-network")).queryByRole("button")).toBeNull();
+  // Once a read succeeds, Try again goes through Approve as it is now.
+  reads.hold = false;
+  await act(async () => { for (const settle of held.splice(0)) settle(true); });
+  expect(sent).toHaveLength(1);
+  await act(async () => fireEvent.click(within(screen.getByTestId("library-network")).getByRole("button", { name: "Try again" })));
+  expect(sent).toEqual([{ rev: 1, approved: true, note: "Keep the queue." }, { rev: 1, approved: true, note: "Keep the queue." }]);
+  expect(screen.queryByTestId("library-network")).toBeNull();
+  expect(box().value).toBe("");                    // it went with the verdict
+});
+
+it("offers no Try again once the plan read back shows the stopped approval landed", async () => {
+  const { sent, client } = offlineVerdict(true);
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const build = await screen.findByTestId("plan-build");
+  await act(async () => fireEvent.click(build));
+  await waitFor(() => expect(screen.queryByTestId("plan-build")).toBeNull());
+  const note = screen.queryByTestId("library-network");
+  expect(note && within(note).queryByRole("button")).toBeFalsy();
+  expect(sent).toHaveLength(1);
+});
+
+it("Try again for a Request changes confirmed in a menu opens that menu, where the person confirms it", async () => {
+  const { sent, client } = offlineVerdict(false, true);
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const trigger = await screen.findByRole("button", { name: "Request changes" });
+  fireEvent.click(trigger);
+  const passage = screen.getByTestId("plan-doc").querySelector('[data-section="context"]')!.parentElement!;
+  const measure = vi.spyOn(passage, "getBoundingClientRect");
+  try {
+    const note = screen.getByRole("textbox", { name: "Note for the supervisor" });
+    const text = "Split the API.";
+    for (let i = 1; i <= text.length; i++) {
+      await act(async () => fireEvent.change(note, { target: { value: text.slice(0, i) } }));
+    }
+    expect(measure).not.toHaveBeenCalled();
+  } finally {
+    measure.mockRestore();
+  }
+  await act(async () => fireEvent.click(screen.getByTestId("plan-send-back")));
+  const again = await within(screen.getByTestId("library-network")).findByRole("button", { name: "Try again" });
+  // A real press: the mousedown outside the menu closes it before the click lands.
+  await act(async () => { fireEvent.mouseDown(again); });
+  expect(screen.queryByTestId("plan-send-back")).toBeNull();
+  await act(async () => fireEvent.click(again));
+  expect(sent).toHaveLength(1);                    // opening the menu sends nothing by itself
+  await act(async () => fireEvent.click(screen.getByTestId("plan-send-back")));
+  expect(sent).toEqual([{ rev: 1, approved: false, note: "Split the API." }, { rev: 1, approved: false, note: "Split the API." }]);
+});
+
 it("a plan being written offers no sign-off, the same plan can be signed once proposed, and superseded or ended plans stay closed", async () => {
   let plan = doc(0, "", { state: "writing", sections: [] });
   const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan };
@@ -593,7 +705,7 @@ it("the author's plan opened in its session offers its Library link by plan id, 
   inLibrary = true;
   plan = { ...plan, gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["u_r"], reviewers: [{ sub: "u_r", required: true, status: "waiting" }] } };
   await act(async () => {
-    store.dispatch({ type: "stream", message: { type: "event", id: 1, ts: 1, kind: "agent.status", root_id: "boss", repo_root: null, agent_id: "boss", workspace_id: null, task_id: null, payload: {} } });
+    store.dispatch({ type: "stream", message: { type: "event", id: 1, ts: 1, kind: "visual.plan_changed", root_id: "boss", repo_root: null, agent_id: "boss", workspace_id: null, task_id: null, payload: { visual: plan.id } } });
   });
   await openShare();
   const panel = screen.getByTestId("plan-share");

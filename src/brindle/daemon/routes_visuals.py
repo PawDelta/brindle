@@ -476,17 +476,16 @@ def plan_comment(db: DB, params: dict, body: dict) -> Any:
 
 def doc_question(db: DB, params: dict, body: dict) -> Any:
     """The remote doc reader has saved a question; route it on this machine."""
-    from brindle.pro import doc_questions
+    from brindle.pro import doc_questions, shared_docs
 
-    from brindle.pro import shared_docs
-
-    owner = shared_docs._require_team(None).sub
+    repo = _get(body, "repo")
+    owner = _shared_design(repo, lambda _: shared_docs._require_team(None).sub, require_entitlement=False)
     if not owner:
         raise ServiceError("forbidden", "sign in to ask your supervisor", 403)
     thread = _get(body, "thread", int, required=True)
     return JSONResponse({"state": "queued"}, background=BackgroundTask(
         doc_questions.after_reply, doc_id=params["id"], thread_id=thread, owner=owner,
-        repo_root=_get(body, "repo")))
+        repo_root=repo))
 
 
 def plan_resolve(db: DB, params: dict, body: dict) -> Any:
@@ -638,10 +637,10 @@ def plan_invite_dismiss(db: DB, params: dict, body: dict) -> Any:
     return _plan_now(db, params["id"])
 
 
-def _access_write(db: DB, plan_id: str, work: Callable[[Any], Any], first: bool = False) -> Any:
+def _access_write(db: DB, plan_id: str, work: Callable[[Any], Any], *, revoking: bool = False) -> Any:
     from brindle.pro import share_access
 
-    return _library(db, plan_id, lambda sd: share_access.plan_write(db, plan_id, work, first=first))
+    return _library(db, plan_id, lambda sd: share_access.plan_write(db, plan_id, work, revoking=revoking))
 
 
 def _invite_out(db: DB, plan_id: str, row: dict) -> JSONResponse:
@@ -703,13 +702,14 @@ def plan_person_delete(db: DB, params: dict, body: dict) -> Any:
         return _invite_out(db, params["id"], row)
     if row == {}:
         return _plan_now(db, params["id"])              # never sent: nothing to take back
-    return _access_write(db, params["id"], lambda call: sa.revoke(call, params["sub"]))
+    return _access_write(db, params["id"], lambda call: sa.revoke(call, params["sub"]), revoking=True)
 
 
 def plan_scope_delete(db: DB, params: dict, body: dict) -> Any:
     from brindle.pro import share_access as sa
 
-    return _access_write(db, params["id"], lambda call: sa.revoke_scope(call, params["kind"], params["scope"]))
+    return _access_write(db, params["id"], lambda call: sa.revoke_scope(call, params["kind"], params["scope"]),
+                         revoking=True)
 
 
 def plan_unshare(db: DB, params: dict, body: dict) -> Any:
@@ -718,9 +718,15 @@ def plan_unshare(db: DB, params: dict, body: dict) -> Any:
     from brindle.pro import share_access as sa
     from brindle.pro import share_invites
 
-    with share_invites.held(params["id"]):
-        share_invites.drop_all(db, params["id"])
-        return _access_write(db, params["id"], sa.stop)
+    plan_id = params["id"]
+
+    def stop(call: sa.Call) -> dict:
+        design = sa.stop(call)
+        share_invites.drop_all(db, plan_id)
+        return design
+
+    with share_invites.held(plan_id):
+        return _access_write(db, plan_id, stop, revoking=True)
 
 
 @_json
@@ -871,23 +877,21 @@ def review_policies_impact(db: DB, params: dict, body: dict) -> Any:
 # Library has it now, and nothing is kept here.
 
 
-def _shared_design(repo: str | None, work: Callable[[Any], Any]) -> Any:
-    from brindle import airgap, config, keystore, redact
+def _shared_design(repo: str | None, work: Callable[[Any], Any], *, require_entitlement: bool = True) -> Any:
+    from pydantic import ValidationError
+
+    from brindle import airgap, config, keystore
     from brindle.daemon import routes_actions as actions
     from brindle.pro import analysis_docs, auth, shared_reader
 
     if repo:
         config.load_repo_config(repo)      # its air-gap setting applies before any credential is read
     try:
-        actions._docs_entitlement(repo, None if airgap.enabled() else analysis_docs._session()[1])
+        if require_entitlement:
+            actions._docs_entitlement(repo, None if airgap.enabled() else analysis_docs._session()[1])
         return work(shared_reader)
-    except (RuntimeError, auth.AuthError, keystore.KeychainReadBlocked) as e:
-        if isinstance(e, analysis_docs.Refused) and e.status == 401:      # still refused after a token refresh; a 401 would read as the daemon's
-            raise ServiceError("signed_out", "sign in to brindle again to read this plan", 402) from e
-        if isinstance(e, analysis_docs.Refused) and e.code == "key_unavailable":
-            raise ServiceError(e.code, redact.mask(str(e)), 503) from e   # the org's key is revoked: the doc is gone for now
-        err = actions.upstream_error(e)
-        raise ServiceError(err.code, redact.mask(err.message), err.http_status) from e
+    except (RuntimeError, auth.AuthError, keystore.KeychainReadBlocked, ValidationError) as e:
+        raise actions.upstream_error(e) from e
 
 
 @_json
@@ -1044,17 +1048,8 @@ def share_link_design(db: DB, params: dict, body: dict) -> Any:
     read through the link as the account signed in now. The token comes in the
     body, never the path: a path can end up in a log, and the token is the
     link's whole secret."""
-    from brindle import redact
-    from brindle.daemon import routes_actions as actions
-    from brindle.pro import auth, shared_reader
-
-    try:
-        return shared_reader.read_link(body.get("token"))
-    except auth.TransportError as e:                  # unreachable: says nothing about access
-        err = actions.upstream_error(e)
-        raise ServiceError(err.code, redact.mask(str(e)), err.http_status) from e
-    except auth.AuthError as e:                       # no sign-in to send, or its refresh refused
-        raise ServiceError("signed_out", "sign in to brindle to open this link", 402) from e
+    # A signed-in account can open a share link on any plan.
+    return _shared_design(None, lambda r: r.read_link(body.get("token")), require_entitlement=False)
 
 
 @_json
@@ -1083,9 +1078,9 @@ def library_design_plan(db: DB, request: Request) -> Any:
 
 def _share_link(repo: str | None, work: Callable[[Any], Any]) -> Any:
     """A design's share link (brindle.pro.share_links), by its Library doc id.
-    Below Pro a read answers ``available: false`` and nothing is sent; the
-    Library's refusal (an org's link policy, not an editor) keeps its reason."""
-    from brindle import config, keystore, redact
+    Below Pro a read answers ``available: false`` without contacting the Library.
+    Library refusals keep their codes for the app."""
+    from brindle import config, keystore
     from brindle.daemon import routes_actions as actions
     from brindle.pro import analysis_docs, auth, share_links
 
@@ -1093,9 +1088,10 @@ def _share_link(repo: str | None, work: Callable[[Any], Any]) -> Any:
         config.load_repo_config(repo)        # its air-gap setting applies first
     try:
         return work(share_links)
-    except (analysis_docs.SignInBusy, auth.AuthError, keystore.KeychainReadBlocked) as e:
-        err = actions.upstream_error(e)
-        raise ServiceError(err.code, redact.mask(err.message), err.http_status) from e
+    except share_links.LinkPolicyRefused as e:
+        raise actions.upstream_error(analysis_docs.Refused(e.message, e.http_status, e.code)) from e
+    except (analysis_docs.Refused, analysis_docs.SignInBusy, auth.AuthError, keystore.KeychainReadBlocked) as e:
+        raise actions.upstream_error(e) from e
 
 
 @_json

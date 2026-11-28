@@ -6,18 +6,21 @@
    Two parts: Waiting on you (an agent or a person is stopped until the person
    acts) and From the team (nothing is stopped). The engine says which
    (InboxItemDTO.inbox_group, inbox_team.group); an item from an engine that
-   doesn't yet, by the same kinds. */
+   doesn't yet, by the same kinds and share roles. */
 
 import type { InboxItemDTO } from "../../api/schema";
 import { itemKey } from "./items";
 
 export type Part = "wait" | "team";
 
-/* inbox_team.TEAM_KINDS: rows that ask nothing of the person. */
+/* inbox_team.TEAM_KINDS: team news by default. */
 const TEAM_KINDS = ["signoff_progress", "shared_doc_comment", "signed_off", "changes_requested", "org_notice", "shared_with_you"];
 
-export const partOf = (item: InboxItemDTO): Part =>
-  item.inbox_group ? (item.inbox_group === "from_team" ? "team" : "wait") : TEAM_KINDS.includes(item.kind) ? "team" : "wait";
+export function partOf(item: InboxItemDTO): Part {
+  if (item.inbox_group) return item.inbox_group === "from_team" ? "team" : "wait";
+  if (item.kind === "shared_with_you" && item.share_role === "comment") return "wait";
+  return TEAM_KINDS.includes(item.kind) ? "team" : "wait";
+}
 
 /* What's stopped comes first: an agent stopped on the person, then a sign-in or setup that stops work,
    then what a teammate or brindle is waiting on. Kinds not named keep the engine's order, last. */

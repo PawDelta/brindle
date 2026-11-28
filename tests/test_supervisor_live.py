@@ -4,7 +4,8 @@ draft as it is when they land (plans.propose with a base)."""
 
 import pytest
 
-from brindle import plans
+from brindle import plan_rebase, plans, visuals
+from brindle.plan_drafts import DraftReplica
 from brindle.pro import shared_docs as sd
 from brindle.service.errors import ServiceError
 from pro_fixtures import backend, claims, fixed_identity, pro_env, sign, signing_key  # noqa: F401
@@ -50,6 +51,29 @@ def test_a_sentence_added_after_the_supervisor_read_is_still_there_after_its_rev
     row = db.conn.execute("SELECT peer_id, supervisor_peer FROM plan_drafts").fetchone()
     assert row["supervisor_peer"] not in (None, row["peer_id"])
     assert lib.draft._doc.oplog_vv.get_last(row["supervisor_peer"]) is not None
+
+
+def test_supervisor_rebase_runs_before_publish_and_refuses_a_stale_draft(db, session, sent_back, monkeypatch):
+    pid, _, _, base = sent_back
+    replica = DraftReplica.open(db, DOC)
+    rebase = plan_rebase.rebase
+
+    def concurrent_edit(before, local, remote):
+        assert not db.conn.in_transaction
+        result = rebase(before, local, remote)
+        if before == SUMMARY:
+            replica.insert("summary", 0, "Teammate: ")
+        return result
+
+    monkeypatch.setattr(plan_rebase, "rebase", concurrent_edit)
+    visual_rev = visuals.get(db, pid)["rev"]
+    with pytest.raises(ServiceError) as refused:
+        plans.propose(db, session[0], "# Cloud workers", sections=HOSTS, plan_id=pid, base=base)
+
+    assert refused.value.code == "stale"
+    assert plans.get(db, pid)["state"] == "redirected"
+    assert _text(db, pid) == "Teammate: " + SUMMARY
+    assert visuals.get(db, pid)["rev"] == visual_rev
 
 
 @pytest.mark.parametrize("sections, after", [

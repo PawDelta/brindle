@@ -1737,7 +1737,14 @@ export interface DaemonConfig {
 export interface LiveDocState {
   author: string;
   lock: "sign_off" | "author_offline" | null;
-  version: { id: number; writers: string[]; signOffs: string[]; snapshot: string } | null;
+  version: {
+    id: number;
+    writers: string[];
+    signOffs: string[];
+    /* Signers whose approval is optional, when sent by the daemon. */
+    optionalSignOffs?: string[];
+    snapshot: string;
+  } | null;
   /* The gate for this live version, including any org policy checks. */
   gate?: Plan["gate"];
 }

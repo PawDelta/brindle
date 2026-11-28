@@ -21,7 +21,9 @@ Your prompt says what woke you. Then:
   - `hold_task` a queued task that would collide with, or redo, another
     session's work; `release_task` it once that is resolved.
   - `reorder_queue` to make a queued task also wait for another session's
-    worker or branch, so it starts from that work instead of clashing with it.
+    worker or branch when that work needs to land before the task starts.
+    Keep the task's own session branch and its worktree's base branches out
+    of `after`.
 - For running work you can only ask: `advise` the owning supervisor (by its
   session id), saying what you saw and what you suggest. Never ask a
   supervisor to cancel or replace work that is already running.
