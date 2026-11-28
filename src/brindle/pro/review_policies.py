@@ -36,6 +36,10 @@ REFUSALS = {
                      "confirms the review again.",
 }
 ACCESS_REFUSED = (401, 402, 403, 404)   # the Library's answer that this account may not have this: not an outage
+# plan_shares.access_refused after a 404 on reading the plan's design: the Library has no document for
+# the share. Only this value, never the Library's own error code (an older client kept "not_found" for
+# any 404, a removed person's included), lets the owner stop sharing past the review.
+DESIGN_GONE = "design_404"
 REVIEW_FIELDS = ("reviewers", "policy_reviewers", "pending_policies")
 ACTIONS = ("waive", "stand_in")
 MAX_REASON = 2000
@@ -155,16 +159,27 @@ def seen(db: DB, p: dict, resp: dict) -> None:
             c.execute("UPDATE plan_shares SET review_asked=1 WHERE plan_id=? AND review_asked=0", (p["id"],))
 
 
-def refused(db: DB, p: dict, resp: dict, status: int) -> None:
+def refused(db: DB, p: dict, resp: dict, status: int, *, document: bool, design: bool = False) -> None:
     """Keep the Library's refusal on the plan. An access refusal stands until
     it next gives a whole answer (shared_docs._remember), and bars the ways
     around the review; a rule's refusal also shuts the gate and says why.
-    Any other failure says nothing about either and changes nothing here."""
+    Any other failure says nothing about either and changes nothing here.
+
+    ``document``: the call read the plan's document itself (its entry or its
+    design). Only such a refusal is about access to the plan: a 404 on a
+    write under it (a person already removed, no share link to turn off) is
+    about that one thing, and must never read as the document being gone.
+    ``design``: that read was of its design (``GET .../design``). Only its
+    404 is kept as :data:`DESIGN_GONE`, the one refusal that lets the owner
+    stop sharing past the review (shared_docs.may_stop)."""
     code = resp.get("error")
-    if status in ACCESS_REFUSED:
+    if document and status in ACCESS_REFUSED:
+        if design and status == 404:
+            kept = DESIGN_GONE
+        else:
+            kept = code if isinstance(code, str) and code and code != DESIGN_GONE else str(status)
         with db.tx() as c:
-            c.execute("UPDATE plan_shares SET access_refused=? WHERE plan_id=?",
-                      (code if isinstance(code, str) and code else str(status), p["id"]))
+            c.execute("UPDATE plan_shares SET access_refused=? WHERE plan_id=?", (kept, p["id"]))
     if code not in REFUSALS:
         return
     refusal = {"code": code, "org_id": resp.get("org_id"), "policy": resp.get("policy")}
@@ -179,17 +194,22 @@ def refused(db: DB, p: dict, resp: dict, status: int) -> None:
         plan_docs._changed(db, p, p["rev"])
 
 
-def ask(db: DB, p: dict, method: str, path: str, body: dict | None = None, *, client, store) -> dict:
+def ask(db: DB, p: dict, method: str, path: str, body: dict | None = None, *, document: bool,
+        design: bool = False, client, store) -> dict:
     """A Library call about plan ``p``'s review: its answer, or ``RuntimeError``
-    with a readable reason, after recording a refusal by an org rule."""
-    return checked(db, p, ad._call(method, path, body, client=client, store=store), body)
+    with a readable reason, after recording a refusal by an org rule.
+    ``document``, ``design``: a read of the plan's document itself, and of
+    its design (see :func:`refused`)."""
+    return checked(db, p, ad._call(method, path, body, client=client, store=store), body, document=document,
+                   design=design)
 
 
-def checked(db: DB, p: dict, result: tuple[int, dict], body: dict | None = None) -> dict:
+def checked(db: DB, p: dict, result: tuple[int, dict], body: dict | None = None, *, document: bool,
+            design: bool = False) -> dict:
     """Record a Library answer on the thread that owns the plan's database."""
     status, resp = result
     if status != 200:
-        refused(db, p, resp, status)
+        refused(db, p, resp, status, document=document, design=design)
         code = resp.get("error") if isinstance(resp.get("error"), str) else None
         raise ad.Refused(resp.get("error_description") or code or ad.why_refused(status, resp, body), status, code)
     seen(db, p, resp)
@@ -255,7 +275,7 @@ def _admin_post(db: DB, plan_id: str, rev: Any, tail: str, build, done: str, cli
     if share["local_rev"] != p["rev"]:
         raise RuntimeError(f"r{p['rev']} hasn't reached the Library yet, so its review can't be {done}")
     answer = ask(db, p, "POST", sd._path(share["doc_id"], tail), {**body, "rev": share["remote_rev"]},
-                 client=client, store=store)
+                 document=False, client=client, store=store)
     if sd._remember(db, p["id"], answer):
         plan_docs._changed(db, p, p["rev"])
     return sd.link(db, p["id"])

@@ -8,7 +8,7 @@ import App from "../src/App";
 import { PtyViewsProvider } from "../src/api/ptyView";
 import { THEME_KEY, applyTheme } from "../src/components/ThemeToggle";
 import { markOnboarded } from "../src/api/providers";
-import { DaemonError, type Plan, type PlanAnchor, type PlanChange, type PlanVerdict, type SharePerson, type VisualDTO } from "../src/api/client";
+import { DaemonError, toBase64, type Plan, type PlanAnchor, type PlanChange, type PlanVerdict, type SharePerson, type SharedDesign, type VisualDTO } from "../src/api/client";
 import { createAppStore } from "../src/store/store";
 import { startSync } from "../src/store/sync";
 import { FakeDaemon } from "../src/test/fakeDaemon";
@@ -31,6 +31,35 @@ let rows: VisualDTO[] = [
   { id: "v_old1", session: "sup-42", title: "Sidebar rail widths", by: "a7aaa807", kind: "visual", rev: 1, question: "Which rail width?", options: [{ id: "narrow", label: "Narrow" }, { id: "wide", label: "Wide" }], answer: { option: "narrow", note: "keeps the chat readable", at: now - 7200 }, kept: true, unread: false, created_at: now - 9000 },
   { id: "v_old2", session: "sup-42", title: "Permission prompt layout", by: "b31c9f02", kind: "visual", rev: 3, question: "Inline or sheet?", options: [{ id: "inline", label: "Inline" }, { id: "sheet", label: "Sheet" }], answer: { option: "sheet", note: "", at: now - 20000 }, kept: false, unread: false, created_at: now - 30000 },
 ];
+
+// ?inline=1: a visual with its own choice groups (visuals-shots.mjs --only inline). The page's CSS marks
+// option A of the first group as its author's pick, in purple, which must not read as the person's.
+if (params.get("inline") === "1") {
+  const groups = [
+    { id: "gate", question: "When should the release be tagged?", options: [["A", "Tag first", "Tag, then let CI build it"], ["B", "Gate on CI", "Build first, tag when it passes"]] },
+    { id: "rollout", question: "Who gets the build first?", options: [["staff", "Staff first", "A day on staff machines"], ["all", "Everyone", "One release for all"]] },
+    { id: "notes", question: "Where do the release notes go?", options: [["site", "The website", "Linked from the update strip"], ["app", "In the app", "Shown after the restart"]] },
+  ];
+  const style = `<style>
+    :root { color-scheme: light dark; --bg: #f4f6f6; --ink: #0e1716; --dim: #4c615e; --line: rgba(20,40,36,.22); }
+    @media (prefers-color-scheme: dark) { :root { --bg: #080d0b; --ink: #e8f0eb; --dim: #889a90; --line: rgba(130,160,145,.28); } }
+    body { margin: 0; padding: 28px 32px; background: var(--bg); color: var(--ink); font: 14px/1.5 system-ui, sans-serif; }
+    main { max-width: 720px; margin: 0 auto; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    p { margin: 0 0 18px; color: var(--dim); }
+    fieldset { border: 0; margin: 0 0 22px; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    legend { font-weight: 600; padding: 0; margin-bottom: 8px; }
+    button { font: inherit; color: inherit; text-align: left; background: transparent; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; cursor: pointer; }
+    button small { display: block; color: var(--dim); font-size: 12.5px; margin-top: 2px; }
+    #mine { border: 2px solid #8b5cf6; background: rgba(139,92,246,.16); }
+    #mine em { float: right; font-style: normal; font-size: 12px; color: #8b5cf6; }
+  </style>`;
+  const fields = groups.map((g, i) => `<fieldset data-choice="${g.id}"><legend>${g.question}</legend>${g.options.map(([id, label, detail], j) =>
+    `<button data-option="${id}"${i === 0 && j === 0 ? ' id="mine"' : ""}><strong>${label}</strong>${i === 0 && j === 0 ? "<em>my pick</em>" : ""}<small>${detail}</small></button>`).join("")}</fieldset>`).join("");
+  rows = [{ id: "v_inline", session: "sup-42", title: "Three calls before 0.6.3", by: "supervisor", kind: "visual", rev: 1, answer: null, kept: false, unread: true, created_at: now - 60,
+    inline_html: `${style}<main><h1>Three calls before 0.6.3</h1><p>Pick one in each group, then send.</p>${fields}</main>`,
+    choices: groups.map((g) => ({ id: g.id, question: g.question, options: g.options.map(([id, label, detail]) => ({ id, label, detail })) })) }, ...rows];
+}
 
 // The plan row's design doc (shots/plan-shots.mjs): text sections, a diagram,
 // code with a suggestion on it, a table, an open question, three
@@ -212,12 +241,43 @@ if (params.get("share") === "1") {
   });
 }
 
+// ?doc=spine&shared=1: that plan as a teammate with comment access reads it (SharedDesignReader): not a
+// reviewer, so their sign-off is optional, on a version frozen with one required reviewer yet to sign.
+const shared = params.get("shared") === "1";
+if (shared) {
+  const me = "u_priya";
+  const author = "u_david";
+  const people = [[me, "Priya Raman"], [author, "David Chen"], ["u_maya", "Maya Okafor"]];
+  let design: SharedDesign = {
+    ...plan, session: "", me, author, queued: 0, split: [], threads: [], can_edit: false, can_comment: true, can_suggest: false,
+    can_sign_off: true, sign_off: "optional", signed_off: false,
+    teammate_names: Object.fromEntries(people),
+    decisions: plan.decisions.map((d) => ({ ...d, confirmed: d.mine, votes: { [d.mine!]: [author] } })),
+    gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["u_maya"], reviewers: [{ sub: "u_maya", required: true, status: "waiting" }] },
+  };
+  // The freeze banner prints the live state's author and writers as they are, so they are names here.
+  const writer = people[1][1];
+  const text = daemon.seedLive(design.id, Object.fromEntries(design.sections.map((s) => [s.id, s.markdown])), { author: writer, me });
+  const version = { id: design.rev, writers: [writer], signOffs: [] as string[], optionalSignOffs: [] as string[], snapshot: toBase64(text.export({ mode: "snapshot" })) };
+  daemon.setLiveState(design.id, { lock: "sign_off", version });
+  Object.assign(client, {
+    libraryDesignPlan: async () => Promise.reject(new DaemonError("not_found", "Not shared from this machine.", 404)),
+    sharedDesign: async () => design,
+    writeSharedDesign: async () => {
+      design = { ...design, can_sign_off: false, signed_off: true, sign_off: null, sign_offs: [{ sub: me, rev: design.rev, at: now, optional: true }] };
+      daemon.setLiveState(design.id, { version: { ...version, signOffs: [me], optionalSignOffs: [me] } });
+      return design;
+    },
+    libraryPeople: async () => ({ me, people: people.map(([sub, display_name]) => ({ sub, display_name, email: null })) }),
+  });
+}
+
 Object.assign(window, { fake: daemon });
 const store = createAppStore();
 const sync = startSync({ client, store, connect: daemon.connect });
 createRoot(document.getElementById("root")!).render(
   <PtyViewsProvider value={daemon.ptyViews()}>
-    <App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" }} pickFolder={() => Promise.resolve(null)} />
+    <App store={store} client={client} refresh={sync.refresh} initialRoute={shared ? { screen: "shared-design", doc: plan.id, title: plan.title } : { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" }} pickFolder={() => Promise.resolve(null)} />
   </PtyViewsProvider>,
 );
 void sync.idle().then(() => setTimeout(() => (document.documentElement.dataset.ready = "1"), 1500));

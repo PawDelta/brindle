@@ -278,7 +278,7 @@ def push(db: DB, plan_id: str, owner: str, head) -> None:
             head.view, head.refused = resp, False
             review_policies.seen(db, head.p, resp)
         elif status not in unsupported:
-            review_policies.refused(db, head.p, resp, status)
+            review_policies.refused(db, head.p, resp, status, document=False)
             head.refused = (head.refused or resp.get("error") in review_policies.REFUSALS
                             or status in review_policies.ACCESS_REFUSED)
         if status != 200:
