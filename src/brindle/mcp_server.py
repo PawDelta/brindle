@@ -749,6 +749,8 @@ class _Request:
         from brindle import plans
 
         plan = plans.holding(db, autopilot.root_of(db, caller.id))
+        if plan and plan.get("approval_reply"):
+            plan = plan["plan"]
         if plan is None or "id" not in plan:
             return None
         # A link to another (older) plan of the session isn't this plan's work: it keeps that
@@ -1363,9 +1365,13 @@ async def assign(
                 weight=effective_weight, milestone=ms_title, agent=decision.get("agent"), start=True, fast_path=fast,
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
-            behind = (f"behind plan {plan['id']}: it starts when the person approves the plan" if "id" in plan
-                      else "behind brindle's offer to plan this goal first: it starts once the person chooses "
-                      "not to, or approves the plan")
+            if plan.get("approval_reply"):
+                behind = "until the plan approval response finishes"
+            elif "id" in plan:
+                behind = f"behind plan {plan['id']}: it starts when the person approves the plan"
+            else:
+                behind = ("behind brindle's offer to plan this goal first: it starts once the person chooses "
+                          "not to, or approves the plan")
             return _remind_goal(db, caller, f"Queued task {t.id} {behind}. Don't assign it again."
                                 + "".join(f"\nrouting: {w}" for w in why), fast=fast)
         reply, warning = _route_clash(
