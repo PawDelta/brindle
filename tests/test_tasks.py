@@ -188,7 +188,9 @@ def test_broad_glob_requires_real_shared_files(db, coordination):
     assert tasks.find_clash(db, c.a, ["src/*.py"], caller_id="a") is None
     db.conn.execute("UPDATE tasks SET files=? WHERE id='held'", (tasks._dumps(["src/**"]),))
     assert tasks.find_clash(db, c.a, ["src/shared.py"], caller_id="a") is None
-    c.changed[c.w.id] = ["src/unrelated.py"]
+    c.changed[c.w.id] = ["src/unrelated.py", "a/b/c.tsx"]
+    assert tasks.find_clash(db, c.a, ["a/*.tsx"], caller_id="a") is None
+    assert tasks.find_clash(db, c.a, ["a/**"], caller_id="a").shared_files == ("a/b/c.tsx",)
     assert tasks.find_clash(db, c.a, ["src/shared.py"], caller_id="a") is None
     c.changed[c.w.id] += ["src/shared.py"]
     clash = tasks.find_clash(db, c.a, ["src/shared.py"], caller_id="a")
