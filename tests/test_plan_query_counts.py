@@ -23,7 +23,7 @@ def _plan_with_task(db, boss):
 
 
 @pytest.mark.parametrize("disconnect", [
-    False,
+    pytest.param(False, marks=pytest.mark.variant("Approve answers before held workers start")),
     pytest.param(True, marks=pytest.mark.variant("a disconnect must release the hold even if the response write is blocked")),
 ])
 def test_approve_answers_before_dispatch(db, session, monkeypatch, disconnect):
@@ -104,6 +104,7 @@ def test_approve_answers_before_dispatch(db, session, monkeypatch, disconnect):
     assert db.get_task(task.id).state == "started" and started == [task.task_text]
 
 
+@pytest.mark.variant("opening a plan with five held tasks stays under the query ceiling with one hold lookup")
 def test_get_plan_counts_five_held_tasks_in_one_lookup(db, session, monkeypatch):
     boss, _ = session
     pid, task = _plan_with_task(db, boss)

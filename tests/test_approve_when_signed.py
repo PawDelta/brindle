@@ -13,7 +13,7 @@ from test_plans import AUTH, TOKEN, _shared, _signed_off, messages, outage, sess
 from test_shared_plan_docs import TEAM, parts  # noqa: F401
 
 
-@pytest.mark.parametrize("event", ["sign", "optional", "changes", "revise", "withdraw", "cancel"])
+@pytest.mark.parametrize("event", ["sign", pytest.param("optional", marks=pytest.mark.variant("an optional approval must never release a held build")), pytest.param("changes", marks=pytest.mark.variant("a change request withdraws a held approval and tells the author")), pytest.param("revise", marks=pytest.mark.variant("a new revision withdraws a held approval")), "withdraw", "cancel"])
 def test_approve_when_signed(db, session, outage, event):
     line = outage
     line.down = None
@@ -104,6 +104,7 @@ def test_stale_import_cannot_reopen_objection_after_new_revision_approval(db, pa
                            (pid,)).fetchone()[0] == "resolved"
 
 
+@pytest.mark.variant("an objection pulled from the Library withdraws the hold even when sending fails")
 def test_imported_objection_withdraws_even_if_outbound_write_fails(db, parts, monkeypatch):
     pid, library, net = parts
     monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
