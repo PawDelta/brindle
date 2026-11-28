@@ -65,7 +65,7 @@ import { EarlierRefusals, PendingNote, PlanDeliveryProvider, QueueCount, ShowPla
 import { StoreContext } from "../../../store/useStore";
 import { PlanDraftScope, readPlanDraft, savePlanDraft, usePlanDraft, usePlanDraftScope } from "./planDrafts";
 
-type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach" | "cancelPlan" | "stopAlongside">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient>;
+type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach" | "cancelPlan" | "stopAlongside">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient> & { withdrawPlanApproval?(planId: string, rev: number): Promise<Plan> };
 
 /* How far along a plan is: its revision, then decided or not. Revisions only grow and a decided
    revision never reopens, so a response with less progress than the one on screen is stale. */
@@ -1138,11 +1138,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const alongside = <Alongside rows={plan.alongside ?? []} onStop={chrome?.onStopAlongside} />;
   const held = gate?.approval_held?.rev === plan.rev;
   const gateHolds = !!gate && gate.state !== "ready" && !gate.can_hold_approval;
-  const withdraw = held && !teammate && client && <button type="button" className="cursor-pointer text-xs font-normal text-ink-2 underline disabled:opacity-50" disabled={busy || !!historical}
-    onClick={() => {
-      const verdict = { rev: plan.rev, approved: false, withdraw: true, picks: {}, comments: [], note: "" };
-      void send(() => client.decidePlan(plan.id, verdict));
-    }}>Withdraw</button>;
+  const withdraw = held && !teammate && client?.withdrawPlanApproval && <button type="button" className="cursor-pointer text-xs font-normal text-ink-2 underline disabled:opacity-50" disabled={busy || !!historical}
+    onClick={() => void send(() => client.withdrawPlanApproval!(plan.id, plan.rev))}>Withdraw</button>;
   const waitingRows = sheetRows.filter(r => r.required && r.state === "waiting");
   const waitingNames = waitingRows.map(r => r.name).join(" and ");
   const signersLeft = held && gate?.approval_held?.waiting_on.length ? gate.approval_held.waiting_on.map(firstName) : waitingRows.map(r => r.name);
