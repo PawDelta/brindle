@@ -50,15 +50,15 @@ def destination():
         db.conn.close()
 
 
-def _matching_id(view, owner, tail, body):
-    """Newest matching thread or reply. Older Libraries have no replay key."""
-    matches = []
+def _matching_ids(view, owner, tail, body):
+    """Matching Library thread or reply IDs, scoped to this author and anchor."""
+    matches = set()
     for thread in view.get("threads") or []:
         if not isinstance(thread, dict) or not isinstance(thread.get("id"), int):
             continue
         if "parent" in body:
             if thread.get("id") == body["parent"]:
-                matches.extend(r["id"] for r in thread.get("replies") or []
+                matches.update(r["id"] for r in thread.get("replies") or []
                                if isinstance(r, dict) and isinstance(r.get("id"), int)
                                and r.get("author") == owner and r.get("text") == body["text"])
             continue
@@ -71,11 +71,21 @@ def _matching_id(view, owner, tail, body):
             if (thread.get("kind") == "suggestion" and thread.get("after") == body["after"]
                     and all(anchor.get(k) == body[v] for k, v in
                             (("section", "section"), ("start", "start"), ("quote", "before")))):
-                matches.append(thread["id"])
+                matches.add(thread["id"])
         elif (thread.get("kind") == "comment" and thread.get("text") == body["text"]
               and all(anchor.get(k) == v for k, v in body["anchor"].items())):
-            matches.append(thread["id"])
-    return max(matches, default=-1)
+            matches.add(thread["id"])
+    return matches
+
+
+def _unclaimed_matches(conn, owner, doc, tail, body, view, prior_match):
+    candidates = {i for i in _matching_ids(view, owner, tail, body) if i > prior_match}
+    if candidates:
+        assigned = conn.execute(
+            "SELECT json_extract(payload,'$.thread_item') FROM plan_outbox WHERE owner=? AND doc=? "
+            "AND state='sent' AND json_extract(payload,'$.parent') IS ?", (owner, doc, body.get("parent")))
+        candidates.difference_update(r[0] for r in assigned)
+    return candidates
 
 
 def _read_for_delivery(db, owner, doc, load):
@@ -134,13 +144,20 @@ def deliver(db, owner, doc, send, load, *, item=None, read=False, legacy=False):
                 keyed = False
                 if tail in ("/comments", "/suggestions"):
                     feature = "comment_idempotency" if tail == "/comments" else "suggestion_idempotency"
-                    keyed = feature in features
-                    match = _matching_id(view, owner, tail, body)
+                    keyed = bool(row["keyed"]) if row["attempted"] else feature in features
                     if not row["attempted"]:
-                        prior_match = match
-                    else:
-                        already_saved = match > prior_match
+                        prior_match = max(_matching_ids(view, owner, tail, body), default=-1)
+                    elif not keyed:
+                        candidates = _unclaimed_matches(conn, owner, doc, tail, body, view, prior_match)
+                        if len(candidates) > 1:
+                            conn.execute("UPDATE plan_outbox SET state='unconfirmed' WHERE seq=?", (row["seq"],))
+                            continue
+                        already_saved = bool(candidates)
                     if keyed:
+                        if feature not in features:
+                            # A previously keyed POST cannot safely be repeated on an older server.
+                            conn.execute("UPDATE plan_outbox SET state='unconfirmed' WHERE seq=?", (row["seq"],))
+                            continue
                         body["idempotency_key"] = row["client_id"]
                 elif row["attempted"] and tail == "/sign-offs":
                     already_saved = any(isinstance(s, dict) and s.get("sub") == owner and s.get("rev") == body["rev"]
@@ -171,8 +188,12 @@ def deliver(db, owner, doc, send, load, *, item=None, read=False, legacy=False):
             else:
                 # Keep the receipt and its target. The delivered text belongs in the Library.
                 target = {k: body[k] for k in ("decision", "rev", "option", "parent") if k in body}
-                if tail in ("/comments", "/suggestions"):
-                    target["thread_item"] = _matching_id(view, owner, tail, body)
+                if tail in ("/comments", "/suggestions") and not (keyed and row["attempted"]):
+                    # A keyed replay acknowledges this client ID, but its response is a whole
+                    # design. An identical newer thread might have been written elsewhere.
+                    candidates = _unclaimed_matches(conn, owner, doc, tail, body, view, prior_match)
+                    if len(candidates) == 1:
+                        target["thread_item"] = candidates.pop()
                 if tail in ("/votes", "/sign-offs"):
                     conn.execute("UPDATE plan_outbox SET state='sent',sent_at=0,payload='{}' "
                                  "WHERE owner=? AND doc=? AND tail=? AND seq<? AND state='refused' "

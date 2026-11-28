@@ -76,13 +76,14 @@ def test_signoff_confirmed_from_history_after_plan_advances(app, lib):
     assert receipt["state"] == "sent" and receipt["body"]["rev"] == 1
 
 
-@pytest.mark.parametrize("supported", [False, True])
-@pytest.mark.parametrize("tail", [
-    "comments",
-    pytest.param("suggestions", marks=pytest.mark.variant(
-        "Suggestion keys have their own feature flag and legacy matching uses the revision and edit range.")),
+@pytest.mark.parametrize("tail,supported,view_only", [
+    ("comments", False, True), ("comments", True, True),
+    pytest.param("comments", True, False, marks=pytest.mark.variant(
+        "With write access a keyed replay must confirm the original client ID without creating another comment.")),
+    pytest.param("suggestions", False, True, marks=pytest.mark.variant("Legacy suggestions match the edit range and replacement.")),
+    pytest.param("suggestions", True, True, marks=pytest.mark.variant("Suggestions require their own capability for keyed replay.")),
 ])
-def test_lost_response_after_save(app, lib, supported, tail, db):
+def test_lost_response_after_save(app, lib, supported, tail, view_only, db):
     feature = "comment_idempotency" if tail == "comments" else "suggestion_idempotency"
     lib.calls.routes[f"GET {DESIGN}"] = lambda *_: (200, {**lib.view(), "features": [feature] if supported else []})
     route = f"POST {DESIGN}/{tail}"
@@ -124,11 +125,39 @@ def test_lost_response_after_save(app, lib, supported, tail, db):
     assert not details.get("refused_changes")
     assert details["unconfirmed_changes"] == [{"client_id": "lost-response", "tail": f"/{tail}", "rev": 1}]
     lib.calls.routes[f"GET {DESIGN}"] = read
-    lib.calls.routes[route] = lambda *_: (403, {"error": "forbidden"})
+    if view_only:
+        lib.calls.routes[route] = lambda *_: (403, {"error": "forbidden"})
+    else:
+        # The acknowledgement is for the key; the newest identical comment is from elsewhere.
+        save(mask_data(body), {})
     sent = app.get(ROUTE).json()
-    assert len(sent["threads"]) == 2
-    assert sent["outbox"][0]["state"] == "sent"
+    assert len(sent["threads"]) == (2 if view_only else 3)
+    assert sent["outbox"][0]["state"] == ("unconfirmed" if supported and view_only else "sent")
+    if not view_only:
+        assert "thread_item" not in sent["outbox"][0]["body"]
     assert keys == ({"lost-response"} if supported else {None})
+
+
+@pytest.mark.parametrize("keyed", [True, False])
+def test_identical_comment_with_another_client_id(app, lib, keyed):
+    lib.calls.routes[f"GET {DESIGN}"] = lambda *_: (200, {**lib.view(), "features": ["comment_idempotency"] if keyed else []})
+    route = f"POST {DESIGN}/comments"
+    save = lib.calls.routes[route]
+    lib.calls.routes[route] = [TransportError("offline", network="offline"), (403, {"error": "forbidden"})]
+    body = {"rev": 1, "anchor": SECTION, "text": "Same comment"}
+    assert app.post(f"{ROUTE}/comments", json={**body, "client_id": "first"}).is_success
+    assert app.get(ROUTE).json()["outbox"][0]["state"] == "unconfirmed"
+    lib.calls.routes[route] = save
+    assert app.post(f"{ROUTE}/comments", json={**body, "client_id": "second"}).is_success
+    view = app.get(ROUTE).json()
+    receipts = {item["client_id"]: item for item in view["outbox"]}
+    assert len(view["threads"]) == 1
+    assert receipts["second"]["body"]["thread_item"] == view["threads"][0]["id"]
+    assert receipts["first"]["state"] == "unconfirmed"
+    if keyed:
+        # Another device has no local receipt to exclude. Its words still cannot confirm this key.
+        save(body, {})
+        assert app.get(ROUTE).json()["outbox"][0]["state"] == "unconfirmed"
 
 
 def test_revoked_reader_gets_own_receipt_without_document(app, lib):
