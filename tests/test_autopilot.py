@@ -43,6 +43,8 @@ def with_goal(db, checks=("test -f api.txt", "test -f ui.txt")):
                        [(f"Milestone {i}", c, None) for i, c in enumerate(checks, start=1)])
 
 
+@pytest.mark.variant("only test asserting omitted milestones survive and drop removes them; "
+                     "handover and goals-file tests run these lines without checking them")
 def test_set_goal_keeps_omitted_milestones(db, root):
     kept = ("API", "api-check", "Implement the API", "developer", None, "Backend")
     unchanged = ("UI", "ui-check", None)
@@ -59,15 +61,10 @@ def test_set_goal_keeps_omitted_milestones(db, root):
     assert (api.title, api.check_cmd, api.detail, api.profile, api.repo, api.phase_name) == kept
     assert (api.output, api.passed_sha) == ("passed", "head")
 
-
-def test_set_goal_drops_named_milestones(db, root):
-    with_goal(db)
-
-    dropped = autopilot.set_goal(db, "boss", "Settings page", [],
-                                 drop=["Missing", "Milestone 1", "Milestone 1"])
-
-    assert dropped == ["Milestone 1"]
-    assert [m.title for m in db.milestones("boss")] == ["Milestone 2"]
+    dropped = autopilot.set_goal(db, "boss", "Updated settings page", [("Docs", "new-docs-check", None)],
+                                 drop=["Missing", "UI", "UI"])
+    assert dropped == ["UI"]
+    assert [m.title for m in db.milestones("boss")] == ["Docs", "API"]
 
 
 def test_legacy_off_session_still_drives_and_cannot_be_disabled(db, root, monkeypatch):
