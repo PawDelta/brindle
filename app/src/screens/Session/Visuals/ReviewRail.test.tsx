@@ -44,6 +44,18 @@ it("gives a reviewer the sign-off action in their rail", async () => {
   await waitFor(() => expect(rail.getByTestId("signoff-alice").dataset.state).toBe("signed"));
 });
 
+it("withdraws approval and keeps the current revision waiting for its signer", async () => {
+  const heldGate = { ...gate!, can_hold_approval: true, approval_held: { rev: visual.rev, waiting_on: ["alice"] } };
+  read({ gate: heldGate });
+  const rail = within(await screen.findByTestId("review-rail"));
+  const approve = rail.getByTestId("plan-build");
+  await waitFor(() => expect(approve.dataset.state).toBe("pressed"));
+  fireEvent.click(rail.getByRole("button", { name: "Withdraw" }));
+  await waitFor(() => expect(approve.dataset.state).toBe("ready"));
+  expect(approve.dataset.gate).toBe("waiting");
+  expect(rail.queryByRole("button", { name: "Withdraw" })).toBeNull();
+});
+
 it("keeps the approval label when the verdict is in flight", async () => {
   let finish!: () => void;
   read({ gate: { state: "ready", required: 0, signed: 0, reviewers: [], waiting_on: [] } }, false, new Promise<void>(resolve => { finish = resolve; }));

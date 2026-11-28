@@ -327,6 +327,7 @@ it("design doc reader", async () => {
   expect(screen.queryByTestId("thread-draft")).toBeNull();
   expect(screen.getByTestId("thread-2").getAttribute("data-kind")).toBe("comment");
   expect(doc.querySelectorAll('[data-thread="2"]').length).toBe(2);
+  expect(doc.querySelector('[data-thread="2"]')?.closest("p")?.nextElementSibling?.contains(screen.getByTestId("thread-2"))).toBe(true);
 
   // A suggestion shows its before and after, on its card and in the text; accepted, the text
   // is the new revision's and the card moves under Resolved.

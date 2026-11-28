@@ -47,7 +47,7 @@ import { Diagram } from "./DocDiagram";
 import { FormatBar, FormatProvider, textareaTarget, useFormatTarget } from "./DocFormat";
 import { DocumentHistory, DocHistoryComparison, type HistoryEvent, type WorkItem } from "./DocHistory";
 import { DocMarkdown } from "./DocMarkdown";
-import { DraftCard, Review, ReviewStrip, SignOffSheet, isSupervisorReplying, type Draft, type ReviewTab, type SignOffRow, type ThreadActions, type TodoItem } from "./DocReview";
+import { DraftCard, Review, ReviewStrip, SignOffSheet, Thread, isSupervisorReplying, type Draft, type ReviewTab, type SignOffRow, type ThreadActions, type TodoItem } from "./DocReview";
 import { SharePanel } from "./SharePanel";
 import { Policies } from "./DocPolicies";
 import type { LiveClient } from "./DocEditor";
@@ -65,7 +65,7 @@ import { EarlierRefusals, PendingNote, PlanDeliveryProvider, QueueCount, ShowPla
 import { StoreContext } from "../../../store/useStore";
 import { PlanDraftScope, readPlanDraft, savePlanDraft, usePlanDraft, usePlanDraftScope } from "./planDrafts";
 
-type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach" | "cancelPlan" | "stopAlongside">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient> & { withdrawPlanApproval?(planId: string, rev: number): Promise<Plan> };
+type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach" | "cancelPlan" | "stopAlongside" | "withdrawPlanApproval">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient>;
 
 /* How far along a plan is: its revision, then decided or not. Revisions only grow and a decided
    revision never reopens, so a response with less progress than the one on screen is stale. */
@@ -1074,11 +1074,11 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             {here ? (live ? "You are writing here · live" : "You are editing") : !diagram && editControl(s.id, s.title)}
           </span>
         </h3>
-        {diagram ? (
+        {freeFormNotes(s.id, diagram ? (
           <Diagram section={s} figure={figures.get(s.id) ?? 1}>
             {commentButton(() => comment({ kind: "diagram", section: s.id }, `Figure ${figures.get(s.id)}`))}
           </Diagram>
-        ) : textBody(s.id, s.title)}
+        ) : textBody(s.id, s.title))}
       </section>
     );
   };
@@ -1388,7 +1388,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             share={!historical && shareMenu} />
         )}
         {!chrome && presence && <div className="hidden">{presence}</div>}
-        {teammate && top}
+        {(teammate || plan.state === "approved") && top}
         <div ref={setStripHost} className="contents" />
         {typing && !historical && <FormatBar />}
         <div ref={railWidth.setHost} className={`flex min-h-0 flex-1 bg-canvas ${railWidth.folded ? "flex-col" : ""}`} data-testid="plan-design-doc">
@@ -1518,6 +1518,20 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const earlierRefusals = <EarlierRefusals rev={plan.rev} signOffVersion={reviewVersion ?? plan.rev} />;
   if (designDoc) return <ShowPlanChanges.Provider value={() => setHistoryOpen(true)}>{earlierRefusals}{planningDoc()}</ShowPlanChanges.Provider>;
 
+  const visibleSections = new Set(plan.sections.map(s => s.id));
+  if (textPlan.lede) visibleSections.add(LEDE);
+  const anchored = raw || historical ? [] : openThreads.filter(t => t.anchor.section && visibleSections.has(t.anchor.section) && t.anchor.state !== "detached");
+  const inlineThreads = new Set(anchored.map(t => t.id));
+  function freeFormNotes(sectionId: string, children: ReactNode) {
+    const notes = anchored.filter(t => t.anchor.section === sectionId).map(t => ({
+      key: String(t.id), anchor: t.anchor.kind === "text" ? `[data-thread="${t.id}"]` : null,
+      node: <Thread thread={t} where={where(t)} busy={busy} can={open} actions={actions} onShow={() => showThread(t)}
+        limits={teammate ? { reply: canComment, resolve: thread => canComment && thread.author === "person" } : undefined}
+        active={followed?.thread === String(t.id)} judge={teammate ? authorName : undefined} supervisorReplying={isSupervisorReplying(t, plan)} />,
+    }));
+    return <Annotated notes={notes}>{children}</Annotated>;
+  }
+
   return (
     <ShowPlanChanges.Provider value={() => { collapse(false); setTab("history"); }}>
       {earlierRefusals}
@@ -1562,7 +1576,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             {textPlan.lede && (
               <div id="plan-lede" className="grid gap-2.5">
                 {mode === "editing" && editing?.section !== LEDE && <span className={`${aside} justify-self-end`}>{editControl(LEDE, "the overview")}</span>}
-                {textBody(LEDE, "the overview")}
+                {freeFormNotes(LEDE, textBody(LEDE, "the overview"))}
               </div>
             )}
             {plan.sections.map(section)}
@@ -1586,7 +1600,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             </>}
           </article>}
         {!sharingOpen && (columnOpen ? (
-          <Review plan={plan} tab={draft ? "comments" : tab} onTab={setTab} todo={todo} decided={decided} onJump={jump} where={where} draft={railDraft ? null : draft} draftStale={draftStale} busy={busy}
+          <Review plan={plan} inlineThreads={inlineThreads} tab={draft ? "comments" : tab} onTab={setTab} todo={todo} decided={decided} onJump={jump} where={where} draft={railDraft ? null : draft} draftStale={draftStale} busy={busy}
             draftText={drafting?.text ?? ""} onDraftText={setDraftReason}
             onDraftSend={(text) => void sendDraft(text)} onDraftCancel={() => setDrafting(null)} draftChange={draftChange}
             actions={actions} limits={teammate ? { reply: canComment, resolve: (t) => canComment && t.author === "person" } : undefined} onShow={showThread} shared={sharedFiles} onCollapse={() => { setDrafting(null); collapse(true); }}

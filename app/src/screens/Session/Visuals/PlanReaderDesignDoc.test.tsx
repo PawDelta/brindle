@@ -393,12 +393,11 @@ it("draws a mermaid section as an svg, and shows its source when it can't be dra
   expect(document.querySelector('[id*="doc-mermaid"]')).toBeNull();
 });
 
-it("shows no worker split to the person once the plan is approved", async () => {
+it("shows the author's live board once the planning doc is approved", async () => {
   const plan = spine({ state: "approved", verdict: { approved: true, at: 2, rev: 1, picks: { store: "a", loud: "a", reach: "b" } } });
   const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...writes(plan), plan: async () => plan, decidePlan: async () => plan };
   render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
   expect((await screen.findByTestId("plan-next")).dataset.state).toBe("approved");
-  expect(screen.queryByRole("region", { name: "Plan board" })).toBeNull();
-  expect(screen.queryByTestId("task-outbox")).toBeNull();
+  expect(within(screen.getByRole("region", { name: "Plan board" })).getByTestId("task-outbox")).toBeTruthy();
   expect(screen.queryByTestId("plan-board-progress")).toBeNull();
 });

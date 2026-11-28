@@ -2437,6 +2437,10 @@ export class DaemonClient {
     return this.postInbox<Plan>(`/plans/${encodeURIComponent(id)}/decide`, verdict);
   }
 
+  withdrawPlanApproval(planId: string, rev: number) {
+    return this.postInbox<Plan>(`/plans/${encodeURIComponent(planId)}/approval/withdraw`, { rev });
+  }
+
   /* Cancel an open or redirected plan without approving it (brindle/plans.py cancel): a 409 once decided. */
   cancelPlan(id: string, rev: number) {
     return this.postInbox<Plan>(`/plans/${encodeURIComponent(id)}/cancel`, { rev });

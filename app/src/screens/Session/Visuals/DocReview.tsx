@@ -105,7 +105,7 @@ export function SupervisorReplying() {
   );
 }
 
-function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, judge, supervisorReplying }: {
+export function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, judge, supervisorReplying }: {
   thread: PlanThreadDTO;
   where: string;
   busy: boolean;
@@ -238,7 +238,7 @@ export function DraftCard({ draft, number, stale, busy, text, onText, onSend, on
 
 const TABS: [ReviewTab, string][] = [["comments", "Comments"], ["decisions", "Decisions"], ["history", "History"], ["tasks", "Tasks"]];
 
-export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, draftStale, busy, draftText, onDraftText, onDraftSend, onDraftCancel, draftChange, actions, limits, onShow, shared, onCollapse, active, judge, history, historyRev, onHistoryPick, historyPanel, workItems, work, canLink }: {
+export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, draftStale, busy, draftText, onDraftText, onDraftSend, onDraftCancel, draftChange, actions, limits, onShow, shared, onCollapse, active, judge, history, historyRev, onHistoryPick, historyPanel, workItems, work, canLink, inlineThreads }: {
   plan: Plan;
   /* The design's items in the tracker, with what can be done to them (WorkPanel); replaces `workItems`. */
   work?: Work;
@@ -276,6 +276,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
   historyRev?: number | null;
   onHistoryPick?(rev: number): void;
   workItems?: WorkItem[] | null;
+  inlineThreads: ReadonlySet<number>;
 }) {
   const threads = plan.threads ?? [];
   const pendingNotes = usePendingNotes();
@@ -324,7 +325,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
     body = (
       <>
         {draft && <DraftCard key={`${draft.kind}:${draft.where}`} draft={draft} number={nextNumber} stale={draftStale} busy={busy} text={draftText} onText={onDraftText} onSend={onDraftSend} onCancel={onDraftCancel} change={draftChange} />}
-        {open.map(thread)}
+        {open.filter(t => !inlineThreads.has(t.id)).map(thread)}
         {pendingNotes.map(item => <PendingNote key={item.client_id} item={item} />)}
         {open.length === 0 && !pendingNotes.length && !draft && <p className="px-3.5 py-3 text-ink-3">No open comments. Highlight any text in the plan to comment on it.</p>}
         {answered.length > 0 && (
