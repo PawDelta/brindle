@@ -539,10 +539,11 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
 const offlineVerdict = (landed: boolean, design = false) => {
   let plan = doc(1, "Workers run on your machine.", design ? { sections: [{ id: "context", title: "Context", markdown: "Workers run on your machine." }] } : {});
   const sent: { rev: number; approved: boolean; note: string }[] = [];
-  const held: (() => void)[] = [];
+  const held: ((ok: boolean) => void)[] = [];
   const reads = { hold: false };
   const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...docWrites(() => plan),
-    plan: () => reads.hold ? new Promise<Plan>((resolve) => held.push(() => resolve(plan))) : Promise.resolve(plan),
+    plan: () => reads.hold ? new Promise<Plan>((resolve, reject) => held.push((ok) => ok ? resolve(plan)
+      : reject(new DaemonError("library_offline", "Couldn't reach brindle Pro.", 503)))) : Promise.resolve(plan),
     decidePlan: async (_id, verdict) => {
       sent.push({ rev: verdict.rev, approved: verdict.approved, note: verdict.note ?? "" });
       if (sent.length === 1) {
@@ -567,9 +568,17 @@ it("an approval the network stopped keeps the draft, and Try again sends it thro
   expect(box().value).toBe("Keep the queue.");     // the failed verdict keeps what was drafted
   // It may have landed: nothing is offered until the plan has been read back.
   expect(within(note).queryByRole("button")).toBeNull();
+  // The read back fails too: Try again only reads the plan again, and sends nothing.
+  await act(async () => { for (const settle of held.splice(0)) settle(false); });
+  await act(async () => fireEvent.click(within(screen.getByTestId("library-network")).getByRole("button", { name: "Try again" })));
+  expect(sent).toHaveLength(1);
+  expect(held).toHaveLength(1);
+  expect(within(screen.getByTestId("library-network")).queryByRole("button")).toBeNull();
+  // Once a read succeeds, Try again goes through Approve as it is now.
   reads.hold = false;
-  await act(async () => { for (const release of held.splice(0)) release(); });
-  await act(async () => fireEvent.click(within(note).getByRole("button", { name: "Try again" })));
+  await act(async () => { for (const settle of held.splice(0)) settle(true); });
+  expect(sent).toHaveLength(1);
+  await act(async () => fireEvent.click(within(screen.getByTestId("library-network")).getByRole("button", { name: "Try again" })));
   expect(sent).toEqual([{ rev: 1, approved: true, note: "Keep the queue." }, { rev: 1, approved: true, note: "Keep the queue." }]);
   expect(screen.queryByTestId("library-network")).toBeNull();
   expect(box().value).toBe("");                    // it went with the verdict

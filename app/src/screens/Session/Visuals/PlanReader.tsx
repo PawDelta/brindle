@@ -91,9 +91,12 @@ function refusal(e: unknown): string {
    `end` hands back the engine's reply (the plan as it is now), or null when the write failed. */
 export interface Writes {
   begin(): boolean;
-  /* `readBack`: told whether the read that follows this write succeeded (the doc on screen is the
-     Library's as of after the write) or failed. */
+  /* `readBack`: told each time a read that follows this write settles: false for a failed one (it
+     stays waiting), then true once one succeeds (the doc on screen is the Library's as of after
+     the write), after which it is told nothing more. */
   end(plan: Plan | null, readBack?: (ok: boolean) => void): void;
+  /* Read the doc again now (a read-back that failed, tried again). */
+  readAgain?(): void;
 }
 
 export type Mode = "viewing" | "suggesting" | "editing";
@@ -209,12 +212,14 @@ export function useDoc<P extends Plan>(source: DocSource<P>, version: unknown, f
       readBacks.current.push(...(readBack ? [readBack] : []));
       setAgain((n) => n + 1);
     },
+    readAgain: () => setAgain((n) => n + 1),
   }), [place]);
-  // Told when the read after a write settles: the latest read, which began after that write ended.
+  // Told when a read after a write settles (the latest read, begun after that write ended). A
+  // failed one leaves them waiting for the next read that succeeds.
   const readBacks = useRef<((ok: boolean) => void)[]>([]);
   const settle = (ok: boolean) => {
     const waiting = readBacks.current;
-    readBacks.current = [];
+    if (ok) readBacks.current = [];
     for (const tell of waiting) tell(ok);
   };
   useEffect(() => {
@@ -662,7 +667,6 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     failedControl.current = null;
     setAgainName(null);
     setReadBack(null);
-    setReadBack(null);
     try {
       const now = await work();
       writes.end(now);
@@ -698,7 +702,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     {error && net && <LibraryNetworkNote state={net} className={`m-0 flex ${span} items-center gap-2 text-xs text-ink-2`}
       hint="It couldn't be confirmed, so it may or may not have gone through. What you wrote is kept: check the plan before sending it again."
       buttonClassName={`${quiet} px-2 text-xs`}
-      onTryAgain={againControl && !busy ? () => goAgain(againControl) : undefined} />}
+      onTryAgain={busy ? undefined
+        // The plan couldn't be read back yet: Try again reads it, and sends nothing.
+        : readBack === false && writes.readAgain ? () => { setReadBack(null); writes.readAgain!(); }
+        : againControl ? () => goAgain(againControl) : undefined} />}
   </>;
   // Own answers on a decision card (brindle/plan_answers.py). Adding one picks it and removing one
   // drops its pick, so the engine's `confirmed` speaks for the card from then on.
