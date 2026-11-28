@@ -63,6 +63,14 @@ function library() {
 const rows = () => [...screen.getByTestId("library-list").querySelectorAll("li[data-doc]")].map((li) => li.getAttribute("data-doc"));
 const row = (id: string) => screen.getByTestId("library-list").querySelector<HTMLElement>(`li[data-doc="${id}"]`)!;
 
+it("keeps the results footer in flow after the Library list", async () => {
+  render(<DocsView client={library()} queue={queue} repos={repos} />);
+  const list = await screen.findByTestId("library-list");
+  const footer = await screen.findByTestId("results-line");
+  expect(list.compareDocumentPosition(footer)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  expect(footer.matches(".sticky, .absolute, .fixed")).toBe(false);
+});
+
 it("lists designs with Needs you pinned and the rest by folder, and Board shows the same Library by stage, keeping the search and folder", async () => {
   // Only Date is faked (timers keep running for waitFor); LIBRARY_TEST_NOW lets the date be varied by hand.
   vi.useFakeTimers({ toFake: ["Date"], now: new Date(process.env.LIBRARY_TEST_NOW ?? "2026-11-18T00:00:30Z") });

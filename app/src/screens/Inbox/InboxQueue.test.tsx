@@ -9,7 +9,10 @@ import { REPO, permission, question, root, worker } from "../../test/fixtures";
 import { InboxScreen } from "./InboxScreen";
 import { resetTriage } from "./queue";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 beforeEach(() => resetTriage());
 
 const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: 0, goal: "Ship ls --json" };
@@ -49,6 +52,36 @@ const opened = async (kind: string) => {
 const posts = (daemon: FakeDaemon, path: string) => daemon.requests.filter((r) => r.method === "POST" && r.path === path);
 
 describe("the Inbox queue", () => {
+  it("gives the title its own line before the action in a narrow queue", async () => {
+    let resize: ((width: number) => void) | undefined;
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(private callback: ResizeObserverCallback) {}
+
+      observe(target: Element) {
+        resize = (width) => this.callback(
+          [{ target, contentRect: { width } } as ResizeObserverEntry],
+          this as unknown as ResizeObserver,
+        );
+      }
+
+      disconnect() {}
+    });
+    mount([comment(11, "u_chen", "c:11")]);
+    const item = await screen.findByTestId("inbox-row");
+
+    act(() => resize?.(408));
+
+    expect(item.dataset.layout).toBe("stacked");
+    const summary = within(item).getByTestId("row-summary");
+    const title = summary.querySelector('[data-field="title"]')!;
+    const action = within(summary).getByTestId("row-go");
+    expect(title.compareDocumentPosition(action)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+
+    act(() => resize?.(1088));
+
+    expect(item.dataset.layout).toBe("inline");
+  });
+
   it.each(["grant", "decline"])("resolves a reader's requested access from the author Inbox: %s", async (action) => {
     let resolution: string | null = null;
     mount([{ kind: "access_requested", reason: "Asked to edit", doc: "ad_1", detail: "Plan",
