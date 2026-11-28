@@ -51,6 +51,7 @@ def test_a_person_edit_survives_the_supervisors_next_revision(db, session):
     after = plans.get(db, pid)
     now = {s["id"]: s["markdown"] for s in after["sections"]}
     assert after["rev"] == 6 and after["lede"] == got["lede"] and after["lede"].startswith("    ")
+    assert after["markdown"].startswith("    # Org presets")      # the stored copy the library gets too
     assert (now[split["id"]], now["context"], now["risks"]) == (EDIT, "", CODE)
 
 

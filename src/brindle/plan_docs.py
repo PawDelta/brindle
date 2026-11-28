@@ -131,14 +131,15 @@ def from_markdown(markdown: str) -> tuple[str, list[dict]]:
 
 
 def render(lede: str, sections: list[dict]) -> str:
-    """A revision as one markdown text (the library's copy, and the plans row)."""
-    out = [lede] if lede else []
+    """A revision as one markdown text (the library's copy, and the plans row).
+    A lede's leading indentation stays: the person may have made it a code block."""
+    out = [lede.lstrip("\n")] if lede and lede.strip() else []
     for s in sections:
         body = s["markdown"] if s["kind"] == "markdown" else f"```{s['kind']}\n{s['markdown']}\n```"
         if s.get("caption"):
             body += f"\n\n*{s['caption']}*"
         out.append(f"## {s['title']}\n\n{body}".rstrip())
-    return "\n\n".join(out).strip()
+    return "\n\n".join(out).rstrip()
 
 
 def _svg(body: str, where: str) -> None:
