@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import contextvars
+import fcntl
 import ipaddress
 import json
 import logging
@@ -39,7 +40,7 @@ import tempfile
 import threading
 import time
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -114,6 +115,23 @@ def _private_dir(d: Path) -> None:
     os.chmod(d, 0o700)
 
 
+@contextmanager
+def _lifecycle_lock() -> Iterator[None]:
+    """Serialize daemon startup and cleanup across processes."""
+    home = brindle_home()
+    _private_dir(home)
+    fd = os.open(home / "daemon.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
 def bind_unix(path: Path) -> socket.socket:
     _private_dir(path.parent)
     path.unlink(missing_ok=True)    # a dead daemon's; a live one is refused before this
@@ -152,27 +170,27 @@ def prepare(token: str, *, unix: bool = True, tcp: bool = False,
     daemon already runs."""
     if not (unix or tcp):
         raise DaemonError("nothing to listen on: drop --no-socket or add --tcp")
-    if (other := running()):
-        raise DaemonError(f"a brindle daemon is already running (pid {other['pid']})")
-    _private_dir(brindle_home())
-    _pausing_path().unlink(missing_ok=True)     # a daemon killed while it paused said so last
-    socks: list[socket.socket] = []
-    info: dict = {"socket": None, "port": None, "token": token,
-                  "version": brindle.__version__, "pid": os.getpid()}
-    try:
-        if unix:
-            path = sock_path or socket_path()
-            socks.append(bind_unix(path))
-            info["socket"] = str(path)
-        if tcp:
-            socks.append(bind_tcp())
-            info["port"] = socks[-1].getsockname()[1]
-        _write_private(info_path(), json.dumps(info, indent=2) + "\n")
-    except BaseException:
-        for s in socks:
-            s.close()
-        raise
-    return socks, info
+    with _lifecycle_lock():
+        if (other := running()):
+            raise DaemonError(f"a brindle daemon is already running (pid {other['pid']})")
+        _pausing_path().unlink(missing_ok=True)     # a daemon killed while it paused said so last
+        socks: list[socket.socket] = []
+        info: dict = {"socket": None, "port": None, "token": token,
+                      "version": brindle.__version__, "pid": os.getpid()}
+        try:
+            if unix:
+                path = sock_path or socket_path()
+                socks.append(bind_unix(path))
+                info["socket"] = str(path)
+            if tcp:
+                socks.append(bind_tcp())
+                info["port"] = socks[-1].getsockname()[1]
+            _write_private(info_path(), json.dumps(info, indent=2) + "\n")
+        except BaseException:
+            for s in socks:
+                s.close()
+            raise
+        return socks, info
 
 
 def connection(info: dict | None) -> dict:
@@ -194,11 +212,12 @@ def connection(info: dict | None) -> dict:
 
 def cleanup(info: dict) -> None:
     """Remove this daemon's files, unless another daemon has replaced them."""
-    current = read_info()
-    if current and current.get("pid") == info["pid"]:
-        info_path().unlink(missing_ok=True)
-    if info.get("socket") and (current is None or current.get("pid") == info["pid"]):
-        Path(info["socket"]).unlink(missing_ok=True)
+    with _lifecycle_lock():
+        current = read_info()
+        if current and current.get("pid") == info["pid"]:
+            info_path().unlink(missing_ok=True)
+        if info.get("socket") and (current is None or current.get("pid") == info["pid"]):
+            Path(info["socket"]).unlink(missing_ok=True)
 
 
 class Activity:
