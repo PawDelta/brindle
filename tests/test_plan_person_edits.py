@@ -55,6 +55,7 @@ def test_a_person_edit_survives_the_supervisors_next_revision(db, session):
     assert (now[split["id"]], now["context"], now["risks"]) == (EDIT, "", CODE)
 
 
+@pytest.mark.variant("a revision published between read and propose must not become the base")
 def test_a_revision_published_meanwhile_never_becomes_the_base(db, session, monkeypatch):
     """A proposal that found the person's r2 has not read it, even if another
     proposal (one that did read r2) lands r3 before it works out its base."""

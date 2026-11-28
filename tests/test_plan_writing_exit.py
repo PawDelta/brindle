@@ -11,7 +11,7 @@ from test_plans import AUTH, TOKEN, messages, session, work  # noqa: F401 - sess
 
 
 @pytest.mark.parametrize("person", [
-    pytest.param(True, id="app-cancel"),
+    pytest.param(True, id="app-cancel", marks=pytest.mark.variant("the person cancels a writing draft from the app")),
     pytest.param(False, id="supervisor-withdraw", marks=pytest.mark.variant(
         "the supervisor can close an empty draft through its own MCP tool")),
 ])
