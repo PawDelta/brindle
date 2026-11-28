@@ -158,9 +158,16 @@ def stop(call: Call) -> dict:
 # -- a plan on this machine --------------------------------------------------------------
 
 
+DOCUMENT_READS = ("", "/design")       # the reads of the plan's document itself, not of something under it
+
+
 def _plan_call(db: DB, p: dict, doc_id: str, client, store) -> Call:
     def call(method: str, tail: str, body: dict | None = None) -> dict:
-        return review_policies.ask(db, p, method, ad._doc_path(doc_id, tail), body, client=client, store=store)
+        # Only a refusal to read the document is about access to it: a 404 on
+        # a write under it (a person already removed) is about that one thing.
+        document = method == "GET" and tail in DOCUMENT_READS
+        return review_policies.ask(db, p, method, ad._doc_path(doc_id, tail), body, document=document,
+                                   design=document and tail == "/design", client=client, store=store)
     return call
 
 
@@ -190,25 +197,28 @@ def plan_reads(db: DB, p: dict, doc_id: str, client, store, *, metadata_optional
         directory = pool.submit(copy_context().run, sd.member_names, doc_id, client=client, store=store)
         if metadata_optional:
             # Sync depends on the design. Metadata is only needed for the access summary.
-            view = review_policies.checked(db, p, design.result())
+            view = review_policies.checked(db, p, design.result(), document=True, design=True)
             try:
                 result = meta.result()
             except (RuntimeError, auth.AuthError, credentials.CredentialError):
                 result = None
-            checked = review_policies.checked(db, p, result) if result is not None and result[0] == 200 else None
+            checked = (review_policies.checked(db, p, result, document=True)
+                       if result is not None and result[0] == 200 else None)
             return checked, view, directory.result()
-        result = review_policies.checked(db, p, meta.result())
-        view = review_policies.checked(db, p, design.result())
+        result = review_policies.checked(db, p, meta.result(), document=True)
+        view = review_policies.checked(db, p, design.result(), document=True, design=True)
         return result, view, directory.result()
 
 
 def plan_write(db: DB, plan_id: str, work: Callable[[Call], dict | None], *, first: bool = False,
-               notify: bool = True, client=None, store=None) -> dict | None:
+               revoking: bool = False, notify: bool = True, client=None, store=None) -> dict | None:
     """Run one write on the plan's Library doc and keep the review state it
     answered with. ``first``: the write may be its first share, which
-    uploads the plan. Queued invites publish once their queue entry is settled."""
+    uploads the plan. ``revoking`` allows access removal after review closes.
+    Queued invites publish once their queue entry is settled."""
     p = plan_docs._plan(db, plan_id)
-    sd._review_open(p)
+    if not revoking:
+        sd._review_open(p)
     client, store = ad._session(client, store)
     doc_id = (sd.ensure_doc(db, p, None, None, client=client, store=store) if first
               else sd._shared(db, p["id"], store)["doc_id"])

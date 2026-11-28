@@ -195,7 +195,9 @@ def change(db: DB, plan_id: str, sub: str, field: str, value: Any, *, store=None
     """A change to a person whose invite is still out (``field`` access or
     sign_off), sent after it; None when nothing is out for them (the route
     writes it now)."""
+    from brindle import plan_docs
     from brindle.pro import share_access as sa
+    from brindle.pro import shared_docs as sd
 
     if field == "access":
         value = sa._access(value)
@@ -209,6 +211,7 @@ def change(db: DB, plan_id: str, sub: str, field: str, value: Any, *, store=None
         if old is None:
             return None             # it landed meanwhile: the route writes it now
         _theirs(old, who)
+        sd._review_open(plan_docs._plan(db, plan_id))
         if old["op"] == "remove":
             raise ServiceError("conflict", "they're being removed from this plan", 409)
         new = {**old, field: int(value) if field == "sign_off" else value}
@@ -406,7 +409,8 @@ def _send(db: DB, row: dict, client, store) -> None:
         if share is None or share["doc_id"] is None:
             return                  # never shared: nobody to remove
         try:
-            sa.plan_write(db, plan_id, lambda call: sa.revoke(call, sub), notify=False, client=client, store=store)
+            sa.plan_write(db, plan_id, lambda call: sa.revoke(call, sub),
+                          revoking=True, notify=False, client=client, store=store)
         except ad.Refused as e:
             if e.status != 404:     # never had it: removed already
                 raise
@@ -417,11 +421,15 @@ def _send(db: DB, row: dict, client, store) -> None:
 
 def _outcome(e: BaseException) -> tuple[bool, str]:
     """Whether ``e`` is worth sending again later (no answer, the Library or
-    the sign-in busy) rather than a refusal, and why, as the person reads it."""
+    the sign-in busy, another create of the plan still out) rather than a
+    refusal, and why, as the person reads it. A refusal made here (no ##
+    section, no Team plan, shared from another account, not signed in) or a
+    Library or firewall 4xx can never land by itself, so it fails at once."""
     from brindle import keystore, redact
     from brindle.daemon import routes_actions as actions
     from brindle.pro import analysis_docs as ad
     from brindle.pro import auth
+    from brindle.pro import shared_docs as sd
 
     cause: BaseException | None = e
     while cause is not None:
@@ -432,13 +440,10 @@ def _outcome(e: BaseException) -> tuple[bool, str]:
         err, again = e, e.http_status in (429, 502, 503, 504)
     elif isinstance(e, (RuntimeError, auth.AuthError, keystore.KeychainReadBlocked)):
         err = actions.upstream_error(e)
-        if err.code == "busy" or isinstance(e, auth.TransportError):
-            again = True
-        elif isinstance(e, ad.Refused):
-            again = e.status >= 500 or e.status in (401, 408, 429) or (e.status == 403 and not e.code)
+        if err.code == "busy" or isinstance(e, (auth.TransportError, sd.CreateInFlight)):
+            again = True                # no answer, busy, or a create that may yet land (MOST_TRIES bounds it)
         else:
-            # No answer to a create, or a claim still out: unknown, so asked again (MOST_TRIES bounds it).
-            again = not isinstance(e, auth.AuthError)
+            again = isinstance(e, ad.Refused) and (e.status >= 500 or e.status in (408, 429))
     else:
         err, again = actions.upstream_error(e), False
     return again, redact.mask(err.message)

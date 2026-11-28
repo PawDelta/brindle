@@ -14,6 +14,8 @@ from difflib import SequenceMatcher
 import re
 from typing import Literal
 
+from brindle import textdiff
+
 
 @dataclass(frozen=True)
 class Hunk:
@@ -98,19 +100,19 @@ def _split(base: str, text: str) -> tuple[int, int]:
 
 def _hunks(base: str, text: str) -> list[Hunk]:
     # Trim equal edges at every split, keeping offsets in the original base.
-    start = 0
-    limit = min(len(base), len(text))
-    while start < limit and base[start] == text[start]:
-        start += 1
-    end, other_end = len(base), len(text)
-    while end > start and other_end > start and base[end - 1] == text[other_end - 1]:
-        end -= 1
-        other_end -= 1
-    before, after = base[start:end], text[start:other_end]
-    if not before and not after:
+    if base == text:
         return []
+    start, suffix = textdiff.common_edges(base, text)
+    end, other_end = len(base) - suffix, len(text) - suffix
+    before, after = base[start:end], text[start:other_end]
     if not before or not after or set(before).isdisjoint(after):
         return [Hunk(start, end, after)]
+    # Myers depends on edit distance, which can be large even for a very
+    # uneven pair. Only run it when both sides are small.
+    longest = max(len(before), len(after))
+    if not textdiff.fits(longest, longest):
+        return [Hunk(start + a, start + b, after[x:y])
+                for tag, a, b, x, y in textdiff.opcodes(before, after) if tag != "equal"]
     a, b = _split(before, after)
     if (a, b) in ((0, 0), (len(before), len(after))):
         return [Hunk(start, end, after)]
@@ -135,7 +137,7 @@ def _touches(a: Hunk, b: Hunk) -> bool:
     return a.start < b.end and b.start < a.end
 
 
-def _changes(base: str, text: str) -> list[Hunk]:
+def _align(before: list[str], after: list[str]) -> list[tuple[str, str]]:
     """Align paragraphs, then diff contiguous split/join regions together.
 
     Similar replacements cost less than removing and reinserting a paragraph.
@@ -143,16 +145,13 @@ def _changes(base: str, text: str) -> list[Hunk]:
     of moving a long matching block. Unmatched paragraphs that improve an
     adjacent pair's content alignment belong to that pair's split/join region.
     """
-    pattern = r".+?(?:\r?\n[ \t]*\r?\n|\Z)"
-    before = re.findall(pattern, base, re.DOTALL)
-    after = re.findall(pattern, text, re.DOTALL)
     previous = list(range(len(after) + 1))
     directions = []
     for i, a in enumerate(before, 1):
         current = [i]
         row = bytearray(len(after))
         for j, b in enumerate(after, 1):
-            cost = 2 * (1 - SequenceMatcher(None, a, b, autojunk=False).ratio())
+            cost = 0 if a == b else 2 * (1 - SequenceMatcher(None, a, b, autojunk=False).ratio())
             options = (previous[j - 1] + cost, previous[j] + 1, current[j - 1] + 1)
             direction = min(range(3), key=options.__getitem__)
             current.append(options[direction])
@@ -202,11 +201,36 @@ def _changes(base: str, text: str) -> list[Hunk]:
             i = max(0, left - 1)
         else:
             i += 1
+    return pairs
+
+
+def _changes(base: str, text: str) -> list[Hunk]:
+    if base == text:
+        return []
+    pattern = r".+?(?:\r?\n[ \t]*\r?\n|\Z)"
+    before = re.findall(pattern, base, re.DOTALL)
+    after = re.findall(pattern, text, re.DOTALL)
+    if textdiff.fits(len(base), len(text)):
+        blocks = [("replace", 0, len(before), 0, len(after))]
+    elif len(before) == len(after):
+        # Matching the longest block can shift repeated paragraphs away
+        # from edits at both ends. Keep same-position paragraphs anchored.
+        blocks = textdiff.positional_opcodes(before, after)
+    else:
+        blocks = textdiff.sequence_opcodes(before, after)
     edits = []
     offset = 0
-    for a, b in pairs:
-        edits.extend(Hunk(h.start + offset, h.end + offset, h.text) for h in _hunks(a, b))
-        offset += len(a)
+    for tag, a, b, x, y in blocks:
+        left, right = before[a:b], after[x:y]
+        size = sum(map(len, left))
+        if tag != "equal":
+            pairs = (_align(left, right) if textdiff.fits(size, sum(map(len, right)))
+                     else [("".join(left), "".join(right))])
+            for old, new in pairs:
+                edits.extend(Hunk(h.start + offset, h.end + offset, h.text) for h in _hunks(old, new))
+                offset += len(old)
+        else:
+            offset += size
     return edits
 
 
