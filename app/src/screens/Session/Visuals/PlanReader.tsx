@@ -661,13 +661,14 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // a pick on its way there.
   const valid = (d: PlanDecisionDTO, option: string | null | undefined) => (option && (d.options.some((o) => o.id === option) || d.answers?.some((a) => a.id === option)) ? option : undefined);
   const drafted = (d: PlanDecisionDTO) => valid(d, picks[d.id]) ?? valid(d, d.confirmed);
-  const publicPick = (d: PlanDecisionDTO) => {
+  const authorPick = (d: PlanDecisionDTO) => {
+    // The Library's confirmed field follows the signed-in reader, even in a read-only view.
     const author = teammate?.author;
     const option = author && Object.keys(d.votes ?? {}).find((id) => d.votes?.[id]?.includes(author));
-    return valid(d, d.confirmed) ?? valid(d, option);
+    return valid(d, option);
   };
   const chosen = (d: PlanDecisionDTO) => open
-    ? (canPick ? drafted(d) : publicPick(d)) ?? null
+    ? (canPick ? drafted(d) : authorPick(d)) ?? null
     : plan.verdict?.picks?.[d.id] ?? d.confirmed ?? d.mine ?? null;
   const settled = (d: PlanDecisionDTO) => !open || !!chosen(d);
   const next = canPick ? plan.decisions.find((d) => !settled(d)) : undefined;
@@ -1381,7 +1382,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         <div ref={setStripHost} className="contents" />
         {typing && !historical && <FormatBar />}
         <div className="flex min-h-0 flex-1 bg-canvas" data-testid="plan-design-doc">
-          <Outline parts={parts} placed={placed} isOpen={waiting} decided={decided} total={ordered.length} scrollPane={doc} footer={signOffs || undefined} />
+          <Outline parts={parts} placed={placed} isOpen={waiting} canPick={canPick} decided={decided} total={ordered.length} scrollPane={doc} footer={signOffs || undefined} />
           <div ref={doc} className="relative min-h-0 min-w-0 flex-1 overflow-auto border-l border-line max-[900px]:border-l-0" data-testid="plan-doc" data-mode={historical ? "viewing" : mode}
             onMouseUp={historical ? undefined : pick} onKeyUp={historical ? undefined : pick} onClick={historical ? undefined : followAnchor}>
             {historical ? <DocHistoryComparison key={historical.comparison.revision.rev} comparison={historical.comparison} onClose={historical.close} /> : (
@@ -1550,9 +1551,9 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             )}
             {plan.sections.map(section)}
             {plan.decisions.map((d, i) => {
-              const mine = settled(d) ? (open ? "confirmed" : null) : !canPick ? "not decided yet" : d === next ? "yours to take next" : null;
+              const mine = settled(d) ? (open ? "confirmed" : null) : !canPick ? `Not decided yet · ${approver ?? "the author"} picks` : d === next ? "yours to take next" : null;
               return (
-                <section key={d.id} id={`plan-decision-${d.id}`} aria-labelledby={`plan-title-decision-${d.id}`} data-next={d === next || undefined} data-state={open && !settled(d) ? "undecided" : undefined} className={`grid gap-2.5 border-t pt-4 ${open && !settled(d) ? "border-pass" : "border-line"}`}>
+                <section key={d.id} id={`plan-decision-${d.id}`} aria-labelledby={`plan-title-decision-${d.id}`} data-next={d === next || undefined} data-state={open && !settled(d) ? "undecided" : undefined} className={`grid gap-2.5 border-t pt-4 ${canPick && !settled(d) ? "border-pass" : "border-line"}`}>
                   <h3 className={heading}>
                     <span aria-hidden className={margin}>{plan.sections.length + i + 1}</span>
                     <span id={`plan-title-decision-${d.id}`}>{`Decision · ${d.title}`}</span>

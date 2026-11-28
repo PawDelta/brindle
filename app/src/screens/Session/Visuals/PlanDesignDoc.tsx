@@ -143,8 +143,8 @@ export function ModeMenu({ modes, current, allowed, onPick }: { modes: typeof MO
 
 /* "On this page": the numbered sections, each decision under its section with a dot while it
    waits for the person's pick and a tick once picked. */
-export function Outline({ parts, placed, isOpen, decided, total, scrollPane, footer }: {
-  parts: SpinePart[]; placed: Map<string, PlanDecisionDTO[]>; isOpen(d: PlanDecisionDTO): boolean; decided: number; total: number; scrollPane: RefObject<HTMLDivElement | null>;
+export function Outline({ parts, placed, isOpen, canPick, decided, total, scrollPane, footer }: {
+  parts: SpinePart[]; placed: Map<string, PlanDecisionDTO[]>; isOpen(d: PlanDecisionDTO): boolean; canPick: boolean; decided: number; total: number; scrollPane: RefObject<HTMLDivElement | null>;
   /* Under the sections: a shared doc's sign-off sheet. */
   footer?: ReactNode;
 }) {
@@ -168,15 +168,19 @@ export function Outline({ parts, placed, isOpen, decided, total, scrollPane, foo
     e.preventDefault();
     show(document.getElementById(id));
   };
-  const decisionRow = (d: PlanDecisionDTO) => (
-    <a key={d.id} href={`#plan-decision-${d.id}`} onClick={go(`plan-decision-${d.id}`)} data-testid="outline-decision" data-decision={d.id} data-state={isOpen(d) ? "open" : "decided"}
-      className={`${row} pl-[26px] ${isOpen(d) ? "text-ink" : "text-ink-3"}`}>
-      <span aria-hidden className="w-2.5 flex-none text-center font-mono text-[10px] leading-none text-pass">
-        {isOpen(d) ? <span className="inline-block size-1.5 -translate-y-px rounded-full bg-sap" /> : "✓"}
-      </span>
-      {d.title}
-    </a>
-  );
+  const decisionRow = (d: PlanDecisionDTO) => {
+    const open = isOpen(d);
+    return (
+      <a key={d.id} href={`#plan-decision-${d.id}`} onClick={go(`plan-decision-${d.id}`)} data-testid="outline-decision" data-decision={d.id} data-state={open ? "open" : "decided"}
+        className={`${row} pl-[26px] ${open ? "text-ink" : "text-ink-3"}`}>
+        <span aria-hidden className="w-2.5 flex-none text-center font-mono text-[10px] leading-none text-pass">
+          {open ? <span data-testid="outline-decision-marker" data-state={canPick ? "needs-your-pick" : "waiting-on-author"}
+            className={`inline-block size-1.5 -translate-y-px rounded-full ${canPick ? "bg-sap" : "border border-ink-3"}`} /> : "✓"}
+        </span>
+        {d.title}
+      </a>
+    );
+  };
   return (
     <nav aria-label="On this page" data-testid="plan-outline" className="w-[224px] shrink-0 overflow-auto pb-6 pl-3.5 pr-2.5 pt-[30px] font-sans max-[900px]:hidden">
       <div className="flex justify-between gap-2 px-2 pb-1.5 text-[10.5px] font-semibold uppercase leading-[1.4] tracking-[0.08em] text-ink-3">
@@ -352,15 +356,19 @@ export function DecisionCard({ decision: d, n, of, open, canPick, disabled = fal
   onComment?: () => void;
 }) {
   const waiting = open && !picked;
+  const needsPick = waiting && canPick;
   const done = !!picked;
   const whoPicked = picksLine(d, nameOf);
   return (
     <section id={`plan-decision-${d.id}`} role="radiogroup" aria-labelledby={`plan-q-${d.id}`} data-testid="plan-decision" data-decision={d.id} data-state={waiting ? "open" : "decided"}
-      className={`relative min-w-0 [overflow-wrap:anywhere] mb-1.5 mt-[26px] scroll-mt-16 rounded-md border border-l-2 font-sans transition-colors duration-200 ${waiting ? "border-[color-mix(in_srgb,var(--sap)_42%,transparent)] border-l-sap bg-[color-mix(in_srgb,var(--sap)_5%,transparent)]" : "border-line border-l-line-strong"}`}>
+      className={`relative min-w-0 [overflow-wrap:anywhere] mb-1.5 mt-[26px] scroll-mt-16 rounded-md border border-l-2 font-sans transition-colors duration-200 ${needsPick ? "border-[color-mix(in_srgb,var(--sap)_42%,transparent)] border-l-sap bg-[color-mix(in_srgb,var(--sap)_5%,transparent)]" : "border-line border-l-line-strong"}`}>
       <div className="flex flex-wrap items-center justify-between gap-3 px-4 pt-3">
         <p className="m-0 text-[11px] font-medium uppercase leading-[1.3] tracking-[0.08em] text-ink-3">{`Decision ${n} of ${of}`}</p>
-        {waiting ? <span className={`${pill} text-sap`}>{canPick ? "Needs your pick" : "Not decided yet"}</span>
-          : done ? <Tick>Decided{canPick && <span className="font-normal text-ink-3" data-testid="plan-decision-approval" data-approver={approver ?? "you"}>· change it any time before {approver ? `${approver} approves` : "you approve"}</span>}</Tick> : null}
+        {needsPick ? <span className={`${pill} text-sap`}>Needs your pick</span>
+          : waiting ? <span className="text-xs text-ink-3" data-testid="plan-decision-status" data-state="waiting-on-author">Not decided yet · {approver ?? "the author"} picks</span>
+          : done ? <Tick>Decided{canPick
+            ? <span className="font-normal text-ink-3" data-testid="plan-decision-approval" data-approver={approver ?? "you"}>· change it any time before {approver ? `${approver} approves` : "you approve"}</span>
+            : open && approver && <span className="font-normal text-ink-3" data-testid="plan-decision-status" data-state="author-chose">· {approver} chose</span>}</Tick> : null}
       </div>
       <h3 id={`plan-q-${d.id}`} className="m-0 mt-1 px-4 text-base font-semibold leading-[1.35] tracking-[-0.01em] text-ink">{d.title}</h3>
       {/* Who picked what, saved as each pick is made: everyone on a shared plan sees the same. */}

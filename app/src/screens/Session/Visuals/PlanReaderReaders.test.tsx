@@ -41,12 +41,23 @@ it.each(["view access", "share link"])("shows an open decision without selecting
   let decision = await screen.findByTestId("plan-decision");
   expect(decision.dataset.state).toBe("open");
   expect(screen.getByTestId("outline-count").dataset.decided).toBe("0");
+  expect(within(decision).getByTestId("plan-recommended")).toBeTruthy();
   expect(radios(decision)).toEqual([[false, true], [false, true]]);
 
   first.unmount();
-  open({ ...doc, decisions: doc.decisions.map((d) => ({ ...d, votes: { b: [doc.author] } })) });
+  const teammateVote = open({ ...doc, decisions: doc.decisions.map((d) => ({ ...d, confirmed: "a", votes: { a: ["person"] } })) });
+  decision = await screen.findByTestId("plan-decision");
+  expect(decision.dataset.state).toBe("open");
+  expect(radios(decision)).toEqual([[false, true], [false, true]]);
+  expect(within(decision).getByTestId("plan-decision-status").dataset.state).toBe("waiting-on-author");
+  expect(screen.getByTestId("outline-decision-marker").dataset.state).toBe("waiting-on-author");
+  expect(within(decision).getAllByTestId("plan-option")[0].querySelector("[data-votes]")).toBeTruthy();
+
+  teammateVote.unmount();
+  open({ ...doc, decisions: doc.decisions.map((d) => ({ ...d, confirmed: "a", votes: { a: ["person"], b: [doc.author] } })) });
   decision = await screen.findByTestId("plan-decision");
   expect(decision.dataset.state).toBe("decided");
+  expect(within(decision).getByTestId("plan-decision-status").dataset.state).toBe("author-chose");
   expect(radios(decision)).toEqual([[false, true], [true, true]]);
 });
 
