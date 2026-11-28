@@ -409,9 +409,14 @@ def decide_plan(db: DB, params: dict, body: dict) -> Any:
 
     p = plans.decide(db, params["id"], body.get("rev"), _get(body, "approved", bool, required=True),
                      body.get("picks"), body.get("comments"), _get(body, "note"), person=True,
-                     attachments=_get(body, "attachments", list), version=body.get("version"),
-                     withdraw=_get(body, "withdraw", bool) or False)
+                     attachments=_get(body, "attachments", list), version=body.get("version"))
     return plans.to_dto(db, p)
+
+
+def withdraw_plan_approval(db: DB, params: dict, body: dict) -> Any:
+    from brindle import plans
+
+    return plans.to_dto(db, plans.withdraw_approval(db, params["id"]))
 
 
 def cancel_plan(db: DB, params: dict, body: dict) -> Any:
@@ -1288,6 +1293,7 @@ ROUTES = [
     Route("/v1/visuals/{id}/snapshot", _endpoint(snapshot), methods=["POST"]),
     Route("/v1/plans/{id}", plan),
     Route("/v1/plans/{id}/decide", _endpoint(decide_plan), methods=["POST"]),
+    Route("/v1/plans/{id}/approval/withdraw", _endpoint(withdraw_plan_approval), methods=["POST"]),
     Route("/v1/plans/{id}/cancel", _endpoint(cancel_plan), methods=["POST"]),
     Route("/v1/plans/{id}/alongside/{task}/stop", _endpoint(stop_alongside), methods=["POST"]),
     Route("/v1/plans/{id}/revisions/{n}", plan_revision),

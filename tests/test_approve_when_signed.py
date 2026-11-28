@@ -34,7 +34,7 @@ def test_approve_when_signed(db, session, outage, event):
         elif event == "revise":
             plan_docs.edit(db, line.pid, 1, "s1", 0, "", "New text")
         elif event == "withdraw":
-            response = app.post(path + "/decide", json={"approved": False, "withdraw": True, "rev": 1})
+            response = app.post(path + "/approval/withdraw", json={})
             assert response.status_code == 200
             line.view["sign_offs"] = _signed_off("Maya")
         else:

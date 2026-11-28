@@ -978,9 +978,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (now) savePlanDraft(draftScope, "verdict", null);
     if (alive.current) setSending(null);
   };
-  const approveOrWithdraw = () => approvalHeld && client
-    ? send(() => client.decidePlan(plan.id, { rev: plan.rev, approved: false, withdraw: true, picks: {}, comments: [], note: "" }))
-    : decide(true);
+  const approveOrWithdraw = () => {
+    if (!approvalHeld) return decide(true);
+    if (client?.withdrawPlanApproval) return send(() => client.withdrawPlanApproval!(plan.id));
+  };
   /* The plan becomes a personal doc, then the person's sign-off starts the build. */
   /* Built only when the personal doc it becomes reads as the text on screen (the live draft's, or a
      frozen version's). If it doesn't, nothing is built: the personal revision is shown, said so, for

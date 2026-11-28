@@ -529,7 +529,6 @@ export type SharedDesign = Omit<SharedDesignDTO, "outbox"> & { outbox?: PlanDeli
 
 /* The person's verdict on the plan revision on screen: approve, or redirect with what to change. */
 export interface PlanVerdict {
-  withdraw?: boolean;
   rev: number;
   /* The frozen live version being built, when this is a live doc. */
   version?: number;
@@ -2436,6 +2435,10 @@ export class DaemonClient {
   /* Approve or redirect the revision on screen; a newer revision, or a second verdict, is a 409. */
   decidePlan(id: string, verdict: PlanVerdict) {
     return this.postInbox<Plan>(`/plans/${encodeURIComponent(id)}/decide`, verdict);
+  }
+
+  withdrawPlanApproval(planId: string) {
+    return this.postInbox<Plan>(`/plans/${encodeURIComponent(planId)}/approval/withdraw`, {});
   }
 
   /* Cancel an open or redirected plan without approving it (brindle/plans.py cancel): a 409 once decided. */

@@ -1312,9 +1312,26 @@ def _is_version(c, plan_id: str, rev: int, version: int) -> bool | None:
     return None if share is None else share["remote_rev"] == version and share["local_rev"] == rev
 
 
+def withdraw_approval(db: DB, plan_id: str) -> dict:
+    from brindle import plan_docs
+
+    visuals.require_enabled()
+    p = get(db, plan_id)
+    visuals._unlocked(p["root_id"])
+    with db.tx() as c:
+        if not c.execute("SELECT 1 FROM plans WHERE id=? AND state='open' AND rev=?",
+                         (plan_id, p["rev"])).fetchone():
+            raise ServiceError("stale", "Read the current plan before withdrawing approval.", 409)
+        c.execute("UPDATE plan_shares SET approve_wanted=NULL WHERE plan_id=? AND"
+                  " json_extract(approve_wanted,'$.rev')=? AND json_extract(approve_wanted,'$.signoffs')=1",
+                  (plan_id, p["rev"]))
+    plan_docs._changed(db, p, p["rev"])
+    return get(db, plan_id)
+
+
 def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, comments: Any = None,
            note: Any = None, *, person: bool, attachments: Any = None, confirmed: bool = False,
-           version: Any = None, expected_hold: str | None = None, withdraw: bool = False) -> dict:
+           version: Any = None, expected_hold: str | None = None) -> dict:
     """The person's verdict on the revision on their screen (``rev``):
     approve, or redirect with their picks and per-section comments. Only the
     person (the app, through the daemon's guarded route) decides: anyone
@@ -1360,13 +1377,6 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
         raise ServiceError("writing", "the supervisor is still writing this plan", 409)
     if p["state"] != "open":
         raise ServiceError("decided", "this revision is already decided", 409)
-    if withdraw:
-        with db.tx() as c:
-            c.execute("UPDATE plan_shares SET approve_wanted=NULL WHERE plan_id=? AND"
-                      " json_extract(approve_wanted,'$.rev')=? AND json_extract(approve_wanted,'$.signoffs')=1",
-                      (plan_id, rev))
-        plan_docs._changed(db, p, rev)
-        return get(db, plan_id)
     if approved and version is None:
         doc_templates.require(db, p["id"], doc_templates.SIGN_OFF, plan_docs.current(db, p)["sections"])
     unconfirmed, was_ready = None, False

@@ -16581,6 +16581,10 @@
     },
     {
       "method": "POST",
+      "path": "/v1/plans/{id}/approval/withdraw"
+    },
+    {
+      "method": "POST",
       "path": "/v1/plans/{id}/cancel"
     },
     {
