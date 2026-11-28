@@ -122,3 +122,32 @@ def test_imported_objection_withdraws_even_if_outbound_write_fails(db, parts, mo
     library.sign_offs.append({"rev": 1, "sub": "u_a", "at": 8.0})
     shared_docs.sync(db, pid, **net)
     assert plans.get(db, pid)["state"] == "open"
+
+
+@pytest.mark.parametrize("stage", ["_import", "_carried"])
+def test_replaced_share_cannot_receive_old_draft_carry_over(db, parts, monkeypatch, stage):
+    from brindle.plan_drafts import DraftReplica
+
+    pid, library, net = parts
+    shared_docs.share(db, pid, TEAM, **net)
+    plan_docs.edit(db, pid, 1, "summary", 0, "", "Unpublished. ")
+    original = plans.get(db, pid)
+    library.open_draft()
+    DraftReplica.open(db, "replacement", library.draft.export_snapshot())
+    operation = getattr(shared_docs, stage)
+
+    def replace_after(*args):
+        result = operation(*args)
+        db.conn.execute("UPDATE plan_shares SET doc_id='replacement', remote_rev=9 WHERE plan_id=?", (pid,))
+        return result
+
+    monkeypatch.setattr(shared_docs, stage, replace_after)
+    try:
+        shared_docs.sync(db, pid, **net)
+    except ServiceError as error:
+        assert error.code == "stale"
+    current, share = plans.get(db, pid), shared_docs.link(db, pid)
+    assert (current["rev"], current["markdown"]) == (original["rev"], original["markdown"])
+    assert (share["doc_id"], share["remote_rev"], share["local_rev"]) == ("replacement", 9, 1)
+    if stage == "_import":
+        assert not db.conn.execute("SELECT 1 FROM plan_drafts WHERE doc_id<> 'replacement'").fetchone()
