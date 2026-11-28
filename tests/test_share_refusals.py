@@ -35,7 +35,13 @@ def _entry_read_404(db, pid, backend, app):
     return "not_found"
 
 
-@pytest.mark.parametrize("arrive", [_removed_someone_gone, _kept_by_an_older_client, _entry_read_404])
+@pytest.mark.parametrize("arrive", [
+    pytest.param(_removed_someone_gone,
+                 marks=pytest.mark.variant("Removing an absent person must leave the plan's access refusal unset")),
+    pytest.param(_kept_by_an_older_client,
+                 marks=pytest.mark.variant("A refusal persisted by an older client must keep the stop-sharing gate closed")),
+    _entry_read_404,
+])
 def test_a_404_not_on_the_design_never_opens_stop_sharing(panel, backend, db, monkeypatch, arrive):
     pid, library, app = panel
     monkeypatch.setattr(sd, "account", lambda store=None: library.author)    # the owner asks to stop
@@ -63,7 +69,11 @@ def _other_org(db, pid, backend, library):
                   (pid, library.author, "o_elsewhere", DOC))
 
 
-@pytest.mark.parametrize("refuse", [_firewall, _other_org])
+@pytest.mark.parametrize("refuse", [
+    pytest.param(_firewall,
+                 marks=pytest.mark.variant("A background invite must fail immediately on an uncoded HTTP 403")),
+    _other_org,
+])
 def test_an_invite_that_can_never_land_fails_on_its_first_try(panel, backend, db, refuse):
     pid, library, app = panel
     refuse(db, pid, backend, library)

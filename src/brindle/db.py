@@ -1182,6 +1182,13 @@ CREATE TABLE IF NOT EXISTS visual_grants (
     explicit INTEGER NOT NULL,
     scope TEXT NOT NULL DEFAULT 'visual'
 );
+CREATE TABLE IF NOT EXISTS visual_scoped_grants (
+    root_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    remaining INTEGER NOT NULL,
+    explicit INTEGER NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'visual',
+    PRIMARY KEY (root_id, scope)
+);
 CREATE TABLE IF NOT EXISTS visual_input_state (
     root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
     generation INTEGER NOT NULL,
@@ -2019,6 +2026,22 @@ def migration_incompatibility() -> str | None:
 _set_up: dict[str, int] = {}
 
 
+def adopt_visual_grants(c: sqlite3.Connection, root: str | None = None) -> None:
+    """Move legacy grants into the scoped table, in the caller's write transaction."""
+    # Keep the legacy table available to installed helpers that use the same database.
+    where, params = ("WHERE root_id=?", (root,)) if root is not None else ("", ())
+    rows = c.execute(f"DELETE FROM visual_grants {where} RETURNING root_id, remaining, explicit, scope", params)
+    for row in rows.fetchall():
+        if row["remaining"] <= 0:
+            continue
+        source = f"grant:{row['scope']}"
+        c.execute("UPDATE visual_person_words SET source=NULL WHERE root_id=? AND source=?", (row["root_id"], source))
+        c.execute("INSERT INTO visual_scoped_grants (root_id, remaining, explicit, scope) VALUES (?,?,?,?) "
+                  "ON CONFLICT(root_id, scope) DO UPDATE SET remaining=excluded.remaining, explicit=excluded.explicit",
+                  tuple(row))
+        c.execute("UPDATE visual_person_words SET source=? WHERE root_id=? AND source='grant'", (source, row["root_id"]))
+
+
 class DB:
     def __init__(self, path: str | None = None) -> None:
         p = str(path) if path is not None else str(db_path())
@@ -2091,11 +2114,7 @@ class DB:
             self.conn.execute("UPDATE visual_input_state SET observer=generation")
         if "invalidated_at" not in input_cols:
             self.conn.execute("ALTER TABLE visual_input_state ADD COLUMN invalidated_at REAL NOT NULL DEFAULT 0")
-        grant_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visual_grants)")}
-        if "scope" not in grant_cols:
-            self.conn.execute("ALTER TABLE visual_grants ADD COLUMN scope TEXT NOT NULL DEFAULT 'visual'")
-            # Earlier grants did not distinguish conditional requests or artifact scope.
-            self.conn.execute("UPDATE visual_grants SET remaining=0")
+        self._migrate_visual_grants()
         visual_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visuals)")}
         if "choices" not in visual_cols:
             self.conn.execute("ALTER TABLE visuals ADD COLUMN choices TEXT")
@@ -2295,6 +2314,19 @@ class DB:
                                   "text, heading_path, chunk_id UNINDEXED)")
         except sqlite3.OperationalError:
             pass
+
+    def _migrate_visual_grants(self) -> None:
+        def has_scope() -> bool:
+            return any(row["name"] == "scope" for row in self.conn.execute("PRAGMA table_info(visual_grants)"))
+
+        if has_scope() and self.conn.execute("SELECT 1 FROM visual_grants LIMIT 1").fetchone() is None:
+            return
+        with self.tx() as c:
+            if not has_scope():
+                # Grants from before scopes were tracked are revoked.
+                c.execute("ALTER TABLE visual_grants ADD COLUMN scope TEXT NOT NULL DEFAULT 'visual'")
+                c.execute("DELETE FROM visual_grants")
+            adopt_visual_grants(c)
 
     def _has_schema_object(self, name: str) -> bool:
         """Whether table or index ``name`` exists, asked by a read: a CREATE ... IF NOT

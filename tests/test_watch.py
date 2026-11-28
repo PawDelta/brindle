@@ -113,6 +113,7 @@ def _sidebar(db, paths, monkeypatch):
     return refresh, started
 
 
+@pytest.mark.slow("checks index, ignore, and upstream state with real Git across four sessions")
 def test_an_idle_sidebar_starts_no_git_until_something_changes(db, four_sessions, monkeypatch):
     """Forty idle minutes of refreshes (eight safety looks) of four quiet
     sessions, counted from just after the sidebar's first look, start no

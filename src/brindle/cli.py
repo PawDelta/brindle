@@ -3345,6 +3345,36 @@ def _helper_db() -> DB:
     return DB()
 
 
+@app.command("_prefetch-intent", hidden=True)
+def prefetch_intent_cmd(root: str, turn: int, kinds: str) -> None:
+    import logging
+    from concurrent.futures import wait
+
+    from brindle import intent, redact
+
+    db = _helper_db()
+    handler = None
+    try:
+        try:
+            handler = logging.FileHandler(Path(db.path).with_name("hooks.log"), encoding="utf-8")
+        except OSError as exc:
+            intent.log.warning("could not open the hook log: %s", type(exc).__name__)
+        if handler is not None:
+            handler.setFormatter(redact.MaskingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+            intent.log.addHandler(handler)
+        try:
+            answers = intent.prefetch_turn(db, root, turn, kinds.split(","))
+        finally:
+            db.conn.close()
+        # Slot owners record their deadline failures themselves. Keep the helper alive until
+        # those writes and warnings finish, even if an unresponsive model thread is still running.
+        wait(answers)
+    finally:
+        if handler is not None:
+            intent.log.removeHandler(handler)
+            handler.close()
+
+
 @app.command("_after-launch", hidden=True)
 def after_launch_cmd(agent_id: str, token: Optional[str] = typer.Option(None)) -> None:
     from brindle.providers import get_provider
