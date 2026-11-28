@@ -71,16 +71,39 @@ function Change({ before, after }: { before: string; after: string }) {
   );
 }
 
-function Who({ who, supervisor = false }: { who: string; supervisor?: boolean }) {
+function Who({ who, supervisor = false, children }: { who: string; supervisor?: boolean; children?: ReactNode }) {
   return (
     <div className="flex min-w-0 items-center gap-1.5">
       <Avatar who={supervisor ? "supervisor" : who} />
-      <b title={personName(who)} className="min-w-0 truncate font-medium text-ink">{supervisor ? (who === "person" ? "Your supervisor" : `${personName(who)}’s supervisor`) : personName(who)}</b>
+      <b title={personName(who)} className="min-w-0 truncate font-medium text-ink">{supervisor ? (who === "person" ? "Your supervisor" : `${personName(who)}’s supervisor`) : personName(who)}{children}</b>
     </div>
   );
 }
 
-function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, judge }: {
+export function isSupervisorReplying(t: PlanThreadDTO, plan: Pick<Plan, "state" | "rev" | "verdict">): boolean {
+  if (t.status !== "open" || (plan.state !== "open" && plan.state !== "redirected")) return false;
+  const reply = t.replies?.at(-1);
+  // Only the question itself is routed immediately. A reply to it stays in the doc.
+  if (t.question) return t.author === "person" && !reply;
+  const latest = reply ?? t;
+  return plan.state === "redirected" && plan.verdict?.rev === plan.rev
+    && latest.author === "person" && !reply?.from_supervisor && latest.sent === true;
+}
+
+export function SupervisorReplying() {
+  return (
+    <div className={onLine} role="status" data-state="supervisor-replying">
+      <Who who="person" supervisor><span className="font-normal text-ink-3"> is replying</span></Who>
+      <span aria-hidden="true" className="flex shrink-0 gap-0.5">
+        <span className="size-1 rounded-full bg-current motion-safe:animate-pulse" />
+        <span className="size-1 rounded-full bg-current motion-safe:animate-pulse [animation-delay:150ms]" />
+        <span className="size-1 rounded-full bg-current motion-safe:animate-pulse [animation-delay:300ms]" />
+      </span>
+    </div>
+  );
+}
+
+function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, judge, supervisorReplying }: {
   thread: PlanThreadDTO;
   where: string;
   busy: boolean;
@@ -93,6 +116,7 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
   active?: boolean;
   /* Who accepts or rejects a suggestion, said where this person can't. */
   judge?: string;
+  supervisorReplying: boolean;
 }) {
   const [replying, setReplying] = useState(false);
   const [text, setText] = useState("");
@@ -126,9 +150,9 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
       {t.attachments?.map((name) => (
         <span key={name} title={name} className="max-w-full justify-self-start truncate rounded-sm border border-line px-1.5 py-px font-mono text-[11px] text-ink-2">{name}</span>
       ))}
-      {!!t.replies?.length && (
+      {(!!t.replies?.length || supervisorReplying) && (
         <div className="ml-[9px] grid gap-1.5 border-l border-line-strong pl-2.5">
-          {t.replies.map((r) => (
+          {t.replies?.map((r) => (
             <div key={r.id} className="grid gap-1.5" data-from-supervisor={r.from_supervisor || undefined}>
               <div className="flex items-center gap-1.5">
                 <Who who={r.from_supervisor ? (t.author_name ?? t.author) : (r.author_name ?? (r.author.startsWith("teammate:") ? "A teammate" : r.author))} supervisor={r.from_supervisor} />
@@ -137,6 +161,7 @@ function Thread({ thread: t, where, busy, can, limits, actions, onShow, active, 
               <span className="whitespace-pre-wrap break-words">{r.text}</span>
             </div>
           ))}
+          {supervisorReplying && <SupervisorReplying />}
         </div>
       )}
       {replying && (
@@ -250,7 +275,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
   const answered = threads.filter((t) => t.status !== "open");
   const counts: Record<ReviewTab, string | null> = { comments: String(open.length), decisions: todo.length ? `${decided}/${todo.length}` : null, history: null, tasks: null };
   const nextNumber = Math.max(0, ...threads.map((t) => t.id)) + 1;
-  const thread = (t: PlanThreadDTO) => <Thread key={t.id} thread={t} where={where(t)} busy={busy} can={plan.state === "open"} limits={limits} actions={actions} onShow={() => onShow(t)} active={active === t.id} judge={judge} />;
+  const thread = (t: PlanThreadDTO) => <Thread key={t.id} thread={t} where={where(t)} busy={busy} can={plan.state === "open"} limits={limits} actions={actions} onShow={() => onShow(t)} active={active === t.id} judge={judge} supervisorReplying={isSupervisorReplying(t, plan)} />;
   let body: ReactNode;
   if (tab === "tasks") {
     body = (
@@ -348,7 +373,7 @@ export function SignOffSheet({ version, rows, since, onShowChanges }: {
         <span className={`${label} text-[11px]`}>{`Sign-offs on ${version}`}</span>
         {rows.length === 0 && <span className="text-ink-3">Nobody is asked to sign it yet.</span>}
         {rows.map((r) => (
-          <span key={r.key} className="flex items-center gap-2 text-ink-2" data-testid={`signoff-${r.key}`} data-state={r.state}>
+          <span key={r.key} className="flex items-center gap-2 text-ink-2" data-testid={`signoff-${r.key}`} data-state={r.state} data-sign-off={r.required ? "required" : "optional"}>
             <Avatar who={r.who} ring={r.state === "signed" ? "done" : r.state === "waiting" && r.required ? "wait" : r.required ? undefined : "dim"} />
             <span className="min-w-0 truncate"><b className="font-medium text-ink">{r.name}</b>{` · ${r.required ? "required" : "optional"}`}</span>
             <span className="flex-1" />

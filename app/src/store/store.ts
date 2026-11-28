@@ -18,6 +18,8 @@ export interface AppState {
   connection: StreamState | "idle";
   /* Changes monotonically even when a reconnect returns to the same state. */
   connectionGeneration: number;
+  /* The connection that last reported an unreplayable gap. */
+  eventLossGeneration: number | null;
   /* Invalidates pending reads that could restore a closed or rewound agent. */
   lifecycleVersion: number;
   /* Shared identity, refreshed by the sidebar and Account page. */
@@ -74,6 +76,7 @@ export type Action =
 export const initialState: AppState = {
   connection: "idle",
   connectionGeneration: 0,
+  eventLossGeneration: null,
   lifecycleVersion: 0,
   account: null,
   lastEventId: 0,
@@ -188,7 +191,7 @@ function applyMessage(state: AppState, m: StreamMessage): AppState {
         m,
       );
     case "resnapshot":
-      return { ...state, stale: true };
+      return { ...state, stale: true, eventLossGeneration: m.reason === "events_lost" ? state.connectionGeneration : state.eventLossGeneration };
     case "liveness": {
       const liveness = state.liveness + 1;
       const said = Object.fromEntries(Object.keys(m.agents).map((id) => [id, liveness]));

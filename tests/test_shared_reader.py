@@ -54,13 +54,16 @@ def test_shared_history_compares_library_revisions_without_a_local_plan(db, lib,
     new = copy.deepcopy(CONTENT)
     new["sections"][0]["markdown"] = "Revised passage."
     lib.calls.routes.update({
-        f"GET {DESIGN}": lambda f, h: (200, {**lib.view(), "rev": 2, "revisions": revisions}),
+        f"GET {DESIGN}": lambda f, h: (200, {**lib.view(), "rev": 2, "revisions": revisions,
+                                            "sign_offs": [None, {"rev": 1}, {"rev": 2, "sub": "user_1", "at": 3}]}),
         f"GET {DESIGN}/revisions/1": lambda f, h: (200, {**old, **revisions[0]}),
         f"GET {DESIGN}/revisions/2": lambda f, h: (200, {**new, **revisions[1]}),
     })
     before = db.conn.execute("SELECT COUNT(*) FROM plans").fetchone()[0]
     events = app.get(f"{ROUTE}/history").json()["events"]
-    assert [event["rev"] for event in events] == [2, 1]
+    assert [(event["kind"], event["rev"]) for event in events] == [
+        ("sign_off", 2), ("revision", 2), ("revision", 1),
+    ]
     comparison = app.get(f"{ROUTE}/revisions/2/changes").json()
     assert comparison["revision"]["rev"] == 2 and comparison["previous"]["rev"] == 1
     assert comparison["changes"][0]["spans"]
@@ -107,6 +110,25 @@ def test_teammate_reads_writes_as_themselves_and_nothing_is_kept(db, lib, app):
     assert not [k for k, _, _ in lib.calls.calls if k.startswith((f"POST {DESIGN}/edits", f"POST {DESIGN}/revisions"))]
 
 
+def test_commenter_can_sign_off_when_the_library_allows_it(lib, app):
+    lib.reviewers = [{"sub": "u_other", "required": True}]
+    lib.permissions["user_1"]["can_suggest"] = False
+    lib.sign_offs = [{"sub": "u_guest", "rev": 1, "at": 1.0, "optional": True}]
+    route = f"GET {DESIGN}"
+    assert app.get(ROUTE).json()["can_sign_off"] is False
+
+    lib.calls.routes[route] = lambda f, h: (200, {**lib.view(), "can_sign_off": True, "sign_off": "optional"})
+    read = app.get(ROUTE).json()
+    assert read["can_sign_off"] is True
+    assert read["sign_off"] == "optional"
+    assert read["sign_offs"] == lib.sign_offs
+    assert read["gate"]["waiting_on"] == ["u_other"]
+
+    lib.reviewers.append({"sub": "user_1", "required": True})
+    lib.calls.routes[route] = lambda f, h: (200, {**lib.view(), "can_sign_off": False, "sign_off": "required"})
+    assert app.get(ROUTE).json()["can_sign_off"] is False
+
+
 def test_a_teammates_frozen_version_carries_the_librarys_sign_offs_and_their_own_once_signed(db, lib):
     """A teammate keeps no plan here, so the live channel reads a frozen
     version's sign-offs from the Library itself; once they sign off, their
@@ -116,7 +138,7 @@ def test_a_teammates_frozen_version_carries_the_librarys_sign_offs_and_their_own
 
     relay = FakeRelay(Clock(), author="u_author")
     relay.frozen = lib.rev = 2                          # version 2 is out for sign-off
-    lib.sign_offs = [{"sub": "u_other", "rev": 1, "at": 1.0}]      # signed an earlier version only
+    lib.sign_offs = [{"sub": "u_old", "rev": 1, "at": 1.0, "optional": True}]
     here = live_docs.Manager(relay.transport("user_1"), available=lambda: True, drive=False)
     built = build_app(TOKEN)
     built.state.live_docs = here
@@ -133,8 +155,11 @@ def test_a_teammates_frozen_version_carries_the_librarys_sign_offs_and_their_own
             first = state(window)
             assert (first["lock"], first["version"]["id"], first["version"]["signOffs"]) == ("sign_off", 2, [])
             assert client.post(f"{ROUTE}/sign-offs", json={"rev": 2}).json()["signed_off"] is True
+            lib.sign_offs.append({"sub": "u_guest", "rev": 2, "at": 10.0, "optional": True})
             window.send_json({"refresh": True})
-            assert state(window)["version"]["signOffs"] == ["user_1"]
+            version = state(window)["version"]
+            assert version["signOffs"] == ["user_1", "u_guest"]
+            assert version["optionalSignOffs"] == ["u_guest"]
         client.portal.call(here.stop)
     assert not db.conn.execute("SELECT 1 FROM plan_shares").fetchone()
 

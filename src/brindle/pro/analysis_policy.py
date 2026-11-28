@@ -52,10 +52,12 @@ def load_cached(org: str) -> dict:
 
 
 def request(client, store, method: str, path: str, body: dict | None = None) -> dict:
+    from brindle.pro.analysis_docs import Refused
+
     status, got = auth.authed(client, store, method, path,
                               auth.JSONBody(body) if body is not None else None)
     if status != 200:
-        raise auth._error(status, got)
+        raise Refused.from_response(status, got, body)
     return got
 
 

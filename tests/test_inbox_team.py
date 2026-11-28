@@ -126,6 +126,29 @@ def test_each_row_kind_carries_its_fields(db, repo, library, daemon):
     assert (comment["reason"], comment["read"]) == ("2 comments", False)
 
 
+@pytest.mark.variant("a comment invitation arrives through the feed without a review queue entry")
+def test_a_share_for_feedback_adds_one_waiting_item(library, daemon):
+    library.queue = library.queue[:1]
+    lifecycle._poll_review_queue()
+
+    def waiting():
+        return [i["doc"] for i in _inbox(daemon) if i["inbox_group"] == "needs_you"]
+
+    assert waiting() == ["ad_2"]
+    # pawdelta-web's GET /me/inbox emits the role beside the sender. A Comment
+    # invite has only this share row. A sign-off invite also has the review row.
+    for doc, role in (("ad_feedback", "comment"), ("ad_fyi", "view"), ("ad_editor", "edit"),
+                      ("ad_2", "reviewer")):
+        library.items.append({"item_key": f"shared:{doc}", "kind": "shared_with_you", "created_at": 40,
+                              "doc_id": doc, "title": "A shared plan", "sender": ANA, "role": role})
+    lifecycle._poll_review_queue()
+
+    assert waiting() == ["ad_2", "ad_feedback"]
+    assert {i["doc"]: i["inbox_group"] for i in _inbox(daemon, "shared_with_you")} == {
+        "ad_feedback": "needs_you", "ad_fyi": "from_team", "ad_editor": "from_team", "ad_2": "from_team",
+    }
+
+
 @pytest.mark.parametrize(("state", "kind", "checks", "opened"), [
     pytest.param("passed", "pr_ready", "passed", False, marks=pytest.mark.variant(
         "other tests check only the card's kind: passed prep shows passed checks, a newline name counts one file")),

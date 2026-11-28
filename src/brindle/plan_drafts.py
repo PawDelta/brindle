@@ -30,15 +30,14 @@ load until what it waits on arrives.
 from __future__ import annotations
 
 import base64
-import difflib
 import itertools
 import json
-import re
 import secrets
 import sqlite3
 import time
 from typing import Callable
 
+from brindle import textdiff
 from brindle.crdt import SharedDoc
 from brindle.db import DB
 
@@ -231,15 +230,24 @@ class DraftReplica:
                       (doc.export_snapshot(), time.time(), self.doc_id))
         return data not in waiting, doc.export_updates(version)
 
-    def supervise(self, c: sqlite3.Connection, change: Callable[[SharedDoc], object]) -> bytes:
+    def supervisor_snapshot(self, c: sqlite3.Connection) -> tuple[int, dict[str, str]]:
+        """Text and sequence to use when preparing a supervisor edit."""
+        got = _read(c, self.doc_id)
+        if got is None or not self._same(got[0]):
+            raise DraftGone(f"the draft replica of {self.doc_id} is no longer this one")
+        row, doc, _ = got
+        return row["seq"], doc.sections()
+
+    def supervise(self, c: sqlite3.Connection, change: Callable[[SharedDoc], object],
+                  *, expected_seq: int | None = None) -> bytes:
         """The session's supervisor's edit, in the caller's transaction ``c``,
         under the supervisor's own peer id (chosen on its first write, kept in
         the row like the replica's), so the draft says which letters it wrote.
-        ``change`` reads what it edits from the document it is given, the
-        latest stored, so another holder's writes since never refuse it. This
-        holder sees the edit at once; if ``c`` is rolled back, its next write
-        finds the stored draft older and reloads it (:class:`StaleDraft`)."""
-        doc, seq, update, _ = self._stage(c, change, supervisor=True)
+        When ``expected_seq`` is given, the stored draft must still match the
+        snapshot used to prepare the edit. This holder sees the edit at once;
+        if ``c`` is rolled back, its next write finds the stored draft older
+        and reloads it (:class:`StaleDraft`)."""
+        doc, seq, update, _ = self._stage(c, change, supervisor=True, expected_seq=expected_seq)
         self._doc, self._seq = doc, seq
         return update
 
@@ -248,19 +256,21 @@ class DraftReplica:
         """Apply ``change`` to the stored draft; the update it made, and the
         updates still waiting on changes not yet received."""
         with self.db.tx() as c:
-            doc, seq, update, waiting = self._stage(c, change, incoming, also)
+            doc, seq, update, waiting = self._stage(c, change, incoming, also,
+                                                    expected_seq=self._seq if incoming is None else None)
         # Only once it is stored does this holder see it: a refused edit changes nothing.
         self._doc, self._seq = doc, seq
         return update, waiting
 
     def _stage(self, c: sqlite3.Connection, change: Callable[[SharedDoc], object], incoming: bytes | None = None,
                also: Callable[[sqlite3.Connection], None] | None = None,
-               supervisor: bool = False) -> tuple[SharedDoc, int, bytes, list[bytes]]:
+               supervisor: bool = False,
+               expected_seq: int | None = None) -> tuple[SharedDoc, int, bytes, list[bytes]]:
         got = _read(c, self.doc_id)
         if got is None or not self._same(got[0]):
             raise DraftGone(f"the draft replica of {self.doc_id} is no longer this one")
         row, doc, pending = got
-        if incoming is None and not supervisor and row["seq"] != self._seq:
+        if expected_seq is not None and row["seq"] != expected_seq:
             self._doc, self._seq = doc, row["seq"]
             raise StaleDraft(f"the draft of {self.doc_id} changed since this holder read it")
         before = doc.version()
@@ -335,17 +345,14 @@ def adopt(db: DB, doc_id: str, doc: SharedDoc) -> DraftReplica:
     return rebuild(db, doc_id, lambda c, current: doc)
 
 
-_TOKEN = re.compile(r"\w+|\s+|[^\w\s]")
-
-
 def hunks(base: str, ours: str) -> list[tuple[int, int, int, int]]:
     """What changed from ``base`` to ``ours``, word by word: (i1, i2, j1, j2)
     for each ``base[i1:i2]`` that became ``ours[j1:j2]``."""
-    a, b = _TOKEN.findall(base), _TOKEN.findall(ours)
+    a, b = textdiff.tokens(base), textdiff.tokens(ours)
     at_a = [0, *itertools.accumulate(len(t) for t in a)]
     at_b = [0, *itertools.accumulate(len(t) for t in b)]
     return [(at_a[i1], at_a[i2], at_b[j1], at_b[j2])
-            for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b, autojunk=False).get_opcodes()
+            for tag, i1, i2, j1, j2 in textdiff.sequence_opcodes(a, b)
             if tag != "equal"]
 
 
@@ -371,7 +378,7 @@ def mapping(base: str, other: str) -> tuple[Callable[[int], int], list[tuple[int
     """Where an offset into ``base`` is in ``other``, another descendant of it
     (an offset inside a stretch ``other`` changed lands just after that
     change), and the stretches of ``base`` that ``other`` changed."""
-    ops = difflib.SequenceMatcher(None, base, other, autojunk=False).get_opcodes()
+    ops = textdiff.opcodes(base, other)
 
     def at(pos: int) -> int:
         for tag, i1, i2, j1, _ in ops:

@@ -19,7 +19,8 @@ server (pawdelta-web backend/pro_api/analysis_designs.py, docs/shared-designs-ap
   ``shared_with_you`` row in their account's Inbox feed (``GET /me/inbox``),
   written on the server whether or not any brindle of theirs is running. brindle
   registers no device: the feed is the account's, read by whichever signed-in
-  brindle asks;
+  brindle asks. The row includes the effective ``role`` at sharing time, as
+  returned by pawdelta-web's ``analysis_inbox._shown``;
 - ``_set_person_grant``: ``PUT /design/permissions/{sub}`` takes ``{access?,
   sign_off?}``, keeping what isn't sent, or a legacy ``{role, required}``, which
   replaces both (a ``reviewer`` at comment); mixing the two shapes, or sending
@@ -78,9 +79,14 @@ class CompatLibrary(PeopleLibrary):
         status, answer = super().share(form, headers)
         if status == 200:
             for sub in sorted(self.people_with_it() - before - {self.author}):
+                flags = self.permissions.get(sub, {})
+                role = "edit" if flags.get("can_edit") else "comment" if flags.get("can_comment") else "view"
+                if not flags.get("can_edit") and any(r["sub"] == sub for r in self.reviewers):
+                    role = "reviewer"
                 self.inbox.setdefault(sub, []).append({
-                    "kind": "shared_with_you", "item_key": f"shared:{DOC}:{sub}", "doc_id": DOC,
-                    "title": self.title, "sender": {"sub": self.author}})
+                    "kind": "shared_with_you", "item_key": f"shared:{DOC}", "doc_id": DOC,
+                    "created_at": 1, "read": False, "title": self.title,
+                    "sender": {"sub": self.author, "name": None}, "role": role})
         if self.cut == "after":
             raise auth.TransportError("cannot reach brindle Pro backend: timed out")
         return status, self.version(answer)
@@ -154,11 +160,12 @@ def signs_in(tmp_path, backend, library, net, sub):
     return store
 
 
-@pytest.mark.parametrize("invitee", [
-    pytest.param("never_opened", marks=pytest.mark.variant("no brindle of ann's at share time: her first sign-in finds it")),
-    pytest.param("online", marks=pytest.mark.variant("an Inbox already read must still take the new share")),
+@pytest.mark.parametrize(("invitee", "sign_off"), [
+    pytest.param("never_opened", True, marks=pytest.mark.variant("no brindle of ann's at share time: her first sign-in finds it")),
+    pytest.param("online", True, marks=pytest.mark.variant("an Inbox already read must still take the new share")),
+    pytest.param("online", False, marks=pytest.mark.variant("the panel's comment-only invite reaches the recipient as a waiting item without a review request")),
 ])
-def test_the_share_reaches_the_invitee_online_or_the_first_time_they_sign_in(db, compat, backend, tmp_path, invitee):
+def test_the_share_reaches_the_invitee_online_or_the_first_time_they_sign_in(db, compat, backend, tmp_path, invitee, sign_off):
     pid, library, app, net = compat
     ann = None
     if invitee == "online":
@@ -168,18 +175,18 @@ def test_the_share_reaches_the_invitee_online_or_the_first_time_they_sign_in(db,
     else:
         assert not (tmp_path / "ann").exists()          # ann has never signed in to brindle anywhere
 
-    added = add_person(app, pid,ANN_SIGNS)
+    added = add_person(app, pid, {**ANN_SIGNS, "sign_off": sign_off})
     assert added.status_code == 202, added.json()
-    assert ANN in library.scopes and library.reviewers == [{"sub": "ann", "required": True}]   # it is in the Library
-    assert [i["doc_id"] for i in library.inbox["ann"]] == [DOC]                                # waiting on her account
-    assert signers(app.get(f"/v1/plans/{pid}").json()) == ["ann"]
+    assert ANN in library.scopes and library.reviewers == (REQUIRED_ANN if sign_off else [])
+    assert signers(app.get(f"/v1/plans/{pid}").json()) == (["ann"] if sign_off else [])
 
     ann = ann or signs_in(tmp_path, backend, library, net, "ann")
     inbox_team.poll(db, client=net["client"], store=ann)          # her brindle's sync, signed in as her
     shared, = inbox_team.items("ann")
     assert (shared.kind, shared.doc, shared.from_person.sub) == ("shared_with_you", DOC, library.author)
+    assert shared.inbox_group == ("from_team" if sign_off else "needs_you")
     opened = as_(library, app, "ann")
-    assert opened is not None and opened["can_comment"] and opened["can_sign_off"]
+    assert opened is not None and opened["can_comment"] and opened["can_sign_off"] is sign_off
 
 
 @pytest.mark.parametrize("cut", [

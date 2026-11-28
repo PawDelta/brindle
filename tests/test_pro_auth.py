@@ -5,6 +5,7 @@ import json
 import ssl
 import threading
 import time
+import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -564,7 +565,7 @@ def test_bad_urls_are_rejected():
 @pytest.mark.variant("security: transport must verify hostnames and certificates and disable non-HTTP handlers")
 def test_tls_verification_is_always_on():
     t = auth.UrllibTransport()
-    https = [h for h in t.opener.handlers if h.__class__.__name__ == "HTTPSHandler"][0]
+    https = [h for h in t.opener.handlers if isinstance(h, urllib.request.HTTPSHandler)][0]
     ctx = https._context
     assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname
     assert not any(h.__class__.__name__ in ("FileHandler", "FTPHandler", "DataHandler")

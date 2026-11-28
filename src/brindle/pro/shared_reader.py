@@ -112,8 +112,9 @@ def _can(view: dict, me: str, name: str) -> bool:
 
 
 def _can_sign(view: dict, me: str, author: Any) -> bool:
-    """False only when this account can't be a signer: a covering rule may count
-    people the view doesn't name, and for those the Library's answer decides."""
+    """Use the Library's decision, or infer eligibility on older servers."""
+    if "can_sign_off" in view:
+        return view["can_sign_off"] is True
     people = view.get("reviewers") or []
     return me == author or bool(view.get("policy_reviewers")) or any(isinstance(r, dict) and r.get("sub") == me for r in people)
 
@@ -145,6 +146,11 @@ def _dto(doc_id: str, view: dict, me: str, *, review: bool = True, names: dict |
     for thread in threads:
         for row in [thread, *thread["replies"]]:
             row["author_name"] = (names or {}).get(row["author"], "A teammate") if row["author"] != plan_docs.PERSON else None
+    sign_off = view.get("sign_off") if review else None
+    raw_sign_offs = view.get("sign_offs") if review else None
+    sign_offs = [{"sub": s["sub"], "rev": s["rev"], "at": _at(s.get("at")), "optional": s.get("optional")}
+                 for s in (raw_sign_offs or []) if isinstance(s, dict)
+                 and isinstance(s.get("sub"), str) and isinstance(s.get("rev"), int)]
     return SharedDesignDTO(
         id=doc_id, session="", title=view.get("title") or UNTITLED, rev=view["rev"], state="open", ask=content["ask"],
         markdown=content["markdown"], lede=content["lede"], sections=content["sections"], decisions=decisions,
@@ -157,9 +163,10 @@ def _dto(doc_id: str, view: dict, me: str, *, review: bool = True, names: dict |
         can_edit=_can(view, me, "can_edit"),     # may write in its live draft (the reader's Editing)
         can_comment=_can(view, me, "can_comment"), can_suggest=_can(view, me, "can_suggest"),
         can_sign_off=review and _can_sign(view, me, author),
+        sign_off=sign_off if sign_off in ("required", "optional") else None,
+        sign_offs=sign_offs,
         access_request=view.get("access_request"),
-        signed_off=any(isinstance(s, dict) and s.get("sub") == me and s.get("rev") == view["rev"]
-                       for s in view.get("sign_offs") or [])).to_json()
+        signed_off=any(s["sub"] == me and s["rev"] == view["rev"] for s in sign_offs)).to_json()
 
 
 def _title(doc_id: str, client, store) -> str | None:
@@ -277,13 +284,16 @@ def timeline(doc_id: str, *, client=None, store=None) -> dict:
     client, store = ad._session(client, store)
     me = ad.require_entitlement(store).sub
     view = ad.api("GET", sd._path(doc_id), client=client, store=store)
+    revisions, sign_offs = view.get("revisions"), view.get("sign_offs")
     events = [{"id": f"revision:{r['rev']}", "kind": "revision", "actor": _who(r.get("author"), me),
                "rev": r["rev"], "version": None, "at": _at(r.get("at")),
                "source": r.get("source"), "changed": r.get("changed") or []}
-              for r in view.get("revisions") or [] if isinstance(r, dict) and isinstance(r.get("rev"), int)]
+              for r in (revisions if isinstance(revisions, list) else [])
+              if isinstance(r, dict) and isinstance(r.get("rev"), int)]
     events += [{"id": f"sign_off:{s['rev']}:{s['sub']}", "kind": "sign_off", "actor": _who(s["sub"], me),
                 "rev": s["rev"], "version": None, "at": _at(s.get("at"))}
-               for s in view.get("sign_offs") or []]
+               for s in (sign_offs if isinstance(sign_offs, list) else [])
+               if isinstance(s, dict) and isinstance(s.get("rev"), int) and isinstance(s.get("sub"), str)]
     return {"events": sorted(events, key=lambda e: (e["at"], e["id"]), reverse=True)}
 
 
@@ -398,31 +408,30 @@ def link_id(token: str) -> str:
 
 def _signed_in(store) -> str:
     """This account's id, before anything is sent: a link opens for whoever is signed in, on any plan."""
-    from brindle import airgap
+    from brindle import airgap, keystore
     from brindle.pro import license
 
     if airgap.enabled():
         raise ServiceError("air_gapped", "air-gap mode is on: brindle sends nothing, so it can't open this link", 403)
     try:
         return license.current(refresh=False, store=store).sub
-    except Exception as e:  # noqa: BLE001
+    except license.LicenseError as e:
+        if isinstance(e.__cause__, keystore.KeychainReadBlocked):
+            raise e.__cause__
         raise ServiceError("signed_out", "sign in to brindle to open this link", 402) from e
 
 
-def _link_refused(status: int, resp: dict) -> ServiceError:
-    code = resp.get("error") if isinstance(resp.get("error"), str) else None
-    why = resp.get("error_description") if isinstance(resp.get("error_description"), str) else None
-    if code in LINK_REFUSALS:
-        return ServiceError(code, mask(why or NO_LINK), 403)
-    if code == "key_unavailable":
-        return ServiceError(code, "the organization's key for this plan is unavailable", 503)
-    if status == 401:                 # still refused after a token refresh; a 401 would read as the daemon's own
-        return ServiceError("signed_out", "sign in to brindle again to open this link", 402)
-    if status == 429:
-        return ServiceError("rate_limited", "too many links opened at once: try again in a minute", 429)
+def _link_refused(status: int, resp: dict) -> ServiceError | ad.Refused:
+    refused = ad.Refused.from_response(status, resp)
+    if 400 <= status < 500 and refused.code in LINK_REFUSALS:
+        return ad.Refused(str(refused), 403, refused.code)
+    if refused.code == "key_unavailable":
+        return refused
     if status in (403, 404):
         return ServiceError("not_found", NO_LINK, 404)
-    return ServiceError("upstream", mask(why or code or f"HTTP {status}"), 502)
+    if status == 429:
+        return ad.Refused("HTTP 429", status, "rate_limited")
+    return refused
 
 
 def read_link(token: Any, *, client=None, store=None) -> dict:
@@ -463,18 +472,14 @@ def _as_member(doc_id: str, title: Any, client, store) -> dict | None:
     read-only view, which the link already allows."""
     try:
         me = ad.require_entitlement(store).sub
-    except RuntimeError:
+    except ad.NotEntitled:
         return None
     try:
         view = ad.api("GET", sd._path(doc_id), client=client, store=store)
     except ad.Refused as e:
         if e.status in (403, 404):
             raise ServiceError("not_found", NO_LINK, 404) from e
-        if e.status == 401:
-            raise ServiceError("signed_out", "sign in to brindle again to open this link", 402) from e
-        if e.code == "key_unavailable":
-            raise ServiceError(e.code, "the organization's key for this plan is unavailable", 503) from e
-        raise ServiceError("upstream", mask(str(e)), 502) from e
+        raise
     named = {**view, "title": title} if isinstance(title, str) and title.strip() else view
     names = sd.member_names(doc_id, client=client, store=store) if _can(view, me, "can_edit") else None
     return _dto(doc_id, _titled(doc_id, named, client, store), me, names=names)

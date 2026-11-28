@@ -161,12 +161,15 @@ _REQUEST = re.compile(
 # "show me the flow visually": a plain object phrase, no joining word that could add a second instruction.
 _SHOW_VISUALLY = re.compile(r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?show\s+(?:me|us)"
                             r"(?:\s+(?!(?:and|then|also|but|so|while|or|plus)\b)[\w'.,/-]+){1,20}\s+visually[.!?]*", re.I)
+_ASK_YOU_TO = (r"(?:i|we)(?:\s+(?:(?:obviously|really|just|literally|clearly)\s+)*(?:want|need)"
+               r"|(?:['’]?d| would)\s+like)\s+you\s+to")
 # Plan wordings: a writing verb plus the plan, or "plan it first". A bare "plan" needs the verb, so
 # "I want the plan to use X" and "the plan looks good" grant nothing; a purpose clause is fine.
 _PLAN_REQUEST = re.compile(
     _LEAD_IN + r"(?:"  # one group, so the lead-in reaches every alternative
     r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?"
-    r"(?:(?:write|draft|prepare|put together|draw up|do|make|create|build)\s+(?:(?:me|us)\s+)?(?:up\s+)?"
+    r"(?:(?:(?:help\s+(?:me|us)|" + _ASK_YOU_TO + r")\s+)?"
+    r"(?:write|draft|prepare|put together|draw up|do|make|create|build)\s+(?:(?:me|us)\s+)?(?:up\s+)?"
     r"(?:(?:a|an|the|my|our)\s+)?"
     # Up to two filler words ("a fucking plan", "a quick simple plan") may come before the plan.
     r"" + _FILLER + r"(?:planning doc(?:ument)?|plan doc(?:ument)?|plan)\b"
@@ -267,10 +270,11 @@ def request_intent(text: str) -> str | None:
 
 
 # Where a fresh ask can begin inside a sentence: after a comma, "no", "I said", "I literally said", or
-# "but"; and at "I want / I need / I'd like", so "no i dont want a visual i want a plan" finds the plan.
+# "but"; and at "I want / I need / I'd like", including "I obviously want you to".
 _RESTART = re.compile(r"(?:[,;:]\s*|\b(?:(?:i|we)\s+(?:(?:just|literally|already|clearly|really|only)\s+)*(?:said|asked|meant)\W+"
                       r"|(?:no|nope|but|instead|rather)\W+))", re.I)
-_ASK_BEGIN = re.compile(r"\b(?=(?:i(?:['’]?d| would)?\s+(?:want|need|like)|we\s+need|give\s+(?:me|us))\b)", re.I)
+_ASK_BEGIN = re.compile(r"\b(?=(?:" + _ASK_YOU_TO +
+                        r"|i(?:['’]?d| would)?\s+(?:want|need|like)|we\s+need|give\s+(?:me|us))\b)", re.I)
 
 
 _CONDITIONAL = re.compile(r"\W*(?:when|once|if|after|until|before|unless|as soon as|whenever)\b", re.I)
