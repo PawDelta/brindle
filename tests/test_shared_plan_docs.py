@@ -1459,7 +1459,8 @@ def test_lapsed_plan_becomes_a_personal_doc(db, parts, session, backend, monkeyp
         assert got["gate"] is None and got["team_ended"] is True and plans.gate_shut(db, root) is None
         assert got["threads"][0]["text"] == "Which VM?"
 
-        # Work queued behind the doc, then the app goes away: only a current confirmation may release it.
+        # Work queued behind the doc, then the app goes away: only a current confirmation lifts the review
+        # gate, and the work still waits for the person's approval.
         assert "behind plan" in asyncio.run(mcp_server.assign("developer", "build it", **work(db))) and started == []
         monkeypatch.setattr(holds, "app_connected", lambda: False)
 
@@ -1470,7 +1471,8 @@ def test_lapsed_plan_becomes_a_personal_doc(db, parts, session, backend, monkeyp
             db.conn.execute("UPDATE plan_shares SET lapsed_at=? WHERE plan_id=?", (time.time() - seconds, plan))
 
         def released():
-            assert plans.holding(db, root) is None and tasks.build_gate_refusal(db, boss.id) is None
+            assert plans.gate_shut(db, root) is None and tasks.build_gate_refusal(db, boss.id) is None
+            assert plans.holding(db, root)["id"] == pid and started == []
 
         def held():
             assert plans.holding(db, root) and plans.gate_shut(db, root) and tasks.build_gate_refusal(db, boss.id)

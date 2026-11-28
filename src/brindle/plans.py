@@ -28,9 +28,15 @@ signed off the revision on screen. One sign-off counts for every rule it
 meets. A reviewer's or rule signer's open comment or suggestion written after
 their sign-off is how they ask for changes (the Library has no verdict of its
 own), and blocks it too. While the gate is closed Approve is refused and
-assign is refused. A shared plan's queued tasks wait for its approval even
-with no app connected: only that approval checks the Library, starts them and
-closes the review."""
+assign is refused. A shared plan's queued tasks wait for its approval like
+any plan's: only that approval checks the Library, starts them and closes the
+review.
+
+Queued plan work waits even while the app is closed or the daemon restarts:
+nothing starts unapproved. Who may approve is brindle.approval_sources.
+Closing a session closes its unapproved plan and leaves the tasks it held
+queued for the supervisor's decision (plan_cancel_holds), as a cancel does,
+so continuing the session starts none of them on its own."""
 
 from __future__ import annotations
 
@@ -273,13 +279,28 @@ def open_offer_id(offer: str | None) -> str | None:
 
 
 def close_with_session(db: DB, root_id: str) -> None:
-    """Close unfinished plans without approving work or withdrawing shared copies."""
+    """Close session ``root_id``'s unfinished plans without approving work or
+    withdrawing shared copies. The queued tasks its open plan held stay
+    queued for the supervisor's decision, as after a cancel
+    (_hold_for_supervisor), so continuing the session starts none of them;
+    the supervisor is told which at its next turn."""
     from brindle import plan_docs
 
+    at = time.time()
+    queued = None
     with db.tx() as c:
+        # The stored row, not open_plan: once the supervisor is dismissed its plan already reads as closed.
+        row = c.execute(f"SELECT id, rev FROM plans WHERE root_id=? AND state IN ({','.join('?' * len(HOLDING))})"
+                        " ORDER BY created_at LIMIT 1", (root_id, *HOLDING)).fetchone()
+        plan = dict(row) if row else None
+        held = _hold_for_supervisor(c, db, root_id, plan["id"], at) if plan and visuals.enabled() else []
         changed = c.execute("UPDATE plans SET state=?, updated_at=? WHERE root_id=?"
                             " AND state IN ('open','redirected','writing') RETURNING id, rev",
-                            (CLOSED, time.time(), root_id)).fetchall()
+                            (CLOSED, at, root_id)).fetchall()
+        if held:
+            queued = _queue_message(c, root_id, _cancelled_message(plan, held, None))
+    if queued is not None:
+        bus.publish_agent(db, "message.queued", root_id, message_id=queued, sender_id=None)
     for row in changed:
         plan_docs._changed(db, get(db, row["id"]), row["rev"])
 
@@ -482,21 +503,15 @@ def holding(db: DB, root_id: str) -> dict | None:
     """What session ``root_id``'s queued tasks wait on, if anything: its plan
     the person hasn't approved yet or, before one is proposed, brindle's
     offer to plan the goal first, unanswered or accepted (``{"offer": state}``).
-    None while the visuals capability is off or the app is disconnected, so
-    nothing waits on a verdict nobody can give. This also releases work if
-    the app disconnects after opening an offer or redirecting a plan; the
-    saved plan and its decision remain available when it reconnects. A plan
-    shared for review is held with or without the app: only the approval
-    checks the sign-offs with the Library and closes the review."""
-    from brindle.daemon import holds
-
+    None while the visuals capability is off. An app that is closed,
+    restarting or not answering holds the work too: it waits until an
+    approval source (brindle.approval_sources) releases it, never because
+    nobody can answer right now. A plan shared for review is held the same
+    way; only the approval checks the sign-offs with the Library and closes
+    the review."""
     if not visuals.enabled() or not root_id:
         return None
     plan = open_plan(db, root_id)
-    if plan is not None and gate(db, plan) is not None:
-        return plan
-    if not holds.app_connected():
-        return None
     if plan is not None:
         return plan
     row = db.conn.execute("SELECT offer FROM goal_doc_requests WHERE root_id=? AND (offer LIKE ? OR offer=?)",
@@ -1320,10 +1335,10 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     transaction. Once the Library has answered, the verdict is on the plan as
     that answer left it (:func:`caught_up`): on a live doc, ``version`` (the
     frozen version on screen) approves the revision it came in as."""
-    from brindle import agents, plan_docs, tasks
+    from brindle import agents, approval_sources, plan_docs, tasks
 
     visuals.require_enabled()
-    if not person:
+    if not approval_sources.may_release(approval_sources.Release(plan_id, approval_sources.APP if person else None)):
         raise ServiceError("forbidden", "only the person approves or redirects a plan, from the app", 403)
     p = get(db, plan_id)
     visuals._unlocked(p["root_id"])
@@ -1436,7 +1451,7 @@ def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None
     (plan_cancel_holds): they neither start nor get dropped until the
     supervisor decides each one, with start_now or cancel_task. One message
     to the supervisor names them."""
-    from brindle import agents, autopilot, plan_docs, tasks
+    from brindle import agents, plan_docs
     from brindle.pro import shared_docs
 
     visuals.require_enabled()
@@ -1454,11 +1469,7 @@ def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None
     root = p["root_id"]
     at = time.time()
     with db.tx() as c:
-        # Selected before the plan's state changes, in the same write transaction: a task queued
-        # by an assign whose reply is still going out (unanswered) is held too, and nothing
-        # committed after this read can slip past the cancel.
-        held = [t for t in db.list_tasks(state="pending") + db.list_tasks(state=tasks.UNANSWERED)
-                if t.caller_id and autopilot.root_of(db, t.caller_id) == root and tasks.open_plan_holds(db, t)]
+        held = _hold_for_supervisor(c, db, root, p["id"], at)
         if not c.execute("UPDATE plans SET state=?, updated_at=? WHERE id=? AND rev=?"
                          " AND state IN ('writing','open','redirected')",
                          (CANCELLED, at, p["id"], p["rev"])).rowcount:
@@ -1472,10 +1483,6 @@ def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None
         row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
         if row is not None:
             shared_docs.drop_share(c, row)
-        for t in held:
-            c.execute("INSERT OR REPLACE INTO plan_cancel_holds (task_id, plan_id, created_at)"
-                      " SELECT id, ?, ? FROM tasks WHERE id=? AND state IN ('pending', ?)",
-                      (p["id"], at, t.id, tasks.UNANSWERED))
         queued = _queue_message(c, root, _cancelled_message(p, held, person))
     bus.publish_agent(db, "message.queued", root, message_id=queued, sender_id=None)
     try:
@@ -1489,8 +1496,31 @@ def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None
     return p
 
 
-def _cancelled_message(p: dict, held: list, person: bool) -> str:
-    lines = [f"{'The person cancelled' if person else 'You withdrew'} plan {p['id']} (r{p['rev']}): it is closed, "
+def _hold_for_supervisor(c, db: DB, root: str, plan_id: str, at: float) -> list:
+    """Mark session ``root``'s queued tasks that are plan ``plan_id``'s own
+    work (tasks.plan_work) as held behind the plan's end (plan_cancel_holds),
+    for the supervisor to decide each one (start_now or cancel_task); returns
+    them. Call it in the write transaction that ends the plan, before its
+    state changes: a task queued by an assign whose reply is still going out
+    (unanswered) is held too, and nothing committed after this read can slip
+    past."""
+    from brindle import autopilot, tasks
+
+    held = [t for t in db.list_tasks(state="pending") + db.list_tasks(state=tasks.UNANSWERED)
+            if t.caller_id and autopilot.root_of(db, t.caller_id) == root and tasks.plan_work(db, t, plan_id)]
+    for t in held:
+        c.execute("INSERT OR REPLACE INTO plan_cancel_holds (task_id, plan_id, created_at)"
+                  " SELECT id, ?, ? FROM tasks WHERE id=? AND state IN ('pending', ?)",
+                  (plan_id, at, t.id, tasks.UNANSWERED))
+    return held
+
+
+def _cancelled_message(p: dict, held: list, person: bool | None) -> str:
+    """What the supervisor is told when plan ``p`` ends unapproved: the
+    person's cancel (``person``), its own withdrawal, or (None) its session
+    being closed."""
+    lead = {True: "The person cancelled", False: "You withdrew", None: "Your session was closed with"}[person]
+    lines = [f"{lead} plan {p['id']} (r{p['rev']}): it is closed, "
              "nothing was approved, and it won't go to the Library."]
     if not held:
         return "\n".join([*lines, "It held no queued tasks."])

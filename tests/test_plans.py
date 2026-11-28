@@ -264,8 +264,7 @@ def test_approved_plan_goes_to_the_library(db, session, tmp_path, monkeypatch, b
     assert "after: w1" in md and "src/brindle/db.py" in md and "tests/test_x.py::test_a" in md
 
 
-@pytest.mark.parametrize("app_connected", [0, 1])
-def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, monkeypatch, app_connected):
+def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, monkeypatch):
     boss, started = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
     # The reader's optional data: the restated ask, each option's trade-offs and files, each worker's files and test.
@@ -278,13 +277,7 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
     pid = out.split()[2]
     assert plans.sections(PLAN)[1][0]["title"] == "Goal" and len(plans.sections(PLAN)[1]) == 2
 
-    monkeypatch.setattr(holds, "app_connected", lambda: bool(app_connected))
     reply = asyncio.run(mcp_server.assign("developer", "build the preset schema", **work(db)))
-    if not app_connected:
-        plans.decide(db, pid, 1, False, note="Revise the split.", person=True)
-        asyncio.run(mcp_server.assign("developer", "build the UI"))
-        assert started == ["build the preset schema", "build the UI"]
-        return
     assert "behind plan" in reply and started == []
     assert tasks.sweep(db) == 0 and started == []      # nothing wakes a held task
 
