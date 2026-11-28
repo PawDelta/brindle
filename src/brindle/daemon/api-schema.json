@@ -16856,6 +16856,10 @@
       "path": "/v1/shared-designs/{doc_id}/history"
     },
     {
+      "method": "POST",
+      "path": "/v1/shared-designs/{doc_id}/receipts"
+    },
+    {
       "method": "GET",
       "path": "/v1/shared-designs/{doc_id}/revisions/{n:int}/changes"
     },
