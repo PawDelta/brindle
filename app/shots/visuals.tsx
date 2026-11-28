@@ -272,6 +272,53 @@ if (shared) {
   });
 }
 
+// With ?doc=spine&shared=1, &queued=waiting|sent|refused: that reader's outbox (shots/queued-shots.mjs),
+// a reply, a comment and a pick as the daemon lists them offline, after sending, or (the pick) refused.
+// &mine=1 without shared is the author's own shared plan, whose reply and comment are still unsent.
+const queued = params.get("queued");
+if (queued) {
+  const DESIGN = plan.sections.find((s) => s.id === "proposed-design")!.markdown;
+  const context = plan.sections[0].markdown;
+  const question = "Should a 429 honour Retry-After before falling back to our schedule?";
+  const replyText = "Yes, if it is under two hours. Anything longer should go to the dead-letter log so an admin sees it.";
+  const commentText = "Can one of the three customers try this before we call the payload stable?";
+  const where = anchored("proposed-design", DESIGN, "4xx responses except 429 fail immediately");
+  const quote = anchored("context", context, "Three customers have asked for push notifications");
+  const reply = (author: string) => ({ id: 11, author, at: now - 30, text: replyText });
+  const comment = (author: string) => ({ id: 12, kind: "comment" as const, rev: plan.rev, author, status: "open" as const, at: now - 20, text: commentText, anchor: quote });
+  const asked = (author: string, replies: ReturnType<typeof reply>[]) => ({ id: 10, kind: "comment" as const, rev: plan.rev, author, status: "open" as const, at: now - 600, text: question, anchor: where, replies });
+  if (!shared) {
+    rows = rows.map((v) => (v.id === plan.id ? { ...v, title: plan.title } : v));
+    plan = { ...plan, threads: [{ ...asked("teammate:u_maya", [reply("person")]), author_name: "Maya Okafor" }, comment("person")],
+      outbox: [
+        { client_id: "local-11", tail: "/comments", state: "waiting", body: { thread_item: 11, parent: 10 } },
+        { client_id: "local-12", tail: "/comments", state: "waiting", body: { thread_item: 12 } },
+      ] };
+  } else {
+    const me = "u_priya";
+    const author = "u_david";
+    const sent = queued === "sent";
+    const pick = { decision: "loud", option: "every", rev: plan.rev };
+    const outbox: NonNullable<SharedDesign["outbox"]> = queued === "refused"
+      ? [{ client_id: "q3", tail: "/votes", state: "refused", code: "stale", body: pick }]
+      : [
+        { client_id: "q1", tail: "/comments", state: sent ? "sent" : "waiting", body: sent ? { thread_item: 11, parent: 10 } : { parent: 10, text: replyText } },
+        { client_id: "q2", tail: "/comments", state: sent ? "sent" : "waiting", body: sent ? { thread_item: 12 } : { rev: plan.rev, text: commentText, anchor: { section: "context" } } },
+        { client_id: "q3", tail: "/votes", state: sent ? "sent" : "waiting", body: pick },
+      ];
+    const design = await client.sharedDesign(plan.id);
+    const next: SharedDesign = { ...design, outbox,
+      threads: [asked(author, sent ? [reply(me)] : []), ...(sent ? [comment(me)] : [])],
+      // This reader's own pick on the second decision: none yet in the Library until it is sent.
+      decisions: design.decisions.map((d) => (d.id === "loud" ? { ...d, confirmed: sent ? "every" : null } : d)),
+      // An open review, not a version frozen for sign-off.
+      gate: null, can_sign_off: false, sign_off: null,
+    };
+    daemon.setLiveState(design.id, { lock: null, version: null });
+    Object.assign(client, { sharedDesign: async () => next });
+  }
+}
+
 Object.assign(window, { fake: daemon });
 const store = createAppStore();
 const sync = startSync({ client, store, connect: daemon.connect });

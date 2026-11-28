@@ -100,6 +100,10 @@ review column open, the next decision's table, a highlight with its comment bar,
 the column, the column collapsed to its strip, Suggesting with a tracked
 change on the page, and signed off under its live board, in both themes.
 
+`node shots/queued-shots.mjs --out <dir> [--channel chrome]` takes a shared plan's queued changes
+(waiting to send, sent, a refused pick) in light, with 2x crops, from the same `visuals.tsx`
+(`&queued=waiting|sent|refused`).
+
 ## The Library and sharing review
 
 `node shots/library-ux-shots.mjs [--out <dir>] [--only current|mockups] [--channel chrome]`
