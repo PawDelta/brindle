@@ -139,9 +139,10 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     if removed_graphs:
         done.append(f"removed {removed_graphs} stale graph store(s)")
 
-    from brindle import bus
+    from brindle import bus, intent
 
     bus.prune(db, now=now)
+    intent.prune_cache(db.path, now)
 
     # 0. A Claude Code inbox held by an agent that isn't Claude Code is its
     # launcher's: messages to it would go to the supervisor's chat.

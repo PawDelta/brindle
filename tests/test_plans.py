@@ -316,7 +316,7 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
 
         # The revision the redirect asked for spends its grant: none is left to hold a later visual back.
         mcp_server.propose_plan(PLAN + "\n\nRevised.", DECISIONS, plan_id=pid)
-        assert db.conn.execute("SELECT COUNT(*) FROM visual_grants WHERE root_id='boss' AND remaining>0"
+        assert db.conn.execute("SELECT COUNT(*) FROM visual_scoped_grants WHERE root_id='boss' AND remaining>0"
                                ).fetchone()[0] == 0
 
         assert client.post(f"/v1/plans/{pid}/decide", json={"rev": 1, "approved": True}).status_code == 409
@@ -358,7 +358,7 @@ def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch, connec
     monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
     db.add_autopilot("boss")
     grants = lambda: [r["scope"] for r in db.conn.execute(  # noqa: E731
-        "SELECT scope FROM visual_grants WHERE root_id='boss' AND remaining > 0")]
+        "SELECT scope FROM visual_scoped_grants WHERE root_id='boss' AND remaining > 0")]
     milestones = [{"title": f"M{i}", "check": "true"} for i in range(5)]
     if accept == "legacy":
         db.update_autopilot("boss", goal="Org presets")
@@ -587,7 +587,7 @@ def test_a_failed_verdict_leaves_nothing_behind_and_a_failed_push_loses_nothing(
     pid = mcp_server.propose_plan(PLAN, DECISIONS).split()[2]
     asyncio.run(mcp_server.assign("developer", "build the preset schema", **work(db)))
     redirect ={"comments": [{"section": "s1", "text": "Repo file first."}], "person": True}
-    grants = lambda: [r["remaining"] for r in db.conn.execute("SELECT remaining FROM visual_grants")]  # noqa: E731
+    grants = lambda: [r["remaining"] for r in db.conn.execute("SELECT remaining FROM visual_scoped_grants")]  # noqa: E731
 
     # One failure inside the verdict's transaction: none of it lands, and the
     # same process can decide again at once.
