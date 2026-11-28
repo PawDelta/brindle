@@ -1,13 +1,16 @@
 """Plans stop asking for approval when their session is closed."""
 
+import asyncio
 import time
 
 import pytest
 
-from brindle import plans, procs, tmux, visual_offers, visuals
-from brindle.db import Agent, Workspace
+from brindle import agents, mcp_server, plans, procs, tasks, tmux, visual_offers, visuals
+from brindle.approval_sources import PERSON_IN_APP
+from brindle.db import DB, Agent, Workspace
 from brindle.service import inbox, sessions
 from brindle.service.errors import ServiceError
+from test_plans import PLAN, session, work  # noqa: F401 - session is a fixture
 
 
 @pytest.fixture
@@ -55,8 +58,49 @@ def test_closing_session_closes_plan(db, proposed, state):
     assert plan["markdown"] and visuals.get(db, proposed)
     assert dict(db.conn.execute("SELECT * FROM plan_shares WHERE plan_id=?", (proposed,)).fetchone()) == shared
     with pytest.raises(ServiceError):
-        plans.decide(db, proposed, plan["rev"], True, person=True)
+        plans.decide(db, proposed, plan["rev"], True, approval=PERSON_IN_APP)
     assert db.list_tasks() == []
+
+
+@pytest.mark.parametrize("docs_at_close", [
+    pytest.param("1", marks=pytest.mark.variant("the common case: the session closes with Docs on")),
+    pytest.param("0", marks=pytest.mark.variant("review: Docs turned off before the close dropped the hold")),
+])
+def test_closing_session_holds_its_plans_queued_work_for_the_supervisor(db, session, monkeypatch,  # noqa: F811
+                                                                        docs_at_close):
+    boss, started = session
+    monkeypatch.setattr(tmux, "list_panes", lambda: tmux.PaneSnapshot())
+    monkeypatch.setattr(procs, "stop", lambda *args, **kwargs: None)
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    pid = mcp_server.propose_plan(PLAN).split()[2]
+    assert "behind plan" in asyncio.run(mcp_server.assign("developer", "build the preset schema", **work(db)))
+    [task] = db.list_tasks(state="pending")
+
+    monkeypatch.setenv("BRINDLE_VISUALS", docs_at_close)
+    sessions.close_session(db, boss.id)
+    monkeypatch.setenv("BRINDLE_VISUALS", "1")                # back on before the session continues
+    assert plans.get(db, pid)["state"] == "closed" and db.cancelled_hold(task.id) == pid
+    tasks.on_resumed(db, boss.id)                       # continuing the session starts none of it
+    assert started == [] and db.get_task(task.id).state == "pending"
+
+
+@pytest.mark.variant("race (review): a sweep between the supervisor's dismissal and the holds started plan work")
+def test_a_sweep_during_session_close_never_sees_dismissal_without_holds(db, session, monkeypatch):  # noqa: F811
+    boss, started = session
+    monkeypatch.setattr(agents, "is_alive", lambda agent, panes=None: False)   # its pane is gone: it stays idle
+    monkeypatch.setattr(procs, "stop", lambda *args, **kwargs: None)
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    mcp_server.propose_plan(PLAN)
+    asyncio.run(mcp_server.assign("developer", "build the preset schema", **work(db)))
+    close, swept = plans.close_with_session, []
+
+    def sweep_first(*args, **kwargs):   # another process's sweep, at the moment the plans are closed
+        swept.append(tasks.sweep(DB()))
+        return close(*args, **kwargs)
+
+    monkeypatch.setattr(plans, "close_with_session", sweep_first)
+    sessions.close_session(db, boss.id)
+    assert swept == [0] and started == []
 
 
 def test_already_closed_session_open_plan_is_not_in_inbox(db, proposed):
