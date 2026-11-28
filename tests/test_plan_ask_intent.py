@@ -1,11 +1,13 @@
 import subprocess
 import threading
 import time
+from concurrent.futures import wait
 from contextlib import closing
+from pathlib import Path
 
 import pytest
 
-from brindle import agents, intent, mcp_server, plans, visual_offers
+from brindle import agents, cli, intent, mcp_server, plans, visual_offers
 from brindle.daemon import holds
 from brindle.db import DB, Agent, Workspace
 from brindle.mcp_server import ToolError
@@ -91,13 +93,91 @@ def test_a_failed_model_call_refuses_and_the_next_publish_asks_again(db, session
     clock = [100.0]
     monkeypatch.setattr(intent, "_clock", lambda: clock[0])
     monkeypatch.setattr(intent, "_ask", model(failure, meanwhile=lambda: clock.__setitem__(0, clock[0] + takes)))
-    say(db, session, "ok so lets test the plan, please make a test one")
+    prefetch = intent.prefetch
+    with monkeypatch.context() as setup:
+        setup.setattr(intent, "prefetch", lambda *args: wait(prefetch(*args)))
+        say(db, session, "ok so lets test the plan, please make a test one")
     with pytest.raises(ToolError) as refused:
         mcp_server.propose_plan(PLAN)
     assert refused.value.__cause__.code == "intent_unavailable"
     working = model("1")
     monkeypatch.setattr(intent, "_ask", working)
     assert proposed() and len(working.calls) == 1
+
+
+def test_publish_first_failure_does_not_start_a_late_prefetch(db, session, monkeypatch):
+    scheduled, release, finished = threading.Event(), threading.Event(), threading.Event()
+    answer = intent._answer
+
+    def ordered(turn, messages, kind, ask, deadline, warm):
+        if not warm:
+            return answer(turn, messages, kind, ask, deadline, warm)
+        scheduled.set()
+        try:
+            assert release.wait(2)
+            return answer(turn, messages, kind, ask, deadline, warm)
+        finally:
+            finished.set()
+
+    failing = model(subprocess.TimeoutExpired(["claude"], intent.BUDGET_S))
+    monkeypatch.setattr(intent, "_answer", ordered)
+    monkeypatch.setattr(intent, "_ask", failing)
+    say(db, session, "ok so lets test the plan, please make a test one")
+    try:
+        assert scheduled.wait(2)
+        with pytest.raises(ToolError) as refused:
+            mcp_server.propose_plan(PLAN)
+        assert refused.value.__cause__.code == "intent_unavailable"
+    finally:
+        release.set()
+    assert finished.wait(2)
+    working = model("1")
+    monkeypatch.setattr(intent, "_ask", working)
+    assert proposed()
+    assert len(failing.calls) == len(working.calls) == 1
+
+
+@pytest.mark.parametrize("stalled", [False, pytest.param(True, marks=pytest.mark.variant(
+    "a detached helper must record its own deadline even while the classifier is still running"))])
+def test_detached_prefetch_records_failure_without_a_publisher(db, session, monkeypatch, stalled):
+    with monkeypatch.context() as setup:
+        setup.setattr(intent, "prefetch", lambda *args: [])
+        say(db, session, "ok so lets test the plan, please make a test one")
+    turn = db.conn.execute("SELECT turn FROM visual_person_turns WHERE root_id=?", (session.id,)).fetchone()[0]
+    started, release = threading.Event(), threading.Event()
+    with monkeypatch.context() as helper:
+        if stalled:
+            clock = [100.0]
+            result = intent._result
+
+            def stall(prompt, budget):
+                started.set()
+                assert release.wait(2)
+                return "1"
+
+            def at_deadline(answer, deadline):
+                assert started.wait(2)
+                clock[0] = deadline
+                return result(answer, deadline)
+
+            helper.setattr(intent, "_clock", lambda: clock[0])
+            helper.setattr(intent, "_ask", stall)
+            helper.setattr(intent, "_result", at_deadline)
+        else:
+            helper.setattr(intent, "_ask", model(subprocess.TimeoutExpired(["claude"], intent.BUDGET_S)))
+        try:
+            cli.prefetch_intent_cmd(session.id, turn, "plan")
+            recorded = Path(db.path).with_name("hooks.log").read_text()
+            assert "WARNING" in recorded
+            assert ("deadline" if stalled else "TimeoutExpired") in recorded
+        finally:
+            release.set()
+    working = model("1")
+    monkeypatch.setattr(intent, "_ask", working)
+    with pytest.raises(ToolError) as refused:
+        mcp_server.propose_plan(PLAN)
+    assert refused.value.__cause__.code == "intent_unavailable"
+    assert not working.calls
 
 
 def test_slow_background_answer_authorizes_publish(db, session, monkeypatch):
