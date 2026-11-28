@@ -365,25 +365,29 @@ it("design doc reader", async () => {
 const doc = (rev: number, text: string, more: Partial<Plan> = {}): Plan => ({ id: visual.id, session: "boss", title: "Cloud workers", rev, state: "open", markdown: "…", lede: "", queued: 0, created_at: 1, split: [],
   sections: [{ id: "summary", title: "Summary", markdown: text }], decisions: [], threads: [], ...more });
 
-it("a redirected plan can be cancelled from the reader, and the same reader then shows it closed", async () => {
-  const redirected = doc(1, "Workers run on your machine.", { state: "redirected", verdict: { approved: false, at: 13, rev: 1 } });
-  const cancelled: Plan = { ...redirected, state: "cancelled" };
+it.each([
+  doc(1, "Workers run on your machine.", { state: "redirected", verdict: { approved: false, at: 13, rev: 1 } }),
+  doc(0, "", { state: "writing", sections: [] }),
+])("a $state plan can be cancelled from the reader, and the same reader then shows it closed", async (initial) => {
+  const cancelled: Plan = { ...initial, state: "cancelled" };
   // The engine's answer to the cancel is what the reader reads from then on.
-  let current: Plan = redirected;
-  const cancels: number[] = [];
+  let current: Plan = initial;
   const client: PlansClient & PlanDocClient & VisualsClient & Pick<DaemonClient, "cancelPlan"> = {
     ...visuals, ...docWrites(() => current),
-    plan: async () => current, decidePlan: async () => redirected,
-    cancelPlan: async (_id, rev) => { cancels.push(rev); current = cancelled; return cancelled; },
+    plan: async () => current, decidePlan: async () => initial,
+    cancelPlan: async (_id, rev) => {
+      if (rev !== current.rev) throw new Error("Stale plan revision");
+      current = cancelled;
+      return current;
+    },
   };
   render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
-  await screen.findByText("Workers run on your machine.");
+  expect((await screen.findByTestId("plan-decided")).dataset.state).toBe(initial.state);
   expect(screen.getByTestId("plan-verdict").querySelector("[data-testid=plan-build]")).toBeNull();
   expect(screen.queryByTestId("plan-closed")).toBeNull();
   fireEvent.click(screen.getByTestId("plan-cancel"));
   // Same mounted reader: the closed presentation appears from the cancel's answer.
   await screen.findByTestId("plan-closed");
-  expect(cancels).toEqual([1]);
   expect(screen.queryByTestId("plan-cancel")).toBeNull();
   // The status is rendered in its closed presentation, not the changes-requested one.
   expect(screen.getByTestId("plan-status").dataset.presentation).toBe("closed");

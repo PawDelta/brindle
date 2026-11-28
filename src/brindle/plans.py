@@ -152,8 +152,7 @@ def _title(markdown: str) -> str | None:
 
 
 def _queue_message(c, root_id: str, text: str) -> int:
-    """Queue the person's verdict for the supervisor in the verdict's own
-    transaction ``c`` (as ``DB.enqueue`` would, without a transaction of its own)."""
+    """Queue a plan update for the supervisor in the same transaction ``c``."""
     return int(c.execute("INSERT INTO inbox (agent_id, sender_id, body, created_at) VALUES (?,NULL,?,?)",
                          (root_id, redact.mask(text), time.time())).lastrowid)
 
@@ -972,35 +971,45 @@ def begin(db: DB, root_id: str, asked_at: float | None = None) -> str | None:
         bus.publish_agent(db, "plan.requested", root_id, visual=current["id"])
         return current["id"]
 
+    queued: list[int] = []
+
     def write(c, vid: str, visual_rev: int) -> None:
-        if c.execute("SELECT 1 FROM plans WHERE root_id=? AND state=?", (root_id, WRITING)).fetchone():
-            raise ServiceError("exists", "a plan is already being written", 409)
+        if c.execute("SELECT 1 FROM plans WHERE root_id=? AND state IN ('writing','open','redirected')",
+                     (root_id,)).fetchone():
+            raise ServiceError("exists", "a plan is already open", 409)
         newest = c.execute("SELECT MAX(created_at) FROM plans WHERE root_id=?", (root_id,)).fetchone()[0]
         if asked_at is not None and newest is not None and asked_at <= newest:
             raise ServiceError("exists", "that ask already has its plan", 409)
         now = time.time()
         c.execute("INSERT INTO plans (id, root_id, rev, markdown, decisions, split, ask, state, created_at,"
                   " updated_at) VALUES (?,?,0,'','[]','[]',NULL,?,?,?)", (vid, root_id, WRITING, now, now))
+        visual_offers._grant(c, root_id, "plan")    # the one revision that fills it
+        queued.append(_queue_message(c, root_id, f"Planning draft {vid} is open. Use propose_plan with "
+                                     f"plan_id={vid!r} when you have the plan ready for the person to review."))
 
     try:
         v = visuals.publish(db, root, "Plan", _page("Plan", "The supervisor is writing this plan."),
                             kind="plan", extra=write, infer_intent=False)
-    except ServiceError:
-        return None
-    with db.tx() as c:
-        visual_offers._grant(c, root_id, "plan")    # the one revision that fills it
+    except ServiceError as e:
+        if e.code == "exists":
+            return None
+        log.warning("brindle: couldn't open a planning draft for %s (%s): %s", root_id, e.code, e.message)
+        raise
+    bus.publish_agent(db, "message.queued", root_id, message_id=queued[0], sender_id=None)
     bus.publish_agent(db, "autopilot.goal", root_id)
     bus.publish_agent(db, "plan.requested", root_id, visual=v["id"])   # listed already (visual.published); the person opens it
     return v["id"]
 
 
 def cancel_draft(db: DB, root_id: str) -> None:
-    """The person called the plan off before the supervisor wrote it: close the empty draft,
-    so it holds no work."""
-    with db.tx() as c:
-        c.execute("UPDATE plans SET state=?, updated_at=? WHERE root_id=? AND state=?",
-                  (SUPERSEDED, time.time(), root_id, WRITING))
-    bus.publish_agent(db, "autopilot.goal", root_id)
+    """Call off an empty draft from chat, leaving its tasks for the supervisor."""
+    draft = db.conn.execute("SELECT id, rev FROM plans WHERE root_id=? AND state=?", (root_id, WRITING)).fetchone()
+    if draft is not None:
+        try:
+            cancel(db, draft["id"], draft["rev"], person=True)
+        except ServiceError as e:
+            if e.code not in ("stale", "decided"):  # the draft was filled or closed meanwhile
+                raise
 
 
 def read_draft(db: DB, caller: Agent | None, plan_id: str) -> dict:
@@ -1413,7 +1422,7 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
 
 
 def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None = None) -> dict:
-    """Close an open or redirected plan as cancelled, approving nothing: the
+    """Close a writing, open or redirected plan as cancelled, approving nothing: the
     person's Cancel (``person``, with the revision on screen as ``rev``), or the
     session's supervisor withdrawing its own (``caller``; ``rev`` optional).
     Whatever the review state, a shared plan's share is dropped
@@ -1437,9 +1446,7 @@ def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None
         raise ServiceError("forbidden", "only the session's supervisor withdraws its plan", 403)
     if rev is not None and rev != p["rev"]:
         raise ServiceError("stale", f"the plan has a newer revision (r{p['rev']}); read that one", 409, rev=p["rev"])
-    if p["state"] == WRITING:
-        raise ServiceError("writing", "the supervisor is still writing this plan", 409)
-    if p["state"] not in ("open", "redirected"):
+    if p["state"] not in HOLDING:
         raise ServiceError("decided", "this plan is already decided", 409)
     root = p["root_id"]
     at = time.time()
@@ -1449,9 +1456,16 @@ def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None
         # committed after this read can slip past the cancel.
         held = [t for t in db.list_tasks(state="pending") + db.list_tasks(state=tasks.UNANSWERED)
                 if t.caller_id and autopilot.root_of(db, t.caller_id) == root and tasks.open_plan_holds(db, t)]
-        if not c.execute("UPDATE plans SET state=?, updated_at=? WHERE id=? AND rev=? AND state IN ('open','redirected')",
+        if not c.execute("UPDATE plans SET state=?, updated_at=? WHERE id=? AND rev=?"
+                         " AND state IN ('writing','open','redirected')",
                          (CANCELLED, at, p["id"], p["rev"])).rowcount:
             raise ServiceError("decided", "this plan is already decided", 409)
+        if p["state"] == WRITING:
+            c.execute("DELETE FROM visual_scoped_grants WHERE root_id=? AND scope='plan'", (root,))
+            c.execute("DELETE FROM visual_person_words WHERE root_id=? AND source='grant:plan'", (root,))
+            # An outstanding offer would otherwise hold work again once the draft closes.
+            c.execute("UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND (offer LIKE ? OR offer=?)",
+                      (OFFER_DISMISSED, root, OFFER_OPEN + "%", OFFER_ACCEPTED))
         row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
         if row is not None:
             shared_docs.drop_share(c, row)
