@@ -190,7 +190,7 @@ def test_the_person_reviews_a_design_doc_through_the_routes(db, session, tmp_pat
         assert started == []
 
         # The supervisor's next revision; approving it releases the held assign.
-        plans.propose(db, boss, "# Cloud workers", plan_id=pid, sections=[
+        plans.propose(db, boss, "# Cloud workers", plan_id=pid, base="r3", sections=[
             {"id": "summary", "title": "Summary", "markdown": got["sections"][0]["markdown"]}])
         assert post("/decide", rev=4, approved=True).json()["state"] == "approved"
     assert started == ["build it"]

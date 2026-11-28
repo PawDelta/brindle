@@ -1048,7 +1048,8 @@ def pending(db: DB, p: dict) -> tuple[list[str], list[str], list[int]]:
         titles = [_title(p, cur, {"kind": "text", "section": s}) for s in json.loads(r["changed"])]
         how = "accepted a suggestion in" if r["source"] == "suggestion" else "edited"
         who = "They" if r["author"] == PERSON else teammate_names(db, p["id"]).get(r["author"][len(TEAMMATE):], "A teammate")
-        line = f"{who} {how} {', '.join(titles)} (r{r['rev']}); revise from the current text."
+        line = (f"{who} {how} {', '.join(titles)} (r{r['rev']}); read the current text with "
+                f"read_plan(plan_id=\"{p['id']}\") and revise that, passing the base it gives.")
         message.append(line)
         record.append(line)
     return message, record, ids
