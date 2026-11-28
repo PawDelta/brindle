@@ -92,11 +92,14 @@ def test_large_draft_mapping_keeps_offsets_between_edits(matching_budget):
     assert at(25) == 29
 
 
-@pytest.mark.parametrize("remove_word", [
-    False,
-    pytest.param(True, marks=pytest.mark.variant("An interior deletion splits the unchanged run into two anchors")),
+@pytest.mark.parametrize("prefix, suffix, remove_word", [
+    pytest.param("! ", " ?", False, id="short-edge-insertions"),
+    pytest.param("! ", " ?", True, id="interior-deletion",
+                 marks=pytest.mark.variant("An interior deletion splits the unchanged run into two anchors")),
+    pytest.param("[" * 30, "]" * 30, False, id="long-edge-insertions"),
 ])
-def test_retype_keeps_a_middle_replacement_in_place_after_relay_insertions(matching_budget, remove_word):
+def test_retype_keeps_a_middle_replacement_in_place_after_relay_insertions(matching_budget, prefix, suffix,
+                                                                         remove_word):
     words = [f"word{i:03}" for i in range(300)]
     base = " ".join(words)
     local = base.replace("word150", "replacement")
@@ -104,12 +107,23 @@ def test_retype_keeps_a_middle_replacement_in_place_after_relay_insertions(match
     def relay_text(text):
         if remove_word:
             text = text.replace("word100 ", "")
-        return "! " + text + " ?"
+        return prefix + text + suffix
 
     doc = SharedDoc.new({"s": relay_text(base)})
     plan_drafts.retype(doc, {"s": base}, {"s": local})
 
     assert doc.text("s") == relay_text(local)
+
+
+def test_retype_keeps_a_relay_replacement_when_local_inserts_long_edges(matching_budget):
+    base = " ".join(f"word{i:03}" for i in range(300))
+    relay = base.replace("word150", "replacement")
+    doc = SharedDoc.new({"s": relay})
+    prefix, suffix = "[" * 30, "]" * 30
+
+    plan_drafts.retype(doc, {"s": base}, {"s": prefix + base + suffix})
+
+    assert doc.text("s") == prefix + relay + suffix
 
 
 def test_small_diffs_keep_legacy_offsets():

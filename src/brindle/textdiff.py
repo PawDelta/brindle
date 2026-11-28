@@ -125,6 +125,51 @@ def _trace_opcodes(trace: list[dict[int, int]], left: int, right: int) -> list[O
     return ops
 
 
+def _find_run(haystack: Sequence[str], needle: Sequence[str]) -> int:
+    """Find a nonempty run without rescanning repeated units."""
+    if isinstance(haystack, str) and isinstance(needle, str):
+        return haystack.find(needle)
+
+    # The prefix table lets each mismatch reuse the longest prefix already
+    # matched at the next possible start (Knuth–Morris–Pratt).
+    prefix = [0] * len(needle)
+    matched = 0
+    for i in range(1, len(needle)):
+        while matched and needle[i] != needle[matched]:
+            matched = prefix[matched - 1]
+        if needle[i] == needle[matched]:
+            matched += 1
+        prefix[i] = matched
+
+    matched = 0
+    for i, unit in enumerate(haystack):
+        while matched and unit != needle[matched]:
+            matched = prefix[matched - 1]
+        if unit == needle[matched]:
+            matched += 1
+            if matched == len(needle):
+                return i + 1 - matched
+    return -1
+
+
+def _containment_opcodes(before: Sequence[str], after: Sequence[str]) -> list[Opcode] | None:
+    if len(before) == len(after):
+        return None
+    if len(before) < len(after):
+        a, x, size = 0, _find_run(after, before), len(before)
+    else:
+        a, x, size = _find_run(before, after), 0, len(after)
+    if min(a, x) < 0:
+        return None
+
+    b, y = a + size, x + size
+    ops = [_edit(0, a, 0, x)] if a or x else []
+    ops.append(("equal", a, b, x, y))
+    if (b, y) != (len(before), len(after)):
+        ops.append(_edit(b, len(before), y, len(after)))
+    return ops
+
+
 def sequence_opcodes(before: Sequence[str], after: Sequence[str], *, autojunk: bool = False) -> list[Opcode]:
     """Diff lines, paragraphs, tokens or characters with a bounded matcher."""
     if before == after:
@@ -133,12 +178,17 @@ def sequence_opcodes(before: Sequence[str], after: Sequence[str], *, autojunk: b
         return [_edit(0, len(before), 0, len(after))]
     if fits(len(before), len(after)):
         return SequenceMatcher(None, before, after, autojunk=autojunk).get_opcodes()
+    contained = _containment_opcodes(before, after)
+    if contained is not None:
+        return contained
     start, suffix = common_edges(before, after)
     left, right = before[start:len(before) - suffix], after[start:len(after) - suffix]
     if fits(len(left), len(right)):
         middle = SequenceMatcher(None, left, right, autojunk=autojunk).get_opcodes()
     else:
-        middle = _sparse_opcodes(left, right)
+        middle = _containment_opcodes(left, right) if start or suffix else None
+        if middle is None:
+            middle = _sparse_opcodes(left, right)
         if middle is None:
             middle = (positional_opcodes(left, right) if not isinstance(left, str) and len(left) == len(right)
                       else [_edit(0, len(left), 0, len(right))])
@@ -149,9 +199,10 @@ def opcodes(before: str, after: str, *, autojunk: bool = False) -> list[Opcode]:
     """Diff at character offsets, using lines then words for large regions.
 
     Small inputs keep SequenceMatcher's original alignment, including ties
-    between repeated characters. Large inputs pin equal edges first. A region
-    that still exceeds the character budget after refinement uses a bounded
-    search for sparse edits before falling back to a single replacement.
+    between repeated characters. Large inputs keep contained runs intact and
+    trim equal edges before refinement. A region that still exceeds the
+    character budget uses a bounded search for sparse edits before falling
+    back to a single replacement.
     """
     return _refine(before, after, autojunk, (_lines, tokens))
 
@@ -160,10 +211,16 @@ def _refine(before: str, after: str, autojunk: bool,
             splitters: tuple[Callable[[str], list[str]], ...]) -> list[Opcode]:
     if before == after or fits(len(before), len(after)) or not splitters:
         return sequence_opcodes(before, after, autojunk=autojunk)
+    contained = _containment_opcodes(before, after)
+    if contained is not None:
+        return contained
     start, suffix = common_edges(before, after)
     left, right = before[start:len(before) - suffix], after[start:len(after) - suffix]
     if fits(len(left), len(right)):
         return _with_edges(before, after, start, suffix, sequence_opcodes(left, right, autojunk=autojunk))
+    contained = _containment_opcodes(left, right) if start or suffix else None
+    if contained is not None:
+        return _with_edges(before, after, start, suffix, contained)
 
     split, remaining = splitters[0], splitters[1:]
     a_units, b_units = split(left), split(right)
