@@ -152,8 +152,7 @@ def _title(markdown: str) -> str | None:
 
 
 def _queue_message(c, root_id: str, text: str) -> int:
-    """Queue the person's verdict for the supervisor in the verdict's own
-    transaction ``c`` (as ``DB.enqueue`` would, without a transaction of its own)."""
+    """Queue a plan update for the supervisor in the same transaction ``c``."""
     return int(c.execute("INSERT INTO inbox (agent_id, sender_id, body, created_at) VALUES (?,NULL,?,?)",
                          (root_id, redact.mask(text), time.time())).lastrowid)
 
@@ -673,6 +672,73 @@ def _page(title: str, markdown: str) -> str:
 # -- the supervisor proposes ------------------------------------------------------------
 
 
+_REV_BASE = re.compile(r"r(\d+)")
+
+
+def _rev_base(base: Any) -> int | None:
+    """The revision a ``r<N>`` base names (a solo plan's, from :func:`read_draft`), else None."""
+    m = _REV_BASE.fullmatch(base) if isinstance(base, str) else None
+    return int(m.group(1)) if m else None
+
+
+def _keep_acknowledged(parts: list[dict], given: list[dict], ack: dict) -> list[dict]:
+    """``parts`` (the proposal after the spine and template filled and pruned
+    it) with every section the supervisor passed on unchanged from ``ack``,
+    the revision it read, exactly as it is there: a section the person
+    cleared stays cleared, rather than coming back as "None." or dropping out."""
+    was = {s["id"]: s for s in ack["sections"]}
+    same = [s["id"] for s in given if s["id"] in was and all(
+        s.get(k) == was[s["id"]].get(k) for k in ("title", "kind", "markdown", "caption"))]
+    if not same:
+        return parts
+    out = [was[s["id"]] if s["id"] in same else s for s in parts]
+    order = [s["id"] for s in given]
+    for sid in same:
+        if any(s["id"] == sid for s in out):
+            continue
+        # Dropped by the spine or template: back after the section it followed in the proposal.
+        before = {*order[:order.index(sid)]}
+        at = max((i + 1 for i, s in enumerate(out) if s["id"] in before), default=0)
+        out.insert(at, was[sid])
+    return out
+
+
+def _revised_from(db: DB, p: dict, base: Any) -> int:
+    """The revision a supervisor's revision of plan ``p`` (no live draft) was
+    written from: the ``r<N>`` base :func:`read_draft` gave it, else its own
+    last proposal (it has read nothing newer) as of ``p``, the plan as this
+    proposal found it: a proposal published since never becomes its base."""
+    from brindle import plan_docs
+
+    n = _rev_base(base)
+    if n is not None:
+        if n > p["rev"]:
+            raise ServiceError("invalid", f"base {base} isn't a revision of this plan; read it with read_plan", 400)
+        return n
+    last = db.conn.execute("SELECT MAX(rev) FROM plan_revisions WHERE plan_id=? AND author=? AND rev<=?",
+                           (p["id"], plan_docs.SUPERVISOR, p["rev"])).fetchone()[0]
+    return p["rev"] if last is None else last
+
+
+def _refuse_overwrite(c, p: dict, cur: dict, revised_from: int) -> None:
+    """In the revision's transaction: refuse it (``stale``) when the person
+    (or a teammate) made revisions since ``revised_from``, which it would
+    silently overwrite. Names the sections they changed."""
+    from brindle import plan_docs
+
+    rows = c.execute("SELECT rev, changed FROM plan_revisions WHERE plan_id=? AND rev>? AND author!=? ORDER BY rev",
+                     (p["id"], revised_from, plan_docs.SUPERVISOR)).fetchall()
+    if not rows:
+        return
+    ids = list(dict.fromkeys(s for r in rows for s in json.loads(r["changed"])))
+    titles = [plan_docs._title(p, cur, {"kind": "text", "section": s}) for s in ids]
+    revs = ", ".join(f"r{r['rev']}" for r in rows)
+    raise ServiceError("stale", f"{', '.join(titles)} changed in the person's edits ({revs}) since r{revised_from}, "
+                       f"the revision yours was written from, and it would overwrite them: read the plan with "
+                       f"read_plan(plan_id=\"{p['id']}\"), revise its text and pass the base it gives", 409,
+                       rev=rows[-1]["rev"], sections=ids)
+
+
 def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, split: Any = None,
             title: str | None = None, plan_id: str | None = None, ask: Any = None,
             sections: Any = None, base: Any = None) -> dict:
@@ -689,7 +755,10 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     A shared plan with a live draft takes no revision: the supervisor writes
     into the draft, against ``base``, the text :func:`read_draft` handed it
     (plan_docs.supervise), and the plan is open for the person again. The
-    result's ``draft_write`` says what went in and what became suggestions."""
+    result's ``draft_write`` says what went in and what became suggestions.
+    Any other revision replaces the doc: it is written from ``base`` (the
+    ``r<N>`` :func:`read_draft` gave), or else from the supervisor's own last
+    revision, and is refused (``stale``) if the person edited it since."""
     from brindle import plan_docs
 
     visuals.require_enabled()
@@ -698,13 +767,19 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         raise ServiceError("forbidden", "only the session's supervisor proposes a plan", 403)
     if sections is not None:
         parts = plan_docs.parse_sections(sections)
-        lede = plan_docs._body_text(markdown, "markdown", MAX_MARKDOWN).strip()
+        # The bodies as sent, before trimming: a section carried forward verbatim from read_plan
+        # (an indented code block, say) is recognised by its exact text (_keep_acknowledged).
+        sent = [{**s, "markdown": plan_docs._body_text(raw.get("markdown"), f"section {s['id']}",
+                                                       plan_docs.MAX_SECTION)} for s, raw in zip(parts, sections)]
+        sent_lede = plan_docs._body_text(markdown, "markdown", MAX_MARKDOWN)
+        lede = sent_lede.strip()
         markdown = plan_docs.render(lede, parts)
     elif not isinstance(markdown, str) or not markdown.strip():
         raise ServiceError("invalid", "markdown is required", 400)
     else:
         markdown = markdown.strip()
         lede, parts = plan_docs.from_markdown(markdown)
+        sent, sent_lede = parts, None
     # The empty draft opened when the person asked: the first proposal (with or without its id)
     # fills that plan instead of creating another.
     draft_row = db.conn.execute("SELECT id FROM plans WHERE root_id=? AND state=?", (root.id, WRITING)).fetchone()
@@ -720,6 +795,15 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     # design-doc spine (an older free-form plan keeps its sections as they are).
     on_spine = plan_id is not None and any(
         s["id"] in plan_docs.SPINE for s in plan_docs.revision(db, plan_id)["sections"])
+    # A solo plan revised from the revision read_plan gave (base r<N>): what the supervisor passed
+    # on unchanged keeps that revision's text through the spine and template below.
+    acknowledged = None
+    if plan_id is not None and _rev_base(base) is not None:
+        try:
+            acknowledged = plan_docs.revision(db, plan_id, _rev_base(base))
+        except ServiceError:
+            acknowledged = None
+    passed = plan_docs.design_doc(sent, map_only=True) if acknowledged else []
     if plan_id is None or on_spine:
         parts = plan_docs.design_doc(parts, force=not template, map_only=bool(template))
         markdown = plan_docs.render(lede, parts)
@@ -736,6 +820,12 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         kept = [s for s in parts if not plan_docs.empty_extra(s) or doc_templates._key(s["title"]) in required]
         added = added or len(kept) != len(parts)
         parts = kept
+    if acknowledged is not None:
+        restored = _keep_acknowledged(parts, passed, acknowledged)
+        added = added or restored != parts
+        parts = restored
+        if sent_lede is not None and sent_lede == acknowledged["lede"] and lede != sent_lede:
+            lede, added = sent_lede, True    # the lede carried forward verbatim, whitespace and all
     if added:
         markdown = plan_docs.render(lede, parts)
     if len(markdown.encode("utf-8")) > MAX_MARKDOWN:
@@ -780,6 +870,9 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     if replica is not None and not base:
         raise ServiceError("base_required", "this plan is co-edited in a live draft: read it with "
                            "read_plan and pass the base it gives, so what others wrote since stays", 409)
+    # A plan with no live draft: the revision this one was written from, so the person's own
+    # edits since (which it would overwrite) refuse it instead of being lost.
+    revised_from = _revised_from(db, current, base) if plan_id and replica is None else None
     drafted: dict = {}
     # A draft holds only text: what else the supervisor changed is named, not applied.
     off_draft = [name for name, new in (("decisions", decisions), ("split", split), ("ask", ask))
@@ -820,6 +913,8 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
                 "UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND (offer IS NULL OR offer LIKE ? OR offer=?)",
                 (OFFER_PLANNED, root.id, OFFER_OPEN + "%", OFFER_ACCEPTED)).rowcount)
         else:
+            if revised_from is not None:
+                _refuse_overwrite(c, current, replaced, revised_from)
             # Only a plan still waiting on the person takes a revision: one
             # approved since the check above stays approved.
             changed = c.execute("UPDATE plans SET rev=?, markdown=?, decisions=?, split=?, ask=?, updated_at=?,"
@@ -877,43 +972,57 @@ def begin(db: DB, root_id: str, asked_at: float | None = None) -> str | None:
         bus.publish_agent(db, "plan.requested", root_id, visual=current["id"])
         return current["id"]
 
+    queued: list[int] = []
+
     def write(c, vid: str, visual_rev: int) -> None:
-        if c.execute("SELECT 1 FROM plans WHERE root_id=? AND state=?", (root_id, WRITING)).fetchone():
-            raise ServiceError("exists", "a plan is already being written", 409)
+        if c.execute("SELECT 1 FROM plans WHERE root_id=? AND state IN ('writing','open','redirected')",
+                     (root_id,)).fetchone():
+            raise ServiceError("exists", "a plan is already open", 409)
         newest = c.execute("SELECT MAX(created_at) FROM plans WHERE root_id=?", (root_id,)).fetchone()[0]
         if asked_at is not None and newest is not None and asked_at <= newest:
             raise ServiceError("exists", "that ask already has its plan", 409)
         now = time.time()
         c.execute("INSERT INTO plans (id, root_id, rev, markdown, decisions, split, ask, state, created_at,"
                   " updated_at) VALUES (?,?,0,'','[]','[]',NULL,?,?,?)", (vid, root_id, WRITING, now, now))
+        visual_offers._grant(c, root_id, "plan")    # the one revision that fills it
+        queued.append(_queue_message(
+            c, root_id, f"Planning draft {vid} is open. If the person explicitly asked for a planning document "
+            f"or accepted a planning offer, fill the draft with propose_plan using plan_id={vid!r}. "
+            f"If neither happened, close the draft with withdraw_plan(plan_id={vid!r})."))
 
     try:
         v = visuals.publish(db, root, "Plan", _page("Plan", "The supervisor is writing this plan."),
                             kind="plan", extra=write, infer_intent=False)
-    except ServiceError:
-        return None
-    with db.tx() as c:
-        visual_offers._grant(c, root_id, "plan")    # the one revision that fills it
+    except ServiceError as e:
+        if e.code == "exists":
+            return None
+        log.warning("brindle: couldn't open a planning draft for %s (%s): %s", root_id, e.code, e.message)
+        raise
+    bus.publish_agent(db, "message.queued", root_id, message_id=queued[0], sender_id=None)
     bus.publish_agent(db, "autopilot.goal", root_id)
     bus.publish_agent(db, "plan.requested", root_id, visual=v["id"])   # listed already (visual.published); the person opens it
     return v["id"]
 
 
 def cancel_draft(db: DB, root_id: str) -> None:
-    """The person called the plan off before the supervisor wrote it: close the empty draft,
-    so it holds no work."""
-    with db.tx() as c:
-        c.execute("UPDATE plans SET state=?, updated_at=? WHERE root_id=? AND state=?",
-                  (SUPERSEDED, time.time(), root_id, WRITING))
-    bus.publish_agent(db, "autopilot.goal", root_id)
+    """Call off an empty draft from chat, leaving its tasks for the supervisor."""
+    draft = db.conn.execute("SELECT id, rev FROM plans WHERE root_id=? AND state=?", (root_id, WRITING)).fetchone()
+    if draft is not None:
+        try:
+            cancel(db, draft["id"], draft["rev"], person=True)
+        except ServiceError as e:
+            if e.code not in ("stale", "decided"):  # the draft was filled or closed meanwhile
+                raise
 
 
 def read_draft(db: DB, caller: Agent | None, plan_id: str) -> dict:
-    """The session's supervisor reads its shared plan's live draft, once the
-    person has sent it back (Request changes): the text others write there
-    reaches it only then. Returns the doc as propose takes it (lede, sections
-    with their ids, decisions, split, ask) and ``base``, the id its revision
-    names (plan_docs.hand_over)."""
+    """The session's supervisor reads its plan as it stands. A shared plan's
+    live draft is read once the person has sent it back (Request changes):
+    the text others write there reaches it only then. Any other plan reads
+    its current revision, the person's own edits included. Returns the doc as
+    propose takes it (lede, sections with their ids, decisions, split, ask)
+    and ``base``, which the revision names: the draft's (plan_docs.hand_over),
+    or ``r<N>``, the revision read."""
     from brindle import plan_docs
 
     visuals.require_enabled()
@@ -923,10 +1032,12 @@ def read_draft(db: DB, caller: Agent | None, plan_id: str) -> dict:
         raise ServiceError("not_found", "no such plan in this session", 404)
     replica = plan_docs.draft(db, p)
     if replica is None:
-        raise ServiceError("no_draft", "this plan has no live draft: revise it from your last revision", 409)
-    if p["state"] != "redirected":
+        cur = plan_docs.revision(db, p["id"])
+        base = f"r{cur['rev']}"
+    elif p["state"] != "redirected":
         raise ServiceError("not_sent", "the person hasn't sent this plan back to you; wait for Request changes", 409)
-    base, cur = plan_docs.hand_over(db, p, replica)
+    else:
+        base, cur = plan_docs.hand_over(db, p, replica)
     return {"plan_id": p["id"], "rev": p["rev"], "base": base, "lede": cur["lede"], "ask": cur["ask"],
             "sections": [{k: s[k] for k in ("id", "title", "kind", "markdown", "caption")} for s in cur["sections"]],
             "decisions": cur["decisions"], "split": cur["split"]}
@@ -1314,7 +1425,7 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
 
 
 def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None = None) -> dict:
-    """Close an open or redirected plan as cancelled, approving nothing: the
+    """Close a writing, open or redirected plan as cancelled, approving nothing: the
     person's Cancel (``person``, with the revision on screen as ``rev``), or the
     session's supervisor withdrawing its own (``caller``; ``rev`` optional).
     Whatever the review state, a shared plan's share is dropped
@@ -1338,9 +1449,7 @@ def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None
         raise ServiceError("forbidden", "only the session's supervisor withdraws its plan", 403)
     if rev is not None and rev != p["rev"]:
         raise ServiceError("stale", f"the plan has a newer revision (r{p['rev']}); read that one", 409, rev=p["rev"])
-    if p["state"] == WRITING:
-        raise ServiceError("writing", "the supervisor is still writing this plan", 409)
-    if p["state"] not in ("open", "redirected"):
+    if p["state"] not in HOLDING:
         raise ServiceError("decided", "this plan is already decided", 409)
     root = p["root_id"]
     at = time.time()
@@ -1350,9 +1459,16 @@ def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None
         # committed after this read can slip past the cancel.
         held = [t for t in db.list_tasks(state="pending") + db.list_tasks(state=tasks.UNANSWERED)
                 if t.caller_id and autopilot.root_of(db, t.caller_id) == root and tasks.open_plan_holds(db, t)]
-        if not c.execute("UPDATE plans SET state=?, updated_at=? WHERE id=? AND rev=? AND state IN ('open','redirected')",
+        if not c.execute("UPDATE plans SET state=?, updated_at=? WHERE id=? AND rev=?"
+                         " AND state IN ('writing','open','redirected')",
                          (CANCELLED, at, p["id"], p["rev"])).rowcount:
             raise ServiceError("decided", "this plan is already decided", 409)
+        if p["state"] == WRITING:
+            c.execute("DELETE FROM visual_scoped_grants WHERE root_id=? AND scope='plan'", (root,))
+            c.execute("DELETE FROM visual_person_words WHERE root_id=? AND source='grant:plan'", (root,))
+            # An outstanding offer would otherwise hold work again once the draft closes.
+            c.execute("UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND (offer LIKE ? OR offer=?)",
+                      (OFFER_DISMISSED, root, OFFER_OPEN + "%", OFFER_ACCEPTED))
         row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
         if row is not None:
             shared_docs.drop_share(c, row)

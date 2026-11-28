@@ -296,10 +296,11 @@ def test_ask_the_supervisor_routes_to_the_teammates_session(db, parts, monkeypat
     lib.comment({"rev": 1, "anchor": {"kind": "section", "section": "summary"},
                  "text": "Why these workers?", "question": True}, {})
     repo = db.get_workspace(own.workspace_id).repo_root
+    before = messages(db)
     first = dq.dispatch(db, DOC, 1, repo_root=repo, **net)
     assert first["agent_id"] == own.id
     assert dq.dispatch(db, DOC, 1, repo_root=repo, **net) == first
-    assert db.pending_count(own.id) == 1 and not messages(db)
+    assert db.pending_count(own.id) == 1 and messages(db) == before
     with pytest.raises(ServiceError):
         dq.reply(db, boss, DOC, 1, "Not my question.", **net)
     dq.reply(db, own, DOC, 1, "They keep execution on your machines.", **net)
@@ -371,8 +372,9 @@ def test_ask_the_supervisor_without_a_session(db, parts, monkeypatch, provider, 
             db_.conn.execute("INSERT INTO startup_prompts (agent_id, pane, launched_at) VALUES (?,'pane',1)", (a.id,))
 
     monkeypatch.setattr(agents, "_launch", launch)
+    before = messages(db)
     got = dq.dispatch(db, DOC, 1, **net)
-    assert not messages(db)
+    assert messages(db) == before
     if provider and not failed:
         a, ws = launches[0]
         assert got["agent_id"] == a.id
@@ -438,9 +440,10 @@ def test_ask_the_supervisor_author_gets_immediate_answer_and_questions_are_not_f
     monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
     original = sd._require_team
     monkeypatch.setattr(sd, "_require_team", lambda store: original(net["store"]))
+    before = messages(db)
     response = plan_comment(db, {"id": pid}, {"rev": 1, "anchor": {"kind": "section", "section": "summary"},
                                              "text": "Why these workers?", "question": True})
-    assert not messages(db)
+    assert messages(db) == before
 
     async def transport():
         entered, release = asyncio.Event(), asyncio.Event()
@@ -452,18 +455,18 @@ def test_ask_the_supervisor_author_gets_immediate_answer_and_questions_are_not_f
 
         task = asyncio.create_task(response({"type": "http"}, None, send))
         await entered.wait()
-        assert not messages(db)
+        assert messages(db) == before
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert not messages(db)
+        assert messages(db) == before
         # A new request whose body reaches the person releases the dispatch.
         release.set()
         await response({"type": "http"}, None, send)
 
     asyncio.run(transport())
     got = json.loads(response.body)
-    assert messages(db) and got["threads"][0]["question"]
+    assert messages(db)[len(before):] and got["threads"][0]["question"]
     plans.reply(db, db.get_agent("boss"), pid, got["threads"][0]["id"], "An answer.")
     lib.threads.append({"id": 99, "kind": "comment", "rev": 1, "author": "teammate", "question": True,
                         "text": "Teammate private question", "status": "open", "replies": [],
@@ -524,8 +527,9 @@ def test_ask_the_supervisor_on_a_local_doc(db, parts):
 
     pid, _, _ = parts
     tid = plan_docs.comment(db, pid, 1, {"kind": "section", "section": "summary"}, "Why?", question=True)
+    pending = db.pending_count("boss")
     dq.ask_plan(db, pid, tid)
-    assert db.pending_count("boss") == 1
+    assert db.pending_count("boss") == pending + 1
     before = messages(db)
     plans.reply(db, db.get_agent("boss"), pid, tid, "To keep execution local.")
     assert plans.to_dto(db, plans.get(db, pid))["threads"][0]["replies"][0]["from_supervisor"]

@@ -1252,8 +1252,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   );
   const decidedBar = (
     <>
-      {/* A redirected plan stays open to cancel (never to approve): the person may close it instead of waiting for a revision. */}
-      {plan.state === "redirected" && client?.cancelPlan && (
+      {(plan.state === "writing" || plan.state === "redirected") && client?.cancelPlan && (
         <div className="col-span-full flex justify-end">
           <LoadingButton className={quiet} busy={sending === "cancel"} disabled={!!historical || busy} data-testid="plan-cancel" data-again="cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>
         </div>

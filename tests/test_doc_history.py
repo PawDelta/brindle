@@ -55,7 +55,7 @@ def test_timeline_and_revision_changes_through_daemon(db, session):
         assert plans.get(db, pid)["rev"] == 2
         with db.tx() as c:
             visual_offers._grant(c, "boss", "plan")      # the revision a redirect asks for
-        plans.propose(db, boss, "# Design", [{**DECISIONS[0], "mine": "repo"}], plan_id=pid,
+        plans.propose(db, boss, "# Design", [{**DECISIONS[0], "mine": "repo"}], plan_id=pid, base="r2",
                       sections=[{"id": "summary", "title": "Renamed", "markdown": "The new text."}])
         structural = client.get(f"/v1/plans/{pid}/revisions/3/changes").json()
         changed = {c["section"]: c for c in structural["changes"]}

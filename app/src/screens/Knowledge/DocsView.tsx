@@ -705,7 +705,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
       {(results || resultsError) && (
         <>
           {showResults && <div className="px-8 pt-s2"><ResultsPanel results={results} error={resultsError} docs={docs} /></div>}
-          <div className="sticky bottom-0 z-[2] mx-8 mt-auto flex flex-wrap items-center gap-[18px] border-t border-line bg-canvas pb-3.5 pt-3 text-[12.5px] text-ink-3" data-testid="results-line">
+          <div className="mx-8 mt-auto flex flex-wrap items-center gap-[18px] border-t border-line bg-canvas pb-3.5 pt-3 text-[12.5px] text-ink-3" data-testid="results-line">
             {results && <span className={label}>Last {results.days} days</span>}
             {results?.enough && results.with_brief !== null && results.without_brief !== null ? (
               <>
