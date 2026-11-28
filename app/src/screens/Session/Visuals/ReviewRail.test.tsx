@@ -45,8 +45,9 @@ it("gives a reviewer the sign-off action in their rail", async () => {
 });
 
 it("withdraws approval and keeps the current revision waiting for its signer", async () => {
-  const heldGate = { ...gate!, can_hold_approval: true, approval_held: { rev: visual.rev, waiting_on: ["alice"] } };
-  read({ gate: heldGate });
+  const rev = 7;
+  const heldGate = { ...gate!, can_hold_approval: true, approval_held: { rev, waiting_on: ["alice"] } };
+  read({ rev, gate: heldGate });
   const rail = within(await screen.findByTestId("review-rail"));
   const approve = rail.getByTestId("plan-build");
   await waitFor(() => expect(approve.dataset.state).toBe("pressed"));
