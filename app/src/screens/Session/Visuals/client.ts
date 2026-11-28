@@ -18,7 +18,7 @@ export type PlanSharingClient = Pick<DaemonClient, "sharePlan" | "setPlanReviewe
 export type PlanAccessCalls = "planAccess" | "syncPlanAccess" | "invitePlanPerson" | "setPlanPersonAccess" | "setPlanPersonSignOff" | "removePlanPerson" | "removePlanScope" | "unsharePlan" | "planInvites" | "ackPlanInvites" | "dismissPlanInvite";
 
 /* A design someone else shared, read and reviewed from the Library (brindle/pro/shared_reader.py). */
-export type SharedDesignClient = Pick<DaemonClient, "sharedDesign" | "writeSharedDesign" | "libraryPeople"> & Partial<Pick<DaemonClient, "sharedDesignHistory" | "sharedDesignRevisionChanges" | "designPeople" | DesignAccessCalls>>;
+export type SharedDesignClient = Pick<DaemonClient, "sharedDesign" | "writeSharedDesign" | "libraryPeople"> & Partial<Pick<DaemonClient, "acknowledgeDesignReceipts" | "sharedDesignHistory" | "sharedDesignRevisionChanges" | "designPeople" | DesignAccessCalls>>;
 /* The same, for an editor of a design someone else shared. */
 export type DesignAccessCalls = "designAccess" | "inviteDesignPerson" | "setDesignPersonAccess" | "setDesignPersonSignOff" | "removeDesignPerson" | "removeDesignScope";
 

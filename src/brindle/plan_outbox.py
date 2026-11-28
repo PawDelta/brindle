@@ -203,12 +203,8 @@ def deliver(db, owner, doc, send, load, *, item=None, read=False, legacy=False):
                 conn.execute("UPDATE plan_outbox SET state='sent', sent_at=NULL, payload=? WHERE seq=?",
                              (json.dumps(target), row["seq"]))
         now = time.time()
-        if read or item:
-            # Start the display window with a reader response, even when background sync delivered it.
-            conn.execute("UPDATE plan_outbox SET sent_at=? WHERE owner=? AND doc=? AND state='sent' AND sent_at IS NULL",
-                         (now, owner, doc))
         rows = conn.execute("SELECT * FROM plan_outbox WHERE owner=? AND doc=? AND "
-                            "(state!='sent' OR sent_at>?) ORDER BY seq", (owner, doc, now - 3))
+                            "(state!='sent' OR sent_at IS NULL OR sent_at>?) ORDER BY seq", (owner, doc, now - 3))
         items = []
         for row in rows:
             body = json.loads(row["payload"])
@@ -220,3 +216,11 @@ def deliver(db, owner, doc, send, load, *, item=None, read=False, legacy=False):
             items.append({"client_id": row["client_id"], "tail": row["tail"], "state": row["state"],
                           "code": row["code"], "body": body})
         return view, items
+
+
+def acknowledge(db, owner, doc, client_ids):
+    """Start the brief Sent window only after the reader has accepted the receipt."""
+    now = time.time()
+    db.conn.executemany("UPDATE plan_outbox SET sent_at=? WHERE owner=? AND doc=? AND client_id=? "
+                        "AND state='sent' AND sent_at IS NULL",
+                        ((now, owner, doc, key) for key in client_ids))

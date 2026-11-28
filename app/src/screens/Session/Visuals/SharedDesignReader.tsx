@@ -99,6 +99,11 @@ export function SharedDesignReader({ client, docId, title, repo, onBack, backLab
     setFailure(e instanceof DaemonError ? { source, error: e } : null);
   }, observeVisibleReads);
   account.current = doc?.me;
+  useEffect(() => {
+    if (doc?.id !== docId || !doc.me) return;
+    const ids = doc.outbox?.filter(item => item.state === "sent").map(item => item.client_id);
+    if (ids?.length) void client.acknowledgeDesignReceipts?.(docId, doc.me, ids, repo).catch(() => {});
+  }, [client, doc, docId, repo]);
   const shown = useMemo(() => {
     if (!doc) return null;
     const current = sending?.docId === doc.id && sending.me === doc.me

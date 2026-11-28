@@ -201,6 +201,17 @@ def _deliver(db, me, doc_id, client, store, **options):
     return plan_outbox.deliver(db, me, doc_id, call, load, **options)
 
 
+def acknowledge_receipts(db, doc_id, owner, client_ids):
+    from brindle import plan_outbox
+
+    me = ad.require_entitlement(ad._session(None, None)[1]).sub
+    if not isinstance(client_ids, list) or not all(isinstance(key, str) for key in client_ids):
+        raise ServiceError("invalid", "Expected a list of client IDs", 400)
+    if me == owner:
+        plan_outbox.acknowledge(db, me, doc_id, client_ids)
+    return {}
+
+
 def drain_pending(db, owner, client, store):
     """Deliver a signed-in reviewer's changes on the daemon's shared-plan sync pass."""
     docs = db.conn.execute("SELECT doc FROM plan_outbox WHERE owner=? AND state='waiting' "

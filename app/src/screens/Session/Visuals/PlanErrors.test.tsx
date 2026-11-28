@@ -20,13 +20,18 @@ async function open(state: "waiting" | "refused") {
   } satisfies SharedDesign;
   let current: SharedDesign = doc;
   const client = { sharedDesign: async () => current, writeSharedDesign: async () => doc,
+    acknowledgeDesignReceipts: async (id: string, owner: string, ids: string[]) => {
+      if (id === current.id && owner === current.me) {
+        current = { ...current, outbox: current.outbox?.filter(item => !ids.includes(item.client_id)) };
+      }
+    },
     libraryPeople: async () => ({ people: [] }) };
   await act(async () => { render(<SharedDesignReader client={client} docId={doc.id} onBack={() => {}} />); });
   async function refresh(changes: Partial<SharedDesign>) {
     current = { ...current, ...changes };
     await act(async () => { window.dispatchEvent(new Event("online")); });
   }
-  return { card: within(screen.getByRole("radiogroup", { name: "Where?" })), doc, refresh };
+  return { card: within(screen.getByRole("radiogroup", { name: "Where?" })), doc, refresh, read: client.sharedDesign };
 }
 
 it("keeps the current pick and both earlier refusal receipts after reconnect", async () => {
@@ -38,7 +43,7 @@ it("keeps the current pick and both earlier refusal receipts after reconnect", a
 });
 
 it("keeps a queued pick selected and dims a queued reply", async () => {
-  const { card, refresh } = await open("waiting");
+  const { card, refresh, read } = await open("waiting");
   expect(card.getByRole("radio").getAttribute("aria-checked")).toBe("true");
   expect(card.getByText("Waiting to send")).toBeTruthy();
   const reply = screen.getAllByText("For privacy.")[0].closest('[data-state="waiting"]');
@@ -47,6 +52,7 @@ it("keeps a queued pick selected and dims a queued reply", async () => {
   expect(screen.queryByText("For privacy.")).toBeNull();
   const receipt = screen.getByTestId("shared-design-reader").querySelector('[data-client-id="reply"] [data-state="sent"]');
   expect(receipt).toBeTruthy();
+  expect((await read()).outbox).toEqual([]);
   // React selects the WebKit event in jsdom, which exposes WebkitAnimation without AnimationEvent.
   const end = "AnimationEvent" in window ? "animationend" : "webkitAnimationEnd";
   fireEvent(receipt!, new Event(end, { bubbles: true }));

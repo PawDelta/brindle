@@ -47,6 +47,11 @@ def test_offline_comment_sent_once(app, lib, db, monkeypatch):
     delivered = app.get(ROUTE).json()
     assert [(r["client_id"], r["state"]) for r in delivered.get("outbox", [])] == [("comment-one", "sent")]
     assert [thread["text"] for thread in delivered["threads"]] == ["Which VM?"]
+    # The app discarded that response when a newer visibility read superseded it.
+    now += 30
+    accepted = app.get(ROUTE).json()
+    assert accepted.get("outbox") == delivered["outbox"]
+    assert app.post(f"{ROUTE}/receipts", json={"owner": accepted["me"], "client_ids": ["comment-one"]}).is_success
     now += 30
     assert not app.get(ROUTE).json().get("outbox")
     assert app.post(f"{ROUTE}/comments", json=body).is_success

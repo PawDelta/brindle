@@ -985,6 +985,11 @@ def _plan_change(db, body, work):
         return _shared_design(_get(body, "repo"), work)
 
 
+def shared_design_receipts(db: DB, params: dict, body: dict) -> Any:
+    return _shared_design(_get(body, "repo"), lambda r: r.acknowledge_receipts(
+        db, params["doc_id"], body.get("owner"), body.get("client_ids")))
+
+
 def shared_design_comment(db: DB, params: dict, body: dict) -> Any:
     """A comment, a reply (``parent``), or a question for the person's own
     supervisor, which starts it only once this answer has been written."""
@@ -1313,6 +1318,7 @@ ROUTES = [
     Route("/v1/library/people", library_people),
     Route("/v1/share-links/design", _endpoint(share_link_design), methods=["POST"]),
     Route("/v1/shared-designs/{doc_id}", shared_design),
+    Route("/v1/shared-designs/{doc_id}/receipts", _endpoint(shared_design_receipts), methods=["POST"]),
     Route("/v1/shared-designs/{doc_id}/history", shared_design_history),
     Route("/v1/shared-designs/{doc_id}/revisions/{n:int}/changes", shared_design_comparison),
     Route("/v1/shared-designs/{doc_id}/comments", _endpoint(shared_design_comment), methods=["POST"]),
