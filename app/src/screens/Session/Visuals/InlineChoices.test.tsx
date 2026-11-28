@@ -24,7 +24,7 @@ const visual: VisualDTO = {
     </style>
     <fieldset data-choice="first">
       <legend>First question</legend>
-      <button id="recommendation" data-option="A" data-selected style="border-width: 3px !important">Option A <small>my pick</small></button>
+      <button id="recommendation" data-option="A" data-selected data-choice-state="soft-tint" style="border-width: 3px !important">Option A <small>my pick</small></button>
       <button data-option="B">Option B</button>
     </fieldset>
     <fieldset data-choice="second">
@@ -43,7 +43,7 @@ function openChoices() {
     keepVisual: vi.fn(), unkeepVisual: vi.fn(), markVisualRead: vi.fn(),
   };
   render(<>
-    <style>{":root { --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1); --ink-3: #4c615e; }"}</style>
+    <style>{":root { --canvas: #fff; --ink: #263831; --ink-3: #4c615e; --line: #dee6e1; --line-strong: #bac8bf; --pass: #28734c; --pass-soft: rgba(40, 115, 76, 0.1); }"}</style>
     <VisualReader client={client} visual={visual} onBack={() => {}} onAnswered={() => {}} />
   </>);
   const frame = screen.getByTitle<HTMLIFrameElement>(visual.title);
@@ -59,6 +59,7 @@ it("marks only the user's pick when the page highlights a different option", () 
   const recommended = doc.querySelector<HTMLButtonElement>('[data-option="A"]')!;
   const picked = doc.querySelector<HTMLButtonElement>('[data-option="B"]')!;
   const neutral = doc.querySelector<HTMLButtonElement>('[data-option="C"]')!;
+  expect(doc.querySelector("[data-choice-state]")).toBeNull();
   const chrome = (button: HTMLButtonElement) => {
     const style = doc.defaultView!.getComputedStyle(button);
     return {
@@ -77,6 +78,7 @@ it("marks only the user's pick when the page highlights a different option", () 
   fireEvent.click(picked);
 
   expect(Array.from(doc.querySelectorAll("button[data-selected]"))).toEqual([picked]);
+  expect(Array.from(doc.querySelectorAll('[data-choice-state="soft-tint"]'))).toEqual([picked]);
   expect(chrome(recommended)).toEqual(chrome(neutral));
   expect(chrome(neutral).background).not.toBe("rgba(0, 0, 0, 0)");
   expect(chrome(picked)).toEqual(selectedChrome);
@@ -99,7 +101,7 @@ it("clears each legend's needs-answer state as the remaining count drops", () =>
   const send = screen.getByTestId<HTMLButtonElement>("visual-send");
 
   expect(first.hasAttribute("data-needs-answer")).toBe(true);
-  expect(doc.defaultView!.getComputedStyle(status).display).toBe("inline-block");
+  expect(doc.defaultView!.getComputedStyle(status).display).toBe("inline-flex");
   expect(second.hasAttribute("data-needs-answer")).toBe(true);
   expect(screen.getByTestId("visual-unpicked").dataset.remaining).toBe("2");
   expect(send.disabled).toBe(true);

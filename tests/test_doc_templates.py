@@ -5,6 +5,7 @@ required section stops what the format says it stops."""
 import pytest
 
 from brindle import doc_templates, mcp_server, plan_docs, plans, visual_offers
+from brindle.approval_sources import PERSON_IN_APP
 from brindle.service.errors import ServiceError
 from test_plans import session  # noqa: F401 - fixture
 
@@ -63,7 +64,7 @@ def test_new_plan_starts_from_the_template_and_gets_the_next_reference(db, sessi
 
     # The plan keeps the template it was written with: a later change doesn't reach it.
     doc_templates.save(doc_templates.ORG, {"templates": [{**DESIGN, "sections": DESIGN["sections"][:1]}]})
-    plans.decide(db, pid, 1, False, note="Fill the rollout.", person=True)
+    plans.decide(db, pid, 1, False, note="Fill the rollout.", approval=PERSON_IN_APP)
     pid2, _ = _propose(db, boss, "# Presets\n\n## Summary\n\nPresets per org.", plan_id=pid)
     assert "Rollout" in [s["title"] for s in plan_docs.revision(db, pid2)["sections"]]
     assert doc_templates.of(db, pid)["reference"] == "DES-0001"
@@ -79,14 +80,14 @@ def test_empty_required_section_blocks_sign_off(db, session, blocks, refused):
     pid, _ = _propose(db, boss)
     if refused:
         with pytest.raises(ServiceError) as e:
-            plans.decide(db, pid, 1, True, person=True)
+            plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
         assert e.value.code == "required_sections_missing" and e.value.extra["missing"] == ["Rollout"]
         assert plans.get(db, pid)["state"] == "open"
         # Filled, it goes.
         plan_docs.edit(db, pid, 1, plan_docs.revision(db, pid)["sections"][-1]["id"], 0, "", "1. Ship it.")
-        plans.decide(db, pid, 2, True, person=True)
+        plans.decide(db, pid, 2, True, approval=PERSON_IN_APP)
     else:
-        plans.decide(db, pid, 1, True, person=True)
+        plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
     assert plans.get(db, pid)["state"] == "approved"
 
 
@@ -106,7 +107,7 @@ def test_a_doc_follows_its_teams_format(db, session):
     assert e.value.code == "required_sections_missing"
     doc_templates.set_team(db, pid, "t1")                     # as a share to t1 records it
     with pytest.raises(ServiceError, match="Rollout"):
-        plans.decide(db, pid, 1, True, person=True)
+        plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
 
 
 class FakeLibrary:
