@@ -29,6 +29,21 @@ def test_plan_work_stays_queued_while_the_app_is_absent(db, session, monkeypatch
     assert started == ["build the preset schema"]
 
 
+@pytest.mark.variant("review: an automatic refusal's cascade cancelled a dependent the close had held")
+def test_an_automatic_refusal_cascades_past_a_held_dependent(db, session, monkeypatch):  # noqa: F811
+    boss, started = session
+    db.set_status(boss.id, "paused")
+    asyncio.run(mcp_server.assign("developer", "build the schema", branch="feat/schema"))
+    asyncio.run(mcp_server.assign("developer", "build the UI", branch="feat/ui", depends_on=["feat/schema"]))
+    first, dependent = db.list_tasks(state="pending")
+    db.set_cancelled_hold(dependent.id, "v_000000000000")
+    db.set_status(boss.id, "idle")
+    monkeypatch.setattr(tasks, "_launch_refusal",
+                        lambda db_, t: "the repo's policy changed meanwhile" if t.id == first.id else None)
+    assert tasks.sweep(db) == 0 and started == []
+    assert (db.get_task(first.id).state, db.get_task(dependent.id).state) == ("cancelled", "pending")
+
+
 def _policy_refuses(monkeypatch):
     monkeypatch.setattr(tasks, "_launch_refusal", lambda db, t: "the repo's policy changed meanwhile")
 

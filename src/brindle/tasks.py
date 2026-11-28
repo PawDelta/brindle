@@ -1300,7 +1300,7 @@ def _cancel(db: DB, task_id: str, reason: str, *, spare_held: bool = False) -> l
     for dependent in queued(db):   # any repo of the session may wait on it
         if any(_refers_to(d, t, dependent.repo_root) for d in _loads(dependent.depends_on)):
             cancelled += _cancel(
-                db, dependent.id, f"its dependency {t.id} ({t.branch or t.id}) was cancelled")
+                db, dependent.id, f"its dependency {t.id} ({t.branch or t.id}) was cancelled", spare_held=spare_held)
     return cancelled
 
 
