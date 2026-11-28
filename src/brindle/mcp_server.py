@@ -404,7 +404,7 @@ def read_plan(plan_id: str) -> str:
 
 @mcp.tool()
 def withdraw_plan(plan_id: str) -> str:
-    """Supervisors: withdraw your own plan while it is open or redirected,
+    """Supervisors: withdraw your own plan while it is being written, open or redirected,
     without the person's approval, when it's no longer the plan to build
     (for example, the person's request changed). The plan closes, nothing is
     approved and it isn't sent to the Library; a shared plan's share is

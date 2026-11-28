@@ -586,6 +586,7 @@ def test_a_failed_verdict_leaves_nothing_behind_and_a_failed_push_loses_nothing(
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
     pid = mcp_server.propose_plan(PLAN, DECISIONS).split()[2]
     asyncio.run(mcp_server.assign("developer", "build the preset schema", **work(db)))
+    before = messages(db)
     redirect ={"comments": [{"section": "s1", "text": "Repo file first."}], "person": True}
     grants = lambda: [r["remaining"] for r in db.conn.execute("SELECT remaining FROM visual_scoped_grants")]  # noqa: E731
 
@@ -599,7 +600,7 @@ def test_a_failed_verdict_leaves_nothing_behind_and_a_failed_push_loses_nothing(
     with pytest.raises(sqlite3.OperationalError):
         plans.decide(db, pid, 1, False, **redirect)
     assert plans.get(db, pid)["state"] == "open" and plans.get(db, pid)["visual"]["answer"] is None
-    assert grants() == [0] and messages(db) == []
+    assert grants() == [0] and messages(db) == before
     monkeypatch.setattr(plans, "_queue_message", queue)
 
     # The push to the supervisor's terminal failing after it doesn't undo the verdict: the message stays queued.
@@ -608,7 +609,8 @@ def test_a_failed_verdict_leaves_nothing_behind_and_a_failed_push_loses_nothing(
     monkeypatch.setattr(agents, "flush", unreachable)
     assert plans.decide(db, pid, 1, False, **redirect)["state"] == "redirected"
     assert plans.get(db, pid)["visual"]["answer"]["option"] == "redirect" and grants() == [1]
-    assert len(messages(db)) == 1 and "Repo file first." in messages(db)[0]
+    [verdict] = messages(db)[len(before):]
+    assert "Repo file first." in verdict
     with pytest.raises(ServiceError, match="already decided"):
         plans.decide(db, pid, 1, True, person=True)
 
@@ -627,10 +629,11 @@ def test_design_doc_round_trip_comment_reply_and_next_revision(db, session):
     pid = mcp_server.propose_plan("# Org presets", DECISIONS, sections=sections).split()[2]
     assert [s["kind"] for s in plan_docs.revision(db, pid)["sections"]][:2] == ["markdown", "mermaid"]
 
+    before = messages(db)
     tid = plan_docs.comment(db, pid, 1, {"kind": "text", "section": "goal", "quote": "per org"}, "Which orgs?")
     sid = plan_docs.suggest(db, pid, 1, "goal", 0, "Presets", "Rules", "clearer")
     plans.decide(db, pid, 1, False, person=True)
-    [msg] = messages(db)                                  # one message for the batch, naming the thread
+    [msg] = messages(db)[len(before):]                     # one message for the batch, naming the thread
     with pytest.raises(ToolError):                        # a suggestion can't be resolved ...
         mcp_server.reply_plan_thread(pid, sid, "no", resolve=True)
     assert not next(t for t in plan_docs.fields(db, plans.get(db, pid))["threads"] if t["id"] == sid)["replies"]
@@ -722,9 +725,10 @@ def test_required_reviewers_gate(db, session, library, monkeypatch, review, loca
     monkeypatch.setattr(holds, "app_connected", lambda: False)
     asyncio.run(mcp_server.assign("developer", "build it", **work(db)))
     assert db.list_tasks() == [] and started == []
+    before = messages(db)
     with pytest.raises(ServiceError) as e:
         plans.decide(db, pid, 1, True, person=True)
-    assert e.value.code == "gate_closed" and plans.get(db, pid)["state"] == "open" and messages(db) == []
+    assert e.value.code == "gate_closed" and plans.get(db, pid)["state"] == "open" and messages(db) == before
 
 
 def test_required_reviewers_request_changes_blocks_and_building_closes_the_review(db, session, library):
@@ -852,12 +856,13 @@ def _not_approved_when_a_reviewer_appeared(db, app, line, started):
     from brindle.pro import shared_docs
     from brindle.service import inbox
 
+    before = messages(db)
     _refused_approval(app, line, "offline")
     line.down, line.view = None, {**NO_REVIEW, "reviewers": ONE}
     for _ in range(2):      # told once, and the next pass doesn't approve it either
         shared_docs.sync_open(db)
         gate = app.get(f"/v1/plans/{line.pid}").json()["gate"]
-        assert plans.get(db, line.pid)["state"] == "open" and started == [] and messages(db) == []
+        assert plans.get(db, line.pid)["state"] == "open" and started == [] and messages(db) == before
         assert gate["approval_refused"] and gate["unconfirmed"] is None
     told = [i for i in inbox.items(db, None) if i.kind == "visual" and i.visual_id == line.pid]
     assert [i.reason for i in told] == [gate["approval_refused"]]
@@ -1028,9 +1033,10 @@ def test_only_the_person_decides_and_only_when_they_asked(db, session):
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
     pid = mcp_server.propose_plan(PLAN).split()[2]
 
+    before = messages(db)
     assert mcp_server.approve_plan(pid).startswith("Not decided")
     with pytest.raises(ServiceError) as e:
         plans.decide(db, pid, 1, True, person=False)
     assert e.value.code == "forbidden"
-    assert plans.get(db, pid)["state"] == "open" and messages(db) == []
+    assert plans.get(db, pid)["state"] == "open" and messages(db) == before
     assert "behind plan" in asyncio.run(mcp_server.assign("developer", "anything", **work(db))) and started == []
