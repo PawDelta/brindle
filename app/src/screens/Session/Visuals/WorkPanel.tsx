@@ -68,11 +68,11 @@ export function useWork(client: WorkClient | undefined, docId: string | undefine
   };
 }
 
-function Chip({ item }: { item: TrackerLink }) {
+export function WorkItemChip({ item }: { item: Pick<TrackerLink, "display" | "state" | "done" | "stale"> }) {
   const dot = item.done ? "bg-pass" : item.state ? "bg-[var(--group-1)]" : "bg-ink-3";
   return (
     <span className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-sm border border-line px-1.5 font-mono text-[11px] leading-[17px] text-ink-2" data-work-item={item.display} data-stale={item.stale || undefined} title={item.stale ? "Last read earlier: the tracker could not be reached" : undefined}>
-      <i className={`size-1.5 rounded-full ${dot}`} />
+      <i aria-hidden className={`size-1.5 rounded-full ${dot}`} />
       {item.state ? `${item.display} · ${item.state}` : item.display}
     </span>
   );
@@ -107,7 +107,7 @@ export function WorkPanel({ work, split, can }: { work: Work; split: PlanWorkerD
             <span className={`${label} text-[11px]`}>This plan</span>
             {epic ? (
               <>
-                <span className="flex items-center justify-between gap-2"><b className="font-medium text-ink">Epic</b><Chip item={epic} /></span>
+                <span className="flex items-center justify-between gap-2"><b className="font-medium text-ink">Epic</b><WorkItemChip item={epic} /></span>
                 <span className="text-[11.5px] text-ink-3">{`${epic.type ?? "Item"} · ${state.total ? `${state.done} of ${state.total} others done · ` : ""}${epic.read_at ? `read ${ago(epic.read_at)}` : "not read yet"}`}</span>
                 <span className="flex gap-1">{open(epic)}{can && <button type="button" className={`${quiet} text-xs`} disabled={work.busy} onClick={() => void work.unlink(epic.link_id)}>Unlink</button>}</span>
               </>
@@ -127,7 +127,7 @@ export function WorkPanel({ work, split, can }: { work: Work; split: PlanWorkerD
                 return (
                   <div key={w.id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2 gap-y-0.5" data-task={w.id}>
                     <b className="truncate font-medium text-ink">{w.title}</b>
-                    {item ? <Chip item={item} /> : can && connected ? <button type="button" className={`${button} sm`} disabled={work.busy} onClick={() => void work.create({ kind: "task", task: w.id })}>Create item</button> : <span className="text-ink-3">No item</span>}
+                    {item ? <WorkItemChip item={item} /> : can && connected ? <button type="button" className={`${button} sm`} disabled={work.busy} onClick={() => void work.create({ kind: "task", task: w.id })}>Create item</button> : <span className="text-ink-3">No item</span>}
                     {!item && <span className="col-span-full text-[11.5px] text-ink-3">{epic ? `Would be created under ${epic.display} with the task's files and its proving test` : "No item yet"}</span>}
                     {item && <span className="col-span-full flex items-center gap-1 text-[11.5px] text-ink-3">{[item.type, item.linked_by].filter(Boolean).join(" · ")}{open(item)}{can && <button type="button" className={`${quiet} text-xs`} disabled={work.busy} onClick={() => void work.unlink(item.link_id)}>Unlink</button>}</span>}
                   </div>
@@ -141,7 +141,7 @@ export function WorkPanel({ work, split, can }: { work: Work; split: PlanWorkerD
               {passages.map((i) => (
                 <div key={i.link_id} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-2">
                   <span className="truncate text-ink">{i.type ?? "Item"}{i.target.id ? ` · from §${i.target.id}` : ""}</span>
-                  <Chip item={i} />
+                  <WorkItemChip item={i} />
                 </div>
               ))}
             </div>

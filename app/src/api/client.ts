@@ -886,6 +886,7 @@ export interface TrackerLink {
   key: string;
   /* "AB#4810" or "BRN-88": what people say. */
   display: string;
+  title?: string | null;
   type?: string | null;
   target: { kind: "design" | "section" | "task" | "passage"; id?: string | null };
   url?: string | null;

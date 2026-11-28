@@ -1310,6 +1310,7 @@ export interface PlanRevisionDTO {
   changed?: string[];
   rev: number;
   source: "proposal" | "edit" | "suggestion";
+  title?: string | null;
 }
 /**
  * One section of a plan's revision: what a comment anchors to.
@@ -1418,6 +1419,7 @@ export interface PlanRevisionDetailDTO {
   sections: PlanSectionDTO[];
   source: "proposal" | "edit" | "suggestion";
   split: PlanWorkerDTO[];
+  title?: string | null;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

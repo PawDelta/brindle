@@ -531,6 +531,7 @@ class PlanRevisionDTO(_DTO):
     source: Literal["proposal", "edit", "suggestion"]
     changed: list[str] = []
     at: float
+    title: str | None = None
 
 
 class PlanRevisionDetailDTO(PlanRevisionDTO):

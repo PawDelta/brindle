@@ -1,23 +1,25 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
-import { toBase64, type Plan, type VisualDTO } from "../../../api/client";
+import { toBase64, type Plan, type TrackerLink, type VisualDTO } from "../../../api/client";
 import { FakeDaemon } from "../../../test/fakeDaemon";
 import { PlanReader } from "./PlanReader";
 import { SharedDesignReader } from "./SharedDesignReader";
+import type { Work } from "./WorkPanel";
 
 afterEach(cleanup);
 const visual: VisualDTO = { id: "plan", kind: "plan", session: "boss", by: "supervisor", title: "Delivery", rev: 1, created_at: 1, unread: false, kept: false };
-function read(extra: Partial<Plan> = {}, reviewer = false, hold?: Promise<void>) {
+function read(extra: Partial<Plan> = {}, reviewer = false, hold?: Promise<void>, work?: Work) {
   const plan: Plan = { ...visual, state: "open", markdown: "# Delivery", lede: "", queued: 0, sections: [{ id: "context", title: "Context", markdown: "Notes" }], decisions: [], split: [], threads: [], ...extra };
   const daemon = new FakeDaemon();
   const doc = daemon.seedLive(plan.id, { context: "Notes" }, { plan, author: "sam", me: reviewer ? "alice" : "sam" });
-  daemon.setLiveState(plan.id, { lock: "sign_off", version: { id: plan.rev, snapshot: toBase64(doc.export({ mode: "snapshot" })), writers: [], signOffs: [] } });
+  const signOffs = plan.gate?.reviewers?.flatMap(r => r.sub && r.status === "signed_off" ? [r.sub] : []) ?? [];
+  daemon.setLiveState(plan.id, { lock: "sign_off", version: { id: plan.rev, snapshot: toBase64(doc.export({ mode: "snapshot" })), writers: [], signOffs } });
   const client = daemon.client();
   if (hold) {
     const decide = client.decidePlan.bind(client);
     vi.spyOn(client, "decidePlan").mockImplementation(async (...args) => { await hold; return decide(...args); });
   }
-  if (reviewer) return render(<SharedDesignReader docId={plan.id} client={client} onBack={() => {}} />);
+  if (reviewer) return render(<SharedDesignReader docId={plan.id} client={client} onBack={() => {}} work={work} />);
   return render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
 }
 
@@ -42,6 +44,32 @@ it("gives a reviewer the sign-off action in their rail", async () => {
   await waitFor(() => expect(rail.getByTestId("plan-sign-off")).toHaveProperty("disabled", false));
   fireEvent.click(rail.getByTestId("plan-sign-off"));
   await waitFor(() => expect(rail.getByTestId("signoff-alice").dataset.state).toBe("signed"));
+});
+
+it("shows the linked item's title beside its tracker chip", async () => {
+  const epic = {
+    link_id: "link", tracker: "jira", key: "WEB-311", display: "WEB-311",
+    title: "Team webhooks", target: { kind: "design" }, state: "Active",
+  } satisfies TrackerLink;
+  const write = async () => {};
+  read({ gate }, true, undefined, {
+    state: { epic, items: [epic], connected: { jira: true }, done: 0, total: 0 },
+    error: null, busy: false, link: write, create: write, unlink: write,
+  });
+  const rail = within(await screen.findByTestId("review-rail"));
+  const title = rail.getByText(epic.title);
+  expect(title.parentElement?.querySelector("[data-work-item]")?.getAttribute("data-work-item")).toBe(epic.key);
+});
+
+it("fills the sign-off track from the left when the second reviewer signs first", async () => {
+  read({ gate: { ...gate!, required: 2, signed: 1, reviewers: [
+    { sub: "alice", required: true, status: "waiting" },
+    { sub: "bob", required: true, status: "signed_off" },
+  ] } });
+  const rail = await screen.findByTestId("review-rail");
+  await waitFor(() => expect(within(rail).getByTestId("signoff-bob").dataset.state).toBe("signed"));
+  const segments = rail.querySelectorAll(":scope > div > span:nth-child(2) > span[aria-hidden] > i");
+  expect(Array.from(segments, segment => segment.classList.contains("bg-pass"))).toEqual([true, false]);
 });
 
 it("withdraws approval and keeps the current revision waiting for its signer", async () => {

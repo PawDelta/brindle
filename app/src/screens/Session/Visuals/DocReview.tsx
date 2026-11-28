@@ -369,23 +369,27 @@ export interface SignOffRow {
   note?: string;
 }
 
-export function SignOffSheet({ version, rows }: {
+export function SignOffSheet({ version, rows, count }: {
   version: string;
   rows: SignOffRow[];
+  count?: { signed: number; required: number } | null;
 }) {
   return (
     <>
       <div className="grid gap-2.5" data-testid="plan-signoffs">
-        <span className={`${label} text-[11px]`}>{`Sign-offs on ${version}`}</span>
+        <h3 className="m-0 flex items-baseline justify-between gap-2">
+          <span className={`${label} text-[11px]`}>{`Sign-offs on ${version}`}</span>
+          {count && <small className="text-[11px] text-ink-3">{count.signed} of {count.required} required</small>}
+        </h3>
         {rows.length === 0 && <span className="text-ink-3">Nobody is asked to sign it yet.</span>}
         {(["required", "optional"] as const).map(group => <div key={group} data-group={group} className="grid gap-2">
           <div className="text-[11.5px]"><b>{group === "required" ? "Required" : "Optional"}</b><span className="text-ink-3"> · {group === "required" ? "the build waits for them" : "recorded, never hold the build"}</span></div>
         {rows.filter(r => r.required === (group === "required")).map((r) => (
           <span key={r.key} className="flex items-center gap-2 text-ink-2" data-testid={`signoff-${r.key}`} data-state={r.state} data-sign-off={r.required ? "required" : "optional"}>
-            <Avatar who={r.who} ring={r.state === "signed" ? "done" : r.state === "waiting" && r.required ? "wait" : r.required ? undefined : "dim"} />
+            <Avatar who={r.who} />
             <span className="min-w-0 truncate font-medium text-ink">{r.name}</span>
             <span className="flex-1" />
-            <span className={`flex-none whitespace-nowrap ${r.state === "signed" ? "text-pass" : (r.state === "waiting" && r.required) || r.state === "changes" ? "text-sap" : "text-ink-3"}`}>
+            <span className={`flex-none whitespace-nowrap ${r.state === "signed" ? "text-pass" : r.state === "changes" ? "text-sap" : "text-ink-3"}`}>
               {r.state === "signed" ? `✓ signed${r.note ? ` ${r.note}` : ""}` : r.state === "changes" ? "changes requested" : r.state === "waived" ? "waived" : r.state === "earlier" ? r.note ?? "signed earlier" : r.required ? "waiting" : "not signed"}
             </span>
           </span>
