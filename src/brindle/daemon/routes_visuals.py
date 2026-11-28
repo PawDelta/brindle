@@ -23,7 +23,7 @@ from typing import Any
 from urllib.parse import quote
 
 from starlette.requests import Request
-from starlette.background import BackgroundTask
+from starlette.background import BackgroundTask, BackgroundTasks
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
@@ -407,11 +407,13 @@ def decide_plan(db: DB, params: dict, body: dict) -> Any:
     never agents (its Guard refuses an agent's process), so this is the person."""
     from brindle import approval_sources, plans
 
+    background = BackgroundTasks()
     p = plans.decide(db, params["id"], body.get("rev"), _get(body, "approved", bool, required=True),
                      body.get("picks"), body.get("comments"), _get(body, "note"),
                      approval=approval_sources.PERSON_IN_APP,
-                     attachments=_get(body, "attachments", list), version=body.get("version"))
-    return plans.to_dto(db, p)
+                     attachments=_get(body, "attachments", list), version=body.get("version"),
+                     after_reply=background.add_task)
+    return JSONResponse(plans.to_dto(db, p), background=background)
 
 
 def withdraw_plan_approval(db: DB, params: dict, body: dict) -> Any:
