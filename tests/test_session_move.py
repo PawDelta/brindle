@@ -99,7 +99,7 @@ def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkey
 
 @pytest.mark.parametrize("own_goal", [
     pytest.param(None, marks=pytest.mark.variant("Handover must reuse a live supervisor with no goal and migrate its worker and queued task")),
-    pytest.param("done", marks=pytest.mark.variant("A completed destination goal must allow reuse of its supervisor without starting another")),
+    pytest.param("done", marks=pytest.mark.variant("Handover must reuse the supervisor and replace its completed goal's milestones")),
     "running", "handed_away", "send_fails",
 ])
 def test_handover_to_a_live_supervisor_delivers_to_it_instead_of_starting_another(db, repo, monkeypatch, own_goal):
@@ -154,6 +154,7 @@ def test_handover_to_a_live_supervisor_delivers_to_it_instead_of_starting_anothe
     # An unfinished goal of its own stays the live supervisor's: a new one takes the session, and says why.
     to = "new1" if own_goal == "running" else "there"
     assert h.agent.id == to and db.get_autopilot(to).goal == "ship it" and paused == ["old"]
+    assert [m.title for m in db.milestones(to)] == ["one"]
     assert db.get_agent("w1").parent_id == to and db.get_task("t1").caller_id == to
     assert [e["root_id"] for e in bus.tail(db, kinds=("session.handover",))][-1] == to
     if own_goal == "running":
