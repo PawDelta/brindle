@@ -409,7 +409,8 @@ def decide_plan(db: DB, params: dict, body: dict) -> Any:
 
     p = plans.decide(db, params["id"], body.get("rev"), _get(body, "approved", bool, required=True),
                      body.get("picks"), body.get("comments"), _get(body, "note"), person=True,
-                     attachments=_get(body, "attachments", list), version=body.get("version"))
+                     attachments=_get(body, "attachments", list), version=body.get("version"),
+                     withdraw=_get(body, "withdraw", bool) or False)
     return plans.to_dto(db, p)
 
 

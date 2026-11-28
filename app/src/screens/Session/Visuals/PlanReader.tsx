@@ -599,6 +599,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once for this doc: the reader is keyed by plan
   }, []);
   const gate = plan.gate ?? null;
+  const approvalHeld = gate?.approval_held?.rev === plan.rev;
+  const approvalLabel = approvalHeld ? "Withdraw approval" : gate?.can_hold_approval ? "Approve when signed" : "Approve";
   const shared = !!gate;
   const sharePeople = (!teammate || plan.can_edit) && plan.state !== "approved" ? source.people : undefined;
   const wasShared = useRef(shared);
@@ -976,6 +978,9 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (now) savePlanDraft(draftScope, "verdict", null);
     if (alive.current) setSending(null);
   };
+  const approveOrWithdraw = () => approvalHeld && client
+    ? send(() => client.decidePlan(plan.id, { rev: plan.rev, approved: false, withdraw: true, picks: {}, comments: [], note: "" }))
+    : decide(true);
   /* The plan becomes a personal doc, then the person's sign-off starts the build. */
   /* Built only when the personal doc it becomes reads as the text on screen (the live draft's, or a
      frozen version's). If it doesn't, nothing is built: the personal revision is shown, said so, for
@@ -1387,8 +1392,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       </Menu>
     ) : <span className="whitespace-nowrap px-[9px] text-xs text-ink-3" data-testid="plan-rev">{versionLabel}</span>;
     // A shared plan builds only once every required reviewer has signed.
-    const gateHolds = !!gate && gate.state !== "ready";
-    const approveBlocked = !!historical || busy || left.length > 0 || reviewBlocked || uploading > 0 || gateHolds;
+    const gateHolds = !!gate && gate.state !== "ready" && !gate.can_hold_approval;
+    const approveBlocked = !!historical || busy || (!approvalHeld && (left.length > 0 || reviewBlocked || uploading > 0 || gateHolds));
     return (
       <>
         {chrome && (
@@ -1455,7 +1460,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                 {left.length ? nextUp : (
                   <>
                     <span className="flex items-center gap-2 text-[13.5px] font-semibold text-ink"><Tick className="!text-[13.5px] !font-semibold">Everything is decided</Tick></span>
-                    <span className="text-xs text-ink-3">{gateHolds ? summary || gateWhy : `Approve starts the build.${stillOpen.length ? ` ${stillOpen.join(" and ")} ${openThreads.length === 1 ? "is" : "are"} still open.` : ""}`}</span>
+                    <span className="text-xs text-ink-3">{approvalHeld ? `Approval saved for r${plan.rev}. ${gateWhy}` : gate?.state === "waiting" || gateHolds ? summary || gateWhy : `Approve starts the build.${stillOpen.length ? ` ${stillOpen.join(" and ")} ${openThreads.length === 1 ? "is" : "are"} still open.` : ""}`}</span>
                   </>
                 )}
               </div>
@@ -1501,8 +1506,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                 </Menu>
                 )}</VerdictNote>
                 <LoadingButton className={main} busy={sending === "approve"} disabled={approveBlocked} data-testid="plan-build" data-gate={gate?.state}
-                  title={left.length ? "Pick an option in every decision first" : gateHolds ? gateWhy : "Approve this plan and start building it"} data-again="approve" onClick={() => void decide(true)}>
-                  Approve
+                  title={approvalHeld ? approvalLabel : left.length ? "Pick an option in every decision first" : gateWhy || approvalLabel} data-again="approve" onClick={() => void approveOrWithdraw()}>
+                  {approvalLabel}
                 </LoadingButton>
               </div>
             </>
@@ -1647,10 +1652,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               </LoadingButton>
               {/* The person's selections and verdict travel together. */}
               {(
-                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || !!next || reviewBlocked || uploading > 0 || (!!gate && gate.state !== "ready")} title={next ? "Choose every decision first" : gate && gate.state !== "ready" ? gateWhy : undefined}
-                  data-again="approve" onClick={() => { if (next) jump(next.id); else void decide(true); }}
+                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || (!approvalHeld && (!!next || reviewBlocked || uploading > 0 || (!!gate && gate.state !== "ready" && !gate.can_hold_approval)))} title={gateWhy || approvalLabel}
+                  data-again="approve" onClick={() => void approveOrWithdraw()}
                   data-testid="plan-build" data-gate={gate?.state}>
-                  Approve
+                  {approvalLabel}
                 </LoadingButton>
               )}
             </div>

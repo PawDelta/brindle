@@ -1485,6 +1485,7 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
     delivery_changed = pending_threads and pending_threads.difference(row["id"] for row in _unsent(db, p["id"]))
     if pushed or imported or typed or delivery_changed:
         plan_docs._changed(db, p, p["rev"])
+    plans.settle_held_approval(db, p["id"], signoffs_only=True)
     return {**link(db, p["id"]), "pulled": imported + typed + changes, "pushed": pushed,
             **({"access": access} if access is not None else {})}
 
@@ -1521,6 +1522,7 @@ def sign_off(db: DB, plan_id: str, rev: Any, *, version: Any = None, client=None
                                                   {"rev": share_["remote_rev"]}, document=False, client=client,
                                                   store=store)):
         plan_docs._changed(db, p, p["rev"])
+    plans.settle_held_approval(db, p["id"], signoffs_only=True)
     return link(db, p["id"])
 
 

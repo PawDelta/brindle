@@ -448,7 +448,12 @@ def _gate(c, p: dict) -> dict | None:
                        "approval_held": row["approve_wanted"] is not None,
                        "can_stop_sharing": shared_docs.may_stop(row, shared_docs.account()),
                        "can_edit_reviewers": row["doc_id"] is not None}
+    wanted = json.loads(row["approve_wanted"] or "{}")
+    can_hold = (is_open and current and state == WAITING and bool(unmet) and held is None
+                and all(policy["status"] in _MET for policy in policies))
     return {"state": state, "reason": reason, "required": len(required), "signed": met, "waiting_on": unmet,
+            "can_hold_approval": can_hold, "approval_held": {"rev": wanted["rev"], "waiting_on": unmet}
+            if wanted.get("signoffs") and is_open else None,
             "reviewers": rows, "policies": policies, "unconfirmed": unconfirmed,
             "approval_refused": row["approve_refused"] if is_open else None}
 
@@ -1208,15 +1213,27 @@ def _hold_approval(db: DB, p: dict, why: str, was_ready: bool, wanted: dict) -> 
     return held
 
 
-def _drop_held_approval(db: DB, p: dict, why: str) -> None:
+def withdraw_signoffs(c, plan_id: str, why: str) -> None:
+    """Invalidate the saved verdict in the same transaction as the edit or cancellation."""
+    if c.execute("UPDATE plan_shares SET approve_wanted=NULL, approve_refused=? WHERE plan_id=?"
+                 " AND json_extract(approve_wanted,'$.signoffs')=1", (why, plan_id)).rowcount:
+        root = c.execute("SELECT root_id FROM plans WHERE id=?", (plan_id,)).fetchone()[0]
+        _queue_message(c, root, why)
+
+
+def _drop_held_approval(db: DB, p: dict, why: str, expected: str) -> None:
     from brindle import plan_docs
 
     with db.tx() as c:
-        c.execute("UPDATE plan_shares SET approve_wanted=NULL, approve_refused=? WHERE plan_id=?", (why, p["id"]))
+        if not c.execute("UPDATE plan_shares SET approve_wanted=NULL, approve_refused=?"
+                         " WHERE plan_id=? AND approve_wanted=?", (why, p["id"], expected)).rowcount:
+            return
+        if json.loads(expected).get("signoffs"):
+            _queue_message(c, p["root_id"], why)
     plan_docs._changed(db, p, p["rev"])
 
 
-def settle_held_approval(db: DB, plan_id: str) -> None:
+def settle_held_approval(db: DB, plan_id: str, *, signoffs_only: bool = False) -> None:
     """After a sync the Library answered: apply the Approve it couldn't confirm
     earlier if the gate reads ready for that same revision. If it doesn't, the
     person is told and nothing is approved. While the Team plan's end stands
@@ -1225,6 +1242,8 @@ def settle_held_approval(db: DB, plan_id: str) -> None:
     if row is None or row["approve_wanted"] is None:
         return
     wanted = json.loads(row["approve_wanted"])
+    if signoffs_only and not wanted.get("signoffs"):
+        return
     p = get(db, plan_id)
     try:
         visuals.require_enabled()
@@ -1241,15 +1260,18 @@ def settle_held_approval(db: DB, plan_id: str) -> None:
     if wanted["rev"] != p["rev"]:
         what = f"version {version}" if version is not None else f"r{wanted['rev']}"
         _drop_held_approval(db, p, f"Your approval of {what} wasn't applied: the plan has changed since "
-                                   "you approved it. Read the new revision and approve again.")
+                                   "you approved it. Read the new revision and approve again.", row["approve_wanted"])
     elif found["state"] != "ready":
-        _drop_held_approval(db, p, f"Your approval wasn't applied: {found['reason']}")
+        if wanted.get("signoffs") and found["state"] == WAITING:
+            return
+        _drop_held_approval(db, p, f"Your approval wasn't applied: {found['reason']}", row["approve_wanted"])
     else:
         try:
             decide(db, plan_id, wanted["rev"], True, wanted["picks"], wanted["comments"], wanted["note"],
-                   person=True, attachments=wanted["attachments"], confirmed=True, version=version)
+                   person=True, attachments=wanted["attachments"], confirmed=True, version=version,
+                   expected_hold=row["approve_wanted"])
         except ServiceError as e:
-            _drop_held_approval(db, p, f"Your approval wasn't applied: {e.message}")
+            _drop_held_approval(db, p, f"Your approval wasn't applied: {e.message}", row["approve_wanted"])
 
 
 def _version(version: Any) -> int | None:
@@ -1292,7 +1314,7 @@ def _is_version(c, plan_id: str, rev: int, version: int) -> bool | None:
 
 def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, comments: Any = None,
            note: Any = None, *, person: bool, attachments: Any = None, confirmed: bool = False,
-           version: Any = None) -> dict:
+           version: Any = None, expected_hold: str | None = None, withdraw: bool = False) -> dict:
     """The person's verdict on the revision on their screen (``rev``):
     approve, or redirect with their picks and per-section comments. Only the
     person (the app, through the daemon's guarded route) decides: anyone
@@ -1338,11 +1360,20 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
         raise ServiceError("writing", "the supervisor is still writing this plan", 409)
     if p["state"] != "open":
         raise ServiceError("decided", "this revision is already decided", 409)
+    if withdraw:
+        with db.tx() as c:
+            c.execute("UPDATE plan_shares SET approve_wanted=NULL WHERE plan_id=? AND"
+                      " json_extract(approve_wanted,'$.rev')=? AND json_extract(approve_wanted,'$.signoffs')=1",
+                      (plan_id, rev))
+        plan_docs._changed(db, p, rev)
+        return get(db, plan_id)
     if approved and version is None:
         doc_templates.require(db, p["id"], doc_templates.SIGN_OFF, plan_docs.current(db, p)["sections"])
     unconfirmed, was_ready = None, False
     if approved and not confirmed:
         before = gate(db, p)            # what the person pressed Approve on, before asking can change it
+        if before and before["approval_held"]:
+            return p
         was_ready = before is not None and before["state"] == "ready"
         unconfirmed = _check_with_library(db, p)
         if unconfirmed is None:
@@ -1380,19 +1411,34 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     text = _message(p, approved, picks, comments, note, titles, doc, [f["ref"] for f in files],
                     drafting=not approved and plan_docs.draft(db, p) is not None, answers=own,
                     teammates=plan_docs.teammate_names(db, p["id"]))
+    held_for_signoffs = False
     with db.tx() as c:
         if approved:
             # In the verdict's own transaction: a sync landing a new reviewer can't slip in between.
             shut = _gate(c, p)
-            if shut is not None and shut["state"] in GATE_SHUT:
-                raise ServiceError("gate_closed", shut["reason"], 409)
+            if expected_hold and shut is None:
+                raise ServiceError("gate_unverified", "The review gate is unavailable.", 409)
             # A frozen version is approved only while it is still this revision here: a share
             # dropped since (no versions any more) or moved on is a plan to read again.
             if version is not None and _is_version(c, p["id"], rev, version) is not True:
                 raise ServiceError("stale", f"version {version} isn't the one out for sign-off now; read the plan "
                                    "again", 409, rev=rev)
-        claimed = c.execute("UPDATE plans SET state=?, decision=?, updated_at=? WHERE id=? AND rev=? AND state='open'",
-                            (state, record, at, p["id"], rev)).rowcount == 1
+            if expected_hold is not None and not c.execute(
+                    "SELECT 1 FROM plan_shares WHERE plan_id=? AND approve_wanted=?", (plan_id, expected_hold)).fetchone():
+                raise ServiceError("withdrawn", "The held approval has changed.", 409)
+            if shut and shut["can_hold_approval"] and not confirmed and all(d["id"] in picks for d in p["decisions"]):
+                wanted = dict(signoffs=True, rev=rev, version=version, picks=picks, comments=comments,
+                              note=note, attachments=attachments, at=at)
+                if not c.execute("UPDATE plan_shares SET approve_wanted=COALESCE(approve_wanted,?), approve_refused=NULL"
+                                 " WHERE plan_id=? AND EXISTS (SELECT 1 FROM plans WHERE id=? AND rev=? AND state='open')",
+                                 (json.dumps(wanted), plan_id, plan_id, rev)).rowcount:
+                    raise ServiceError("stale", "Read the current revision before approving.", 409)
+                held_for_signoffs = True
+            elif shut is not None and shut["state"] in GATE_SHUT:
+                raise ServiceError("gate_closed", shut["reason"], 409)
+        claimed = not held_for_signoffs and c.execute(
+            "UPDATE plans SET state=?, decision=?, updated_at=? WHERE id=? AND rev=? AND state='open'",
+            (state, record, at, p["id"], rev)).rowcount == 1
         if claimed:
             plan_docs.record_event(c, p["id"], f"verdict:{rev}", "sign_off" if approved else "changes",
                                    plan_docs.PERSON, at, rev=rev)
@@ -1403,6 +1449,9 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
             if not approved:
                 visual_offers._grant(c, p["root_id"], "plan")   # the one revision the redirect asks for
             queued = _queue_message(c, p["root_id"], text)
+    if held_for_signoffs:
+        plan_docs._changed(db, p, rev)
+        return get(db, plan_id)
     if not claimed:
         now = _row(db, p["id"])
         if now["rev"] != rev:
@@ -1471,6 +1520,7 @@ def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None
                       (OFFER_DISMISSED, root, OFFER_OPEN + "%", OFFER_ACCEPTED))
         row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
         if row is not None:
+            withdraw_signoffs(c, p["id"], "Your held approval was withdrawn because the plan was cancelled.")
             shared_docs.drop_share(c, row)
         for t in held:
             c.execute("INSERT OR REPLACE INTO plan_cancel_holds (task_id, plan_id, created_at)"

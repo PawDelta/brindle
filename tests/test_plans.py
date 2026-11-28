@@ -726,6 +726,10 @@ def test_required_reviewers_gate(db, session, library, monkeypatch, review, loca
     asyncio.run(mcp_server.assign("developer", "build it", **work(db)))
     assert db.list_tasks() == [] and started == []
     before = messages(db)
+    if state == "waiting" and local_rev == 1 and review.get("reviewers") and not review.get("policy_reviewers"):
+        plans.decide(db, pid, 1, True, person=True)
+        assert plans.gate(db, plans.get(db, pid))["approval_held"] and started == []
+        return
     with pytest.raises(ServiceError) as e:
         plans.decide(db, pid, 1, True, person=True)
     assert e.value.code == "gate_closed" and plans.get(db, pid)["state"] == "open" and messages(db) == before

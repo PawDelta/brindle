@@ -529,6 +529,7 @@ export type SharedDesign = Omit<SharedDesignDTO, "outbox"> & { outbox?: PlanDeli
 
 /* The person's verdict on the plan revision on screen: approve, or redirect with what to change. */
 export interface PlanVerdict {
+  withdraw?: boolean;
   rev: number;
   /* The frozen live version being built, when this is a live doc. */
   version?: number;
