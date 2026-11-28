@@ -13,7 +13,7 @@
 import { createContext, memo, useContext, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
 import { usePlanDraft } from "./planDrafts";
 import type { Plan } from "../../../api/client";
-import type { PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
+import type { PlanAnswerDTO, PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
 import { ago } from "../../../components/ProviderConnect";
 import { button, field, pill, quiet } from "../../../components/ui";
 import { SupervisorReplying, type ThreadActions } from "./DocReview";
@@ -269,6 +269,9 @@ function OwnAnswerRows({ decision: d, open, disabled, picked, onPick, nameOf, an
   const field = { text: draft?.text ?? "", onText: (text: string) => { if (draft) setDraft({ ...draft, text }); }, onCancel: clearDraft };
   const [saving, setSaving] = useState(false);
   const own = d.answers ?? [];
+  const editActions = (answer: PlanAnswerDTO) => open && answer.author === "person" && !answer.locked ? answers : undefined;
+  const editTarget = own.find((answer) => answer.id === typing);
+  const blockedDraft = draft && typing !== "new" && (!editTarget || !editActions(editTarget)) ? draft : null;
   const named = (who: string) => (who === "person" ? "You" : nameOf?.(who) ?? personName(who));
   const done = !!picked;
   const run = async (work: () => Promise<boolean>) => {
@@ -281,9 +284,10 @@ function OwnAnswerRows({ decision: d, open, disabled, picked, onPick, nameOf, an
   return (
     <>
       {own.map((a) => {
-        if (typing === a.id && answers) {
-          return <OwnAnswerField key={a.id} {...field} initial={a.text} busy={saving || disabled} onSave={(text) => void run(() => answers.edit(a.id, text))}
-            onRemove={() => void run(() => answers.remove(a.id))} />;
+        const edit = editActions(a);
+        if (typing === a.id && edit) {
+          return <OwnAnswerField key={a.id} {...field} initial={a.text} busy={saving || disabled} onSave={(text) => void run(() => edit.edit(a.id, text))}
+            onRemove={() => void run(() => edit.remove(a.id))} />;
         }
         const chosen = picked === a.id;
         const voters = d.votes?.[a.id] ?? [];
@@ -306,7 +310,7 @@ function OwnAnswerRows({ decision: d, open, disabled, picked, onPick, nameOf, an
               <span className={ownHint}>
                 <Avatar who={yours ? "person" : nameOf?.(a.author) ?? "A teammate"} small />
                 <span>{`Written by ${yours ? "you" : named(a.author)}`}</span>
-                {yours && open && answers && !a.locked && (
+                {edit && (
                   <>
                     <span aria-hidden>·</span>
                     <button type="button" className={link} disabled={disabled || saving} onClick={(e) => { e.preventDefault(); setDraft({ id: a.id, text: a.text }); }}>Edit</button>
@@ -317,6 +321,13 @@ function OwnAnswerRows({ decision: d, open, disabled, picked, onPick, nameOf, an
           </label>
         );
       })}
+      {blockedDraft && (
+        <div className="grid gap-2 border-t border-line px-4 py-3" data-testid="plan-answer-unsent">
+          <p className="m-0 text-xs text-ink-3">This answer can no longer be edited. You can copy your unsent text.</p>
+          <textarea aria-label="Unsent answer edit" readOnly value={blockedDraft.text} className="min-h-16 w-full rounded-md border border-line bg-field p-2 text-[13px]" />
+          <button type="button" className={`${link} justify-self-start`} onClick={clearDraft}>Discard draft</button>
+        </div>
+      )}
       {typing === "new" && answers && (
         <OwnAnswerField {...field} initial="" busy={saving || disabled} onSave={(text) => void run(() => answers.add(text))} />
       )}

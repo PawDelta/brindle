@@ -118,3 +118,31 @@ it.each(["comment", "reply", "own answer", "request changes"] as const)("restore
   await screen.findByTestId("plan-decision");
   expect(box[kind]().value).toBe(text);
 });
+
+it("keeps an unsent answer edit recoverable when a teammate picks the answer before reopen", async () => {
+  const answer = { id: "own-1", author: "person", text: "Use a staged queue." };
+  const doc = { ...plan, me: "u_reader", author: "teammate:u_author", can_comment: true };
+  const store = createAppStore();
+  const open = (locked: boolean) => {
+    const decisions = doc.decisions.map((d) => ({
+      ...d, answers: [{ ...answer, locked }], votes: locked ? { [answer.id]: [doc.author] } : {},
+    }));
+    const client = teammateClient({ ...doc, decisions });
+    return render(inTestStore(<SharedDesignReader client={client} docId={doc.id} onBack={() => reader.unmount()} />, store));
+  };
+  let reader = open(false);
+  fireEvent.click(within(await screen.findByTestId("plan-answer")).getByRole("button", { name: "Edit" }));
+  const form = screen.getByTestId("plan-answer-field");
+  const text = "Use a dedicated queue for this rollout.";
+  fireEvent.change(within(form).getByRole("textbox"), { target: { value: text } });
+  fireEvent.click(screen.getByTestId("visual-back"));
+
+  reader = open(true);
+  const lockedAnswer = await screen.findByTestId("plan-decision");
+  expect(within(lockedAnswer).queryByTestId("plan-answer-field")).toBeNull();
+  expect(within(lockedAnswer).queryByRole("button", { name: "Remove" })).toBeNull();
+  const draft = within(lockedAnswer).getByTestId("plan-answer-unsent");
+  const box = within(draft).getByRole<HTMLTextAreaElement>("textbox");
+  expect(box.readOnly).toBe(true);
+  expect(box.value).toBe(text);
+});
