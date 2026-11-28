@@ -675,20 +675,48 @@ def _page(title: str, markdown: str) -> str:
 _REV_BASE = re.compile(r"r(\d+)")
 
 
+def _rev_base(base: Any) -> int | None:
+    """The revision a ``r<N>`` base names (a solo plan's, from :func:`read_draft`), else None."""
+    m = _REV_BASE.fullmatch(base) if isinstance(base, str) else None
+    return int(m.group(1)) if m else None
+
+
+def _keep_acknowledged(parts: list[dict], given: list[dict], ack: dict) -> list[dict]:
+    """``parts`` (the proposal after the spine and template filled and pruned
+    it) with every section the supervisor passed on unchanged from ``ack``,
+    the revision it read, exactly as it is there: a section the person
+    cleared stays cleared, rather than coming back as "None." or dropping out."""
+    was = {s["id"]: s for s in ack["sections"]}
+    same = [s["id"] for s in given if s["id"] in was and all(
+        s.get(k) == was[s["id"]].get(k) for k in ("title", "kind", "markdown", "caption"))]
+    if not same:
+        return parts
+    out = [was[s["id"]] if s["id"] in same else s for s in parts]
+    order = [s["id"] for s in given]
+    for sid in same:
+        if any(s["id"] == sid for s in out):
+            continue
+        # Dropped by the spine or template: back after the section it followed in the proposal.
+        before = {*order[:order.index(sid)]}
+        at = max((i + 1 for i, s in enumerate(out) if s["id"] in before), default=0)
+        out.insert(at, was[sid])
+    return out
+
+
 def _revised_from(db: DB, p: dict, base: Any) -> int:
     """The revision a supervisor's revision of plan ``p`` (no live draft) was
     written from: the ``r<N>`` base :func:`read_draft` gave it, else its own
-    last proposal (it has read nothing newer)."""
+    last proposal (it has read nothing newer) as of ``p``, the plan as this
+    proposal found it: a proposal published since never becomes its base."""
     from brindle import plan_docs
 
-    m = _REV_BASE.fullmatch(base) if isinstance(base, str) else None
-    if m:
-        n = int(m.group(1))
+    n = _rev_base(base)
+    if n is not None:
         if n > p["rev"]:
             raise ServiceError("invalid", f"base {base} isn't a revision of this plan; read it with read_plan", 400)
         return n
-    last = db.conn.execute("SELECT MAX(rev) FROM plan_revisions WHERE plan_id=? AND author=?",
-                           (p["id"], plan_docs.SUPERVISOR)).fetchone()[0]
+    last = db.conn.execute("SELECT MAX(rev) FROM plan_revisions WHERE plan_id=? AND author=? AND rev<=?",
+                           (p["id"], plan_docs.SUPERVISOR, p["rev"])).fetchone()[0]
     return p["rev"] if last is None else last
 
 
@@ -761,6 +789,15 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     # design-doc spine (an older free-form plan keeps its sections as they are).
     on_spine = plan_id is not None and any(
         s["id"] in plan_docs.SPINE for s in plan_docs.revision(db, plan_id)["sections"])
+    # A solo plan revised from the revision read_plan gave (base r<N>): what the supervisor passed
+    # on unchanged keeps that revision's text through the spine and template below.
+    acknowledged = None
+    if plan_id is not None and _rev_base(base) is not None:
+        try:
+            acknowledged = plan_docs.revision(db, plan_id, _rev_base(base))
+        except ServiceError:
+            acknowledged = None
+    passed = plan_docs.design_doc(parts, map_only=True) if acknowledged else []
     if plan_id is None or on_spine:
         parts = plan_docs.design_doc(parts, force=not template, map_only=bool(template))
         markdown = plan_docs.render(lede, parts)
@@ -777,6 +814,10 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         kept = [s for s in parts if not plan_docs.empty_extra(s) or doc_templates._key(s["title"]) in required]
         added = added or len(kept) != len(parts)
         parts = kept
+    if acknowledged is not None:
+        restored = _keep_acknowledged(parts, passed, acknowledged)
+        added = added or restored != parts
+        parts = restored
     if added:
         markdown = plan_docs.render(lede, parts)
     if len(markdown.encode("utf-8")) > MAX_MARKDOWN:
