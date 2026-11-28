@@ -50,7 +50,7 @@ class SlowLibrary(PeopleLibrary):
     def create(self, form, headers):
         answer = super().create(form, headers)
         if self.slow_create:
-            raise auth.TransportError("cannot reach brindle Pro backend: timed out")
+            raise auth.TransportError("socket at private.example timed out", network=auth.NETWORK_SLOW)
         return answer
 
 
@@ -76,7 +76,8 @@ def test_a_timed_out_first_add_still_searches_and_try_again_lands_on_the_one_doc
     first = add_person(app, pid,{"sub": "owner_1", "access": "comment"})
     assert first.status_code == 202
     owner = next(p for p in app.get(f"/v1/plans/{pid}/access").json()["people"] if p["sub"] == "owner_1")
-    assert owner["state"] == "sharing" and "timed out" in owner["error"]     # still on its way, saying why
+    assert owner["state"] == "sharing" and owner["error"]     # still on its way, saying why
+    assert "private.example" not in owner["error"]
     library.slow_create = False
     assert app.get(f"/v1/plans/{pid}").json()["gate"] is not None    # the panel now reads it as shared
     assert found(app, pid) == ["owner_1"]

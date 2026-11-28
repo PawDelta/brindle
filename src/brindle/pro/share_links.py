@@ -96,19 +96,20 @@ def _link(raw: Any) -> dict | None:
             "scope": raw.get("scope") if isinstance(raw.get("scope"), dict) else None}
 
 
-def _refused(status: int, resp: dict) -> ServiceError:
+class LinkPolicyRefused(ServiceError):
+    """A Library refusal with the server's policy description."""
+
+
+def _refused(status: int, resp: dict) -> ServiceError | ad.Refused:
     code = resp.get("error") if isinstance(resp.get("error"), str) else None
     why = resp.get("error_description") if isinstance(resp.get("error_description"), str) else None
-    if code in POLICY_REFUSALS:
-        return ServiceError(code, mask(why or "your organization's link policy doesn't allow this link"), 403)
+    if 400 <= status < 500 and code in POLICY_REFUSALS:
+        return LinkPolicyRefused(code, mask(why or "your organization's link policy doesn't allow this link"), 403)
     if status == 403 and code in (None, "forbidden"):
         return ServiceError("forbidden", "only an editor of this plan can make or revoke its link", 403)
     if status == 404:
         return ServiceError("not_found", "the Library has no such plan", 404)
-    if 400 <= status < 500 and status != 401:     # a 401 would read as the daemon's own token refused
-        return ServiceError(code if code and code.isidentifier() else "upstream", mask(why or code or f"HTTP {status}"),
-                            status)
-    return ServiceError("upstream", mask(why or code or f"HTTP {status}"), 502)
+    return ad.Refused.from_response(status, resp)
 
 
 def _ask(method: str, doc_id: str, client, store, body=None) -> dict | None:

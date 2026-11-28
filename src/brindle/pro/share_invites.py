@@ -44,7 +44,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from brindle.db import DB
-from brindle.service.errors import ServiceError, from_exception
+from brindle.service.errors import ServiceError
 
 log = logging.getLogger(__name__)
 
@@ -445,7 +445,7 @@ def _outcome(e: BaseException) -> tuple[bool, str]:
         else:
             again = isinstance(e, ad.Refused) and (e.status >= 500 or e.status in (408, 429))
     else:
-        err, again = from_exception(e), False
+        err, again = actions.upstream_error(e), False
     return again, redact.mask(err.message)
 
 

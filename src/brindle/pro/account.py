@@ -526,6 +526,8 @@ class ProAccount(_OrgCommands):
         return auth.Client(base, transport=self.transport)
 
     def run(self, args: list[str]) -> int:
+        from brindle.pro.analysis_docs import Refused
+
         args = list(args)
         base = None
         if "--base-url" in args:
@@ -628,7 +630,7 @@ class ProAccount(_OrgCommands):
             if cmd == "route":
                 return self.cmd_route(reset=bool(opts["reset"]))
             return getattr(self, "cmd_" + cmd)(base)
-        except (auth.AuthError, license.LicenseError, credentials.CredentialError) as e:
+        except (Refused, auth.AuthError, license.LicenseError, credentials.CredentialError) as e:
             print(f"brindle account: {e}", file=self.err)
             return 1
 
