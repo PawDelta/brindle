@@ -328,7 +328,7 @@ export function SharePanel({ plan, target, nameOf, writes, onBusy, visible, onCl
   const waiting = people.filter((p) => (p.signOff ?? (reviewerOf(p.sub)?.required ? "required" : null)) === "required");
   const unsigned = waiting.filter((p) => reviewerOf(p.sub)?.status !== "signed_off").map((p) => firstWord(p.name));
   const signed = waiting.filter((p) => reviewerOf(p.sub)?.status === "signed_off").map((p) => firstWord(p.name));
-  const buildNote = unsigned.length ? `Builds when ${list(unsigned)} approve${unsigned.length > 1 ? "" : "s"}.${signed.length ? ` ${list(signed)} already approved.` : ""}` : null;
+  const buildNote = unsigned.length ? `Waiting for ${list(unsigned)} to approve.${signed.length ? ` ${list(signed)} already approved.` : ""}` : null;
 
   // A refused write keeps its row, its error and Try again; `cancel` drops one that never landed.
   const status = (key: string, label: string, cancel?: () => void) => {

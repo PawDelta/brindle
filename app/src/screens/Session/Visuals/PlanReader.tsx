@@ -1121,7 +1121,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     : frozen && gate ? `Version ${frozen.id} · ${gate.signed} of ${plural(gate.required, "approval")}`
     : gate && useLiveReview && open ? "Still being written · approvals open once you freeze a version"
     : !open ? (plan.state === "approved" ? "Its workers are building it" : "The supervisor is revising it")
-    : gate && gate.state !== "ready" ? "Build starts after all required approvals" : undefined;
+    : gate && gate.state !== "ready" ? "The build requires approval" : undefined;
   const changedAt = Math.max(plan.created_at, ...(plan.revisions ?? []).map((r) => r.at));
   const byline = `${versionLabel} · changed ${ago(changedAt)}`;
 
@@ -1157,7 +1157,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     ? `Builds when ${names(signersLeft)} ${signersLeft.length > 1 ? "approve" : "approves"}.`
     : "Build requested.";
   const buildSentence = held ? <>{buildAfterApprovals} {withdraw}</>
-    : gate?.state === "waiting" && gate.can_hold_approval && waitingNames.length ? buildAfterApprovals
+    : gate?.state === "waiting" && gate.can_hold_approval && !reviewBlocked ? "Press Build to queue it until the required approvals arrive."
     : gate && gate.state !== "ready" ? gateWhy || summary : null;
   const approveClass = held ? `${button} text-pass disabled:opacity-100 disabled:cursor-default` : main;
   const signOffsCurrent = held || reviewing || (gateHolds && gate?.state === "waiting");
