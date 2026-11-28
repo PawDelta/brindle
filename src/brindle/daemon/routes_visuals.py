@@ -23,9 +23,10 @@ from typing import Any
 from urllib.parse import quote
 
 from starlette.requests import Request
-from starlette.background import BackgroundTask, BackgroundTasks
+from starlette.background import BackgroundTask
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route, WebSocketRoute
+from starlette.types import Receive, Scope, Send
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from brindle import visuals, visual_offers
@@ -402,18 +403,40 @@ def plan(db: DB, request: Request) -> Any:
     return plans.to_dto(db, p)
 
 
-def decide_plan(db: DB, params: dict, body: dict) -> Any:
+class _DecidePlan:
     """The person's Approve or Redirect. The daemon serves the app and people,
     never agents (its Guard refuses an agent's process), so this is the person."""
-    from brindle import approval_sources, plans
 
-    background = BackgroundTasks()
-    p = plans.decide(db, params["id"], body.get("rev"), _get(body, "approved", bool, required=True),
-                     body.get("picks"), body.get("comments"), _get(body, "note"),
-                     approval=approval_sources.PERSON_IN_APP,
-                     attachments=_get(body, "attachments", list), version=body.get("version"),
-                     after_reply=background.add_task)
-    return JSONResponse(plans.to_dto(db, p), background=background)
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        from brindle import approval_sources, plans
+
+        reply = plans.ApprovalReply()
+
+        @_endpoint
+        def decide_plan(db: DB, params: dict, body: dict) -> Any:
+            p = plans.decide(db, params["id"], body.get("rev"), _get(body, "approved", bool, required=True),
+                             body.get("picks"), body.get("comments"), _get(body, "note"),
+                             approval=approval_sources.PERSON_IN_APP,
+                             attachments=_get(body, "attachments", list), version=body.get("version"), reply=reply)
+            return plans.to_dto(db, p)
+
+        request = Request(scope, receive, send)
+        # Read the body before shielding the action. An abandoned upload
+        # should end without waiting for data that will never arrive.
+        await request.body()
+
+        # Cancelling the ASGI task cannot stop the action thread, which may
+        # still commit. Leave cleanup attached until that thread is done.
+        async def finish() -> None:
+            await asyncio.gather(action, return_exceptions=True)
+            await asyncio.to_thread(reply.finish)
+
+        action = asyncio.create_task(decide_plan(request))
+        try:
+            response = await asyncio.shield(action)
+            await response(scope, receive, send)
+        finally:
+            await asyncio.shield(finish())
 
 
 def withdraw_plan_approval(db: DB, params: dict, body: dict) -> Any:
@@ -1295,7 +1318,7 @@ ROUTES = [
     Route("/v1/visuals/{id}/read", _endpoint(mark_read), methods=["POST"]),
     Route("/v1/visuals/{id}/snapshot", _endpoint(snapshot), methods=["POST"]),
     Route("/v1/plans/{id}", plan),
-    Route("/v1/plans/{id}/decide", _endpoint(decide_plan), methods=["POST"]),
+    Route("/v1/plans/{id}/decide", _DecidePlan(), methods=["POST"], name="decide_plan"),
     Route("/v1/plans/{id}/approval/withdraw", _endpoint(withdraw_plan_approval), methods=["POST"]),
     Route("/v1/plans/{id}/cancel", _endpoint(cancel_plan), methods=["POST"]),
     Route("/v1/plans/{id}/alongside/{task}/stop", _endpoint(stop_alongside), methods=["POST"]),

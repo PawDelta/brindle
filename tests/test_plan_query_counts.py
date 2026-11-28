@@ -4,6 +4,7 @@ import asyncio
 from contextlib import closing
 from dataclasses import replace
 
+import pytest
 from starlette.testclient import TestClient
 
 from brindle import agents, mcp_server, plans, tasks, visual_offers
@@ -21,7 +22,11 @@ def _plan_with_task(db, boss):
     return pid, task
 
 
-def test_approve_answers_before_dispatch(db, session, monkeypatch):
+@pytest.mark.parametrize("disconnect", [
+    False,
+    pytest.param(True, marks=pytest.mark.variant("a failed response write must release the temporary approval hold")),
+])
+def test_approve_answers_before_dispatch(db, session, monkeypatch, disconnect):
     boss, started = session
     pid, task = _plan_with_task(db, boss)
     events = []
@@ -41,26 +46,58 @@ def test_approve_answers_before_dispatch(db, session, monkeypatch):
     monkeypatch.setattr(tasks, "start_in_background", start_in_background)
     app = build_app(TOKEN)
 
+    def sweep_while_reply_is_blocked():
+        current = DB()
+        with closing(current.conn):
+            assert plans.get(current, pid)["state"] == "approved"
+            assert len(messages(current)) > before
+            return tasks.sweep(current)
+
     async def record_reply(scope, receive, send):
+        if scope["type"] != "http":
+            await app(scope, receive, send)
+            return
+
+        request_complete = False
+        client_left, disconnect_received = asyncio.Event(), asyncio.Event()
+
+        async def receive_from_client():
+            nonlocal request_complete
+            if disconnect and request_complete:
+                await client_left.wait()
+                disconnect_received.set()
+                return {"type": "http.disconnect"}
+            message = await receive()
+            request_complete = message["type"] == "http.request" and not message.get("more_body")
+            return message
+
         async def record_body(message):
             if message["type"] == "http.response.body" and not message.get("more_body"):
-                current = DB()
-                with closing(current.conn):
-                    assert plans.get(current, pid)["state"] == "approved"
-                    assert len(messages(current)) > before
+                assert await asyncio.to_thread(sweep_while_reply_is_blocked) == 0
+                if disconnect:
+                    client_left.set()
+                    await disconnect_received.wait()
+                    events.append("disconnect")
+                    raise OSError("client disconnected")
                 await send(message)
                 events.append("reply")
             else:
                 await send(message)
 
-        await app(scope, receive, record_body)
+        await app(scope, receive_from_client, record_body)
 
     before = len(messages(db))
     with TestClient(record_reply, headers=AUTH) as client:
-        response = client.post(f"/v1/plans/{pid}/decide", json={"rev": 1, "approved": True})
+        if disconnect:
+            with pytest.raises(OSError):
+                client.post(f"/v1/plans/{pid}/decide", json={"rev": 1, "approved": True})
+        else:
+            response = client.post(f"/v1/plans/{pid}/decide", json={"rev": 1, "approved": True})
+            assert response.status_code == 200 and response.json()["state"] == "approved"
 
-    assert response.status_code == 200 and response.json()["state"] == "approved"
-    assert events == ["reply", "dispatch", "worker"]
+    assert events == ["disconnect" if disconnect else "reply", "dispatch", "worker"]
+    assert plans.get(db, pid)["state"] == "approved"
+    assert plans.holding(db, boss.id) is None
     assert db.get_task(task.id).state == "started" and started == [task.task_text]
 
 
