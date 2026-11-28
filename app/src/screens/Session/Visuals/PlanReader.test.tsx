@@ -534,11 +534,15 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   expect(decided).toEqual([true]);
 });
 
-/* A reader whose first verdict fails offline; `landed`: that verdict reached the Library anyway. */
-const offlineVerdict = (landed: boolean) => {
-  let plan = doc(1, "Workers run on your machine.");
+/* A reader whose first verdict fails offline; `landed`: that verdict reached the Library anyway;
+   `design`: a design doc, whose Request changes is confirmed in a menu. Reads wait while `hold` is on. */
+const offlineVerdict = (landed: boolean, design = false) => {
+  let plan = doc(1, "Workers run on your machine.", design ? { sections: [{ id: "context", title: "Context", markdown: "Workers run on your machine." }] } : {});
   const sent: { rev: number; approved: boolean; note: string }[] = [];
-  const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...docWrites(() => plan), plan: async () => plan,
+  const held: (() => void)[] = [];
+  const reads = { hold: false };
+  const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...docWrites(() => plan),
+    plan: () => reads.hold ? new Promise<Plan>((resolve) => held.push(() => resolve(plan))) : Promise.resolve(plan),
     decidePlan: async (_id, verdict) => {
       sent.push({ rev: verdict.rev, approved: verdict.approved, note: verdict.note ?? "" });
       if (sent.length === 1) {
@@ -547,19 +551,24 @@ const offlineVerdict = (landed: boolean) => {
       }
       return plan;   // still open: the drafted note is the action's own to clear
     } };
-  return { sent, client };
+  return { sent, client, held, reads };
 };
 
-it("an approval the network stopped keeps the draft, and Try again sends it through the Approve control", async () => {
-  const { sent, client } = offlineVerdict(false);
+it("an approval the network stopped keeps the draft, and Try again sends it through Approve once the plan is read back", async () => {
+  const { sent, client, held, reads } = offlineVerdict(false);
   render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
   const build = await screen.findByTestId("plan-build");
   const box = () => screen.getByRole("textbox", { name: "Note for the supervisor" }) as HTMLInputElement;
   fireEvent.change(box(), { target: { value: "Keep the queue." } });
+  reads.hold = true;
   await act(async () => fireEvent.click(build));
   const note = screen.getByTestId("library-network");
   expect(note.dataset.state).toBe("offline");
   expect(box().value).toBe("Keep the queue.");     // the failed verdict keeps what was drafted
+  // It may have landed: nothing is offered until the plan has been read back.
+  expect(within(note).queryByRole("button")).toBeNull();
+  reads.hold = false;
+  await act(async () => { for (const release of held.splice(0)) release(); });
   await act(async () => fireEvent.click(within(note).getByRole("button", { name: "Try again" })));
   expect(sent).toEqual([{ rev: 1, approved: true, note: "Keep the queue." }, { rev: 1, approved: true, note: "Keep the queue." }]);
   expect(screen.queryByTestId("library-network")).toBeNull();
@@ -575,6 +584,23 @@ it("offers no Try again once the plan read back shows the stopped approval lande
   const note = screen.queryByTestId("library-network");
   expect(note && within(note).queryByRole("button")).toBeFalsy();
   expect(sent).toHaveLength(1);
+});
+
+it("Try again for a Request changes confirmed in a menu opens that menu, where the person confirms it", async () => {
+  const { sent, client } = offlineVerdict(false, true);
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const trigger = await screen.findByRole("button", { name: "Request changes" });
+  fireEvent.click(trigger);
+  fireEvent.change(screen.getByRole("textbox", { name: "Note for the supervisor" }), { target: { value: "Split the API." } });
+  await act(async () => fireEvent.click(screen.getByTestId("plan-send-back")));
+  const again = await within(screen.getByTestId("library-network")).findByRole("button", { name: "Try again" });
+  // A real press: the mousedown outside the menu closes it before the click lands.
+  await act(async () => { fireEvent.mouseDown(again); });
+  expect(screen.queryByTestId("plan-send-back")).toBeNull();
+  await act(async () => fireEvent.click(again));
+  expect(sent).toHaveLength(1);                    // opening the menu sends nothing by itself
+  await act(async () => fireEvent.click(screen.getByTestId("plan-send-back")));
+  expect(sent).toEqual([{ rev: 1, approved: false, note: "Split the API." }, { rev: 1, approved: false, note: "Split the API." }]);
 });
 
 it("a plan being written offers no sign-off, the same plan can be signed once proposed, and superseded or ended plans stay closed", async () => {

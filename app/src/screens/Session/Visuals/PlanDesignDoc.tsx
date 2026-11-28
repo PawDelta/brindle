@@ -81,8 +81,10 @@ export function Tick({ children, className = "" }: { children: ReactNode; classN
 }
 
 /* A button with its panel under it (`down`) or over it (`up`). Escape or a click outside closes it. */
-export function Menu({ label, buttonClass, place, panelClass = "", open, onOpenChange, children, testid, title, keepMounted = false }: {
+export function Menu({ label, buttonClass, place, panelClass = "", open, onOpenChange, children, testid, title, keepMounted = false, again }: {
   label: ReactNode; buttonClass: string; place: "down" | "up"; panelClass?: string; open: boolean; onOpenChange(open: boolean): void; children: ReactNode; testid?: string; title?: string;
+  /* Names the action the menu confirms, so a Try again elsewhere can open this menu for it. */
+  again?: string;
   /* The panel stays mounted while closed, only hidden: what it holds (the history's comparison) outlives closing it. */
   keepMounted?: boolean;
 }) {
@@ -106,7 +108,7 @@ export function Menu({ label, buttonClass, place, panelClass = "", open, onOpenC
   }, [open, onOpenChange]);
   return (
     <div ref={box} className="relative">
-      <button type="button" className={buttonClass} aria-expanded={open} title={title} onClick={() => onOpenChange(!open)}>{label}</button>
+      <button type="button" className={buttonClass} aria-expanded={open} title={title} data-again-menu={again} onClick={() => onOpenChange(!open)}>{label}</button>
       {(open || keepMounted) && (
         <div data-testid={testid} hidden={!open} className={`absolute right-0 z-30 grid gap-2.5 rounded-md border border-line-strong bg-canvas p-3.5 text-left font-sans text-[12.5px] font-normal leading-normal whitespace-normal text-ink-2 shadow-[0_18px_44px_-18px_rgba(0,0,0,0.75)] ${place === "down" ? "top-[calc(100%+6px)]" : "bottom-[calc(100%+12px)]"} ${panelClass || "w-[340px] max-w-[86vw]"} ${open ? "" : "!hidden"}`}>
           {children}

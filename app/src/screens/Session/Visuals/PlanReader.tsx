@@ -91,7 +91,9 @@ function refusal(e: unknown): string {
    `end` hands back the engine's reply (the plan as it is now), or null when the write failed. */
 export interface Writes {
   begin(): boolean;
-  end(plan: Plan | null): void;
+  /* `readBack`: told whether the read that follows this write succeeded (the doc on screen is the
+     Library's as of after the write) or failed. */
+  end(plan: Plan | null, readBack?: (ok: boolean) => void): void;
 }
 
 export type Mode = "viewing" | "suggesting" | "editing";
@@ -200,13 +202,21 @@ export function useDoc<P extends Plan>(source: DocSource<P>, version: unknown, f
       write.current = { out: true, passed: false, access: access.current };
       return true;
     },
-    end: (p) => {
+    end: (p, readBack) => {
       if (p && write.current.access === access.current) place(p as P, write.current.passed);
       write.current = { out: false, passed: false, access: access.current };
       seq.current++;
+      readBacks.current.push(...(readBack ? [readBack] : []));
       setAgain((n) => n + 1);
     },
   }), [place]);
+  // Told when the read after a write settles: the latest read, which began after that write ended.
+  const readBacks = useRef<((ok: boolean) => void)[]>([]);
+  const settle = (ok: boolean) => {
+    const waiting = readBacks.current;
+    readBacks.current = [];
+    for (const tell of waiting) tell(ok);
+  };
   useEffect(() => {
     const mine = ++seq.current;
     source.read().then(
@@ -214,9 +224,11 @@ export function useDoc<P extends Plan>(source: DocSource<P>, version: unknown, f
         if (mine !== seq.current) return;
         if (place(p) && write.current.out) write.current.passed = true;
         setError(null);
+        settle(true);
       },
       (e) => {
         if (mine !== seq.current) return;
+        settle(false);
         setError(message(e));
         if (source.lost?.(e)) {
           access.current++;
@@ -474,6 +486,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const failedControl = useRef<string | null>(null);
   const [againName, setAgainName] = useState<string | null>(null);
   const [againControl, setAgainControl] = useState<HTMLButtonElement | null>(null);
+  /* The plan was read back since the last failed write (null: no failed write is waiting on one). */
+  const [readBack, setReadBack] = useState<boolean | null>(null);
   const verdict = useRef<HTMLElement | null>(null);
   const slow = useSlowPending(busy);
   const [picked, setPicked] = useState<Picked | null>(null);
@@ -647,12 +661,14 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const control = failedControl.current;
     failedControl.current = null;
     setAgainName(null);
+    setReadBack(null);
+    setReadBack(null);
     try {
       const now = await work();
       writes.end(now);
       return now;
     } catch (e) {
-      writes.end(null);
+      writes.end(null, (ok) => { if (alive.current) setReadBack(ok); });
       refused?.(e);
       if (alive.current) { setError(refusal(e)); setNet(libraryNetwork(e)); setAgainName(control); }
       return null;
@@ -661,18 +677,28 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     }
   };
   const write = async (work: () => Promise<Plan>) => (await send(work)) !== null;
-  // After every render: the control to go through, only while it is on screen and enabled.
+  // After every render: the control to go through, only once the plan has been read back since the
+  // failure (the write may have landed) and only while that control is on screen and enabled. An
+  // action confirmed in a menu (Cancel planning, Request changes) goes through the menu: Try again
+  // opens it, and the person confirms there.
   useEffect(() => {
-    const found = againName && net ? (verdict.current?.closest("[data-testid=\"plan-reader\"]") ?? verdict.current)?.querySelector<HTMLButtonElement>(`[data-again="${againName}"]`) : null;
+    const root = verdict.current?.closest("[data-testid=\"plan-reader\"]") ?? verdict.current;
+    const found = againName && net && readBack ? root?.querySelector<HTMLButtonElement>(`[data-again-menu="${againName}"]`)
+      ?? root?.querySelector<HTMLButtonElement>(`[data-again="${againName}"]`) : null;
     const usable = found && !found.disabled ? found : null;
     setAgainControl((old) => (old === usable ? old : usable));
   });
+  const goAgain = (control: HTMLButtonElement) => {
+    if (!control.isConnected || control.disabled) return;
+    if (control.dataset.againMenu && control.getAttribute("aria-expanded") === "true") return;   // already open
+    control.click();
+  };
   const footerNotes = (span: string) => <>
     {slow && <SlowConnectionNote className={`m-0 ${span} text-xs text-ink-3`} />}
     {error && net && <LibraryNetworkNote state={net} className={`m-0 flex ${span} items-center gap-2 text-xs text-ink-2`}
       hint="It couldn't be confirmed, so it may or may not have gone through. What you wrote is kept: check the plan before sending it again."
       buttonClassName={`${quiet} px-2 text-xs`}
-      onTryAgain={againControl && !busy ? () => { if (againControl.isConnected && !againControl.disabled) againControl.click(); } : undefined} />}
+      onTryAgain={againControl && !busy ? () => goAgain(againControl) : undefined} />}
   </>;
   // Own answers on a decision card (brindle/plan_answers.py). Adding one picks it and removing one
   // drops its pick, so the engine's `confirmed` speaks for the card from then on.
@@ -1343,16 +1369,16 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               </div>
               <div className="flex items-center gap-2">
                 {client?.cancelPlan && (
-                  <Menu label="Cancel planning" buttonClass={quiet} place="up" open={cancelOpen} onOpenChange={setCancelOpen} testid="plan-cancel-menu">
+                  <Menu label="Cancel planning" buttonClass={quiet} place="up" open={cancelOpen} onOpenChange={setCancelOpen} testid="plan-cancel-menu" again="cancel">
                     <h4 className={menuTitle}>Close this plan without approving?</h4>
                     <p className="m-0">Nothing is built. The tasks waiting on this plan go back to your supervisor, who asks you what to do with each.</p>
                     <div className={menuRow}>
                       <button type="button" className={quiet} onClick={() => setCancelOpen(false)}>Keep planning</button>
-                      <LoadingButton className={danger} busy={sending === "cancel"} disabled={!!historical || busy || uploading > 0} data-testid="plan-cancel" data-again="cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>
+                      <LoadingButton className={danger} busy={sending === "cancel"} disabled={!!historical || busy || uploading > 0} data-testid="plan-cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>
                     </div>
                   </Menu>
                 )}
-                <Menu label="Request changes" buttonClass={button} place="up" open={changesOpen} onOpenChange={setChangesOpen} testid="plan-changes-menu">
+                <Menu label="Request changes" buttonClass={button} place="up" open={changesOpen} onOpenChange={setChangesOpen} testid="plan-changes-menu" again="changes">
                   <h4 className={menuTitle}>What should change?</h4>
                   <textarea className={menuNote} aria-label="Note for the supervisor" placeholder="A note for the supervisor (optional if you have commented)" value={note} onChange={(e) => setNote(e.target.value)} />
                   {(attached.length > 0 || uploading > 0) && (
@@ -1375,7 +1401,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                       </>
                     ) : <span />}
                     <LoadingButton className={button} busy={sending === "changes"} disabled={!!historical || busy || !canRequest || uploading > 0}
-                      title={canRequest ? undefined : "Comment, add a note or pick differently first"} data-testid="plan-send-back" data-again="changes" onClick={() => void decide(false)}>
+                      title={canRequest ? undefined : "Comment, add a note or pick differently first"} data-testid="plan-send-back" onClick={() => void decide(false)}>
                       Send back
                     </LoadingButton>
                   </div>
