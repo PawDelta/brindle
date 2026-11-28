@@ -483,6 +483,7 @@ body {
 .iq-av.pair b:last-child { right: 0; bottom: 0; }
 .iq-tx { min-width: 0; }
 .iq-t { font: 500 13.5px/1.4 var(--sans); letter-spacing: -0.005em; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.iq-item:not(.doneline) > .iq-r .iq-t { white-space: normal; overflow-wrap: anywhere; }
 .iq-item.new > .iq-r .iq-t { font-weight: 600; }
 .iq-item.read > .iq-r .iq-t { font-weight: 400; color: var(--ink-2); }
 .iq-m { margin-top: 1px; font-size: 12px; line-height: 1.45; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
