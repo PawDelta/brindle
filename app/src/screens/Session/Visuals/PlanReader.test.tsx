@@ -8,7 +8,7 @@ import { createAppStore } from "../../../store/store";
 import { StoreContext } from "../../../store/useStore";
 import { Avatar } from "./PlanCards";
 import { changeBetween } from "./DocText";
-import { PlanReader, REVIEW_COLLAPSED_KEY, mayRunAgain } from "./PlanReader";
+import { PlanReader, REVIEW_COLLAPSED_KEY } from "./PlanReader";
 import { SharedDesignReader } from "./SharedDesignReader";
 import type { PlanDocClient, PlanSharingClient, PlansClient, VisualsClient } from "./client";
 
@@ -534,7 +534,7 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   expect(decided).toEqual([true]);
 });
 
-it("an approval the network stopped shows a calm note, and Try again approves through the same action", async () => {
+it("an approval the network stopped shows a calm note and keeps the draft for the same button to send", async () => {
   let plan = doc(1, "Workers run on your machine.");
   const sent: { rev: number; approved: boolean; note: string }[] = [];
   const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...docWrites(() => plan), plan: async () => plan,
@@ -551,21 +551,11 @@ it("an approval the network stopped shows a calm note, and Try again approves th
   const note = screen.getByTestId("library-network");
   expect(note.dataset.state).toBe("offline");
   expect(box().value).toBe("Keep the queue.");     // the failed verdict keeps what was drafted
-  await act(async () => fireEvent.click(within(note).getByRole("button")));
+  // The approve button itself sends it again, with the checks the screen has now.
+  await act(async () => fireEvent.click(screen.getByTestId("plan-build")));
   expect(sent).toEqual([{ rev: 1, approved: true, note: "Keep the queue." }, { rev: 1, approved: true, note: "Keep the queue." }]);
   expect(screen.queryByTestId("library-network")).toBeNull();
   expect(box().value).toBe("");                    // it went with the verdict
-});
-
-it.each([
-  ["the same plan, revision and version", {}, true],
-  ["a newer revision", { rev: 2 }, false],
-  ["another frozen version of the same revision", { version: 8 }, false],
-  ["an old revision being read", { historical: true }, false],
-  ["the action no longer offered", { offered: false }, false],
-])("runs a stopped action again only for %s", (_case, change, allowed) => {
-  const asked = { plan: "p1", rev: 1, version: 7 };
-  expect(mayRunAgain(asked, { plan: "p1", rev: 1, version: 7, historical: false, offered: true, ...change })).toBe(allowed);
 });
 
 it("a plan being written offers no sign-off, the same plan can be signed once proposed, and superseded or ended plans stay closed", async () => {

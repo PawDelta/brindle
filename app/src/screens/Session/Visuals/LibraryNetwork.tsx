@@ -30,11 +30,11 @@ export function useSlowPending(pending: boolean): boolean {
   return slow;
 }
 
-export function LibraryNetworkNote({ state, onTryAgain, className = "msg", buttonClassName = "sp-btn q end" }: {
-  state: LibraryNetwork; onTryAgain?(): void; className?: string; buttonClassName?: string;
+export function LibraryNetworkNote({ state, onTryAgain, hint, className = "msg", buttonClassName = "sp-btn q end" }: {
+  state: LibraryNetwork; onTryAgain?(): void; hint?: string; className?: string; buttonClassName?: string;
 }) {
   return <div className={className} role="alert" data-testid="library-network" data-state={state}>
-    <span className="grow">{SAY[state]}</span>
+    <span className="grow">{SAY[state]}{hint && ` ${hint}`}</span>
     {onTryAgain && <button type="button" className={buttonClassName} onClick={onTryAgain}>Try again</button>}
   </div>;
 }
