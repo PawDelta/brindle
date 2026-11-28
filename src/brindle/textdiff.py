@@ -8,6 +8,7 @@ import re
 
 Opcode = tuple[str, int, int, int, int]
 _MAX_CELLS = 250_000
+_MAX_EDIT_DISTANCE = 24
 _TOKEN = re.compile(r"\w+|\s+|[^\w\s]")
 
 
@@ -60,6 +61,70 @@ def positional_opcodes(before: Sequence[str], after: Sequence[str]) -> list[Opco
     return ops
 
 
+def _previous_diagonal(frontier: dict[int, int], distance: int, diagonal: int) -> int:
+    if diagonal == -distance or (diagonal != distance and frontier[diagonal - 1] < frontier[diagonal + 1]):
+        return diagonal + 1
+    return diagonal - 1
+
+
+def _sparse_opcodes(before: Sequence[str], after: Sequence[str]) -> list[Opcode] | None:
+    """Find a short insertion/deletion path with a fixed frontier and linear scan budget."""
+    left, right = len(before), len(after)
+    if abs(left - right) > _MAX_EDIT_DISTANCE:
+        return None
+
+    # Myers' frontier records the furthest offset each diagonal can reach.
+    # Retain only the bounded number of frontiers needed to recover the path.
+    previous = {1: 0}
+    trace = []
+    remaining = 8 * (left + right)
+    for distance in range(_MAX_EDIT_DISTANCE + 1):
+        trace.append(previous)
+        frontier = {}
+        for diagonal in range(-distance, distance + 1, 2):
+            source = _previous_diagonal(previous, distance, diagonal)
+            a = previous[source] + (1 if source < diagonal else 0)
+            b = a - diagonal
+            while a < left and b < right and before[a] == after[b]:
+                remaining -= 1
+                if remaining < 0:
+                    return None
+                a += 1
+                b += 1
+            if a >= left and b >= right:
+                return _trace_opcodes(trace, left, right)
+            frontier[diagonal] = a
+        previous = frontier
+    return None
+
+
+def _trace_opcodes(trace: list[dict[int, int]], left: int, right: int) -> list[Opcode]:
+    matches = []
+    a, b = left, right
+    for distance in reversed(range(len(trace))):
+        frontier = trace[distance]
+        source = _previous_diagonal(frontier, distance, a - b)
+        x = frontier[source]
+        y = x - source
+        # The extra step on one axis was the insertion/deletion. The
+        # shared advance that follows it is the equal run.
+        length = min(a - x, b - y)
+        if length:
+            matches.append((a - length, a, b - length, b))
+        a, b = x, y
+
+    ops = []
+    a = b = 0
+    for i, j, x, y in reversed(matches):
+        if (a, b) != (i, x):
+            ops.append(_edit(a, i, b, x))
+        ops.append(("equal", i, j, x, y))
+        a, b = j, y
+    if (a, b) != (left, right):
+        ops.append(_edit(a, left, b, right))
+    return ops
+
+
 def sequence_opcodes(before: Sequence[str], after: Sequence[str], *, autojunk: bool = False) -> list[Opcode]:
     """Diff lines, paragraphs, tokens or characters with a bounded matcher."""
     if before == after:
@@ -72,10 +137,11 @@ def sequence_opcodes(before: Sequence[str], after: Sequence[str], *, autojunk: b
     left, right = before[start:len(before) - suffix], after[start:len(after) - suffix]
     if fits(len(left), len(right)):
         middle = SequenceMatcher(None, left, right, autojunk=autojunk).get_opcodes()
-    elif not isinstance(left, str) and len(left) == len(right):
-        middle = positional_opcodes(left, right)
     else:
-        middle = [_edit(0, len(left), 0, len(right))]
+        middle = _sparse_opcodes(left, right)
+        if middle is None:
+            middle = (positional_opcodes(left, right) if not isinstance(left, str) and len(left) == len(right)
+                      else [_edit(0, len(left), 0, len(right))])
     return _with_edges(before, after, start, suffix, middle)
 
 
@@ -84,7 +150,8 @@ def opcodes(before: str, after: str, *, autojunk: bool = False) -> list[Opcode]:
 
     Small inputs keep SequenceMatcher's original alignment, including ties
     between repeated characters. Large inputs pin equal edges first. A region
-    that still exceeds the character budget after refinement stays one edit.
+    that still exceeds the character budget after refinement uses a bounded
+    search for sparse edits before falling back to a single replacement.
     """
     return _refine(before, after, autojunk, (_lines, tokens))
 

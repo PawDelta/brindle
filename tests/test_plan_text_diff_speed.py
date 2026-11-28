@@ -5,6 +5,7 @@ from difflib import SequenceMatcher
 import pytest
 
 from brindle import plan_docs, plan_drafts, plan_rebase
+from brindle.crdt import SharedDoc
 
 
 @pytest.fixture
@@ -89,6 +90,26 @@ def test_large_draft_mapping_keeps_offsets_between_edits(matching_budget):
 
     assert changed == [(0, 1), (4, 4), (5 + len(middle), 6 + len(middle))]
     assert at(25) == 29
+
+
+@pytest.mark.parametrize("remove_word", [
+    False,
+    pytest.param(True, marks=pytest.mark.variant("An interior deletion splits the unchanged run into two anchors")),
+])
+def test_retype_keeps_a_middle_replacement_in_place_after_relay_insertions(matching_budget, remove_word):
+    words = [f"word{i:03}" for i in range(300)]
+    base = " ".join(words)
+    local = base.replace("word150", "replacement")
+
+    def relay_text(text):
+        if remove_word:
+            text = text.replace("word100 ", "")
+        return "! " + text + " ?"
+
+    doc = SharedDoc.new({"s": relay_text(base)})
+    plan_drafts.retype(doc, {"s": base}, {"s": local})
+
+    assert doc.text("s") == relay_text(local)
 
 
 def test_small_diffs_keep_legacy_offsets():
