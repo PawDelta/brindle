@@ -70,6 +70,7 @@ import logging
 import re
 import threading
 import time
+from contextlib import nullcontext
 from typing import Any, Protocol
 from urllib.parse import urlencode
 from uuid import uuid4
@@ -324,12 +325,12 @@ def _reviewers(raw: Any) -> list[dict]:
     return [{"sub": r["sub"], "required": bool(r.get("required", True))} for r in raw]
 
 
-def _remember(db: DB, plan_id: str, view: dict) -> bool:
+def _remember(db: DB, plan_id: str, view: dict, *, connection=None) -> bool:
     """Keep the review state the Library answered with. True if it changed."""
     kept = {k: view.get(k) for k in REVIEW}
     review = json.dumps(kept, sort_keys=True)
     whole = plans._review_rows(kept) is not None        # only a whole answer takes back an access refusal
-    with db.tx() as c:
+    with (db.tx() if connection is None else nullcontext(connection)) as c:
         share_ = c.execute("SELECT owner, remote_rev, local_rev, review FROM plan_shares WHERE plan_id=?",
                            (plan_id,)).fetchone()
         if share_ is not None:
@@ -848,7 +849,8 @@ def _pull(db: DB, p: dict, share_: dict, view: dict) -> int:
         from brindle import plan_answers
 
         changes += plan_answers.pull(c, p["id"], share_["owner"], view, now)
-    changes += _remember(db, p["id"], view)
+        changes += _remember(db, p["id"], view, connection=c)
+        plans.withdraw_on_objection(c, p)
     return changes
 
 

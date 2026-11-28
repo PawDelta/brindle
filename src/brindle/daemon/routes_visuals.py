@@ -416,7 +416,7 @@ def decide_plan(db: DB, params: dict, body: dict) -> Any:
 def withdraw_plan_approval(db: DB, params: dict, body: dict) -> Any:
     from brindle import plans
 
-    return plans.to_dto(db, plans.withdraw_approval(db, params["id"]))
+    return plans.to_dto(db, plans.withdraw_approval(db, params["id"], _get(body, "rev", int, required=True)))
 
 
 def cancel_plan(db: DB, params: dict, body: dict) -> Any:

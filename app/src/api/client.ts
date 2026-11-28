@@ -2435,12 +2435,12 @@ export class DaemonClient {
 
   /* Approve or redirect the revision on screen; a newer revision, or a second verdict, is a 409. */
   decidePlan(id: string, verdict: PlanVerdict) {
-    if (verdict.withdraw) return this.withdrawPlanApproval(id);
+    if (verdict.withdraw) return this.withdrawPlanApproval(id, verdict.rev);
     return this.postInbox<Plan>(`/plans/${encodeURIComponent(id)}/decide`, verdict);
   }
 
-  withdrawPlanApproval(planId: string) {
-    return this.postInbox<Plan>(`/plans/${encodeURIComponent(planId)}/approval/withdraw`, {});
+  withdrawPlanApproval(planId: string, rev: number) {
+    return this.postInbox<Plan>(`/plans/${encodeURIComponent(planId)}/approval/withdraw`, { rev });
   }
 
   /* Cancel an open or redirected plan without approving it (brindle/plans.py cancel): a 409 once decided. */

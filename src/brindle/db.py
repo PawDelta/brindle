@@ -1262,7 +1262,8 @@ CREATE TABLE IF NOT EXISTS plans (
     decision TEXT,                 -- JSON {approved, picks, comments, note, at, rev}: the person's
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
-    ask TEXT                       -- the person's request restated by the supervisor, if given
+    ask TEXT,                      -- the person's request restated by the supervisor, if given
+    approval_notice TEXT           -- author inbox notice retained after a cancelled share is removed
 );
 CREATE INDEX IF NOT EXISTS plans_root ON plans(root_id, state);
 -- A plan as a design doc (brindle.plan_docs): every revision, the supervisor's
@@ -2151,8 +2152,10 @@ class DB:
             self.conn.execute("ALTER TABLE visuals ADD COLUMN answered_in_chat_rev INTEGER NOT NULL DEFAULT 0")
         if "consented_by" not in visual_cols:
             self.conn.execute("ALTER TABLE visuals ADD COLUMN consented_by TEXT")
-        if "ask" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(plans)")}:
-            self.conn.execute("ALTER TABLE plans ADD COLUMN ask TEXT")
+        plan_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plans)")}
+        for col in ("ask", "approval_notice"):
+            if col not in plan_cols:
+                self.conn.execute(f"ALTER TABLE plans ADD COLUMN {col} TEXT")
         share_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_shares)")}
         for col, kind in (("org_id", "TEXT"), ("lapsed_at", "REAL"), ("unconfirmed", "TEXT"),
                           ("approve_wanted", "TEXT"), ("approve_refused", "TEXT"), ("access_refused", "TEXT"),

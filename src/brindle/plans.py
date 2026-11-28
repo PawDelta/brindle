@@ -1213,12 +1213,22 @@ def _hold_approval(db: DB, p: dict, why: str, was_ready: bool, wanted: dict) -> 
     return held
 
 
-def withdraw_signoffs(c, plan_id: str, why: str) -> None:
+def withdraw_signoffs(c, plan_id: str, why: str) -> bool:
     """Invalidate the saved verdict in the same transaction as the edit or cancellation."""
     if c.execute("UPDATE plan_shares SET approve_wanted=NULL, approve_refused=? WHERE plan_id=?"
                  " AND json_extract(approve_wanted,'$.signoffs')=1", (why, plan_id)).rowcount:
         root = c.execute("SELECT root_id FROM plans WHERE id=?", (plan_id,)).fetchone()[0]
         _queue_message(c, root, why)
+        return True
+    return False
+
+
+def withdraw_on_objection(c, p: dict) -> None:
+    if c.execute("SELECT 1 FROM plan_shares WHERE plan_id=? AND json_extract(approve_wanted,'$.signoffs')=1",
+                 (p["id"],)).fetchone():
+        found = _gate(c, p)
+        if found and found["state"] == CHANGES:
+            withdraw_signoffs(c, p["id"], f"Your held approval was withdrawn. {found['reason']}")
 
 
 def _drop_held_approval(db: DB, p: dict, why: str, expected: str) -> None:
@@ -1312,7 +1322,7 @@ def _is_version(c, plan_id: str, rev: int, version: int) -> bool | None:
     return None if share is None else share["remote_rev"] == version and share["local_rev"] == rev
 
 
-def withdraw_approval(db: DB, plan_id: str) -> dict:
+def withdraw_approval(db: DB, plan_id: str, rev: int) -> dict:
     from brindle import plan_docs
 
     visuals.require_enabled()
@@ -1320,11 +1330,11 @@ def withdraw_approval(db: DB, plan_id: str) -> dict:
     visuals._unlocked(p["root_id"])
     with db.tx() as c:
         if not c.execute("SELECT 1 FROM plans WHERE id=? AND state='open' AND rev=?",
-                         (plan_id, p["rev"])).fetchone():
+                         (plan_id, rev)).fetchone():
             raise ServiceError("stale", "Read the current plan before withdrawing approval.", 409)
         c.execute("UPDATE plan_shares SET approve_wanted=NULL WHERE plan_id=? AND"
                   " json_extract(approve_wanted,'$.rev')=? AND json_extract(approve_wanted,'$.signoffs')=1",
-                  (plan_id, p["rev"]))
+                  (plan_id, rev))
     plan_docs._changed(db, p, p["rev"])
     return get(db, plan_id)
 
@@ -1530,7 +1540,9 @@ def cancel(db: DB, plan_id: str, rev: Any, *, person: bool, caller: Agent | None
                       (OFFER_DISMISSED, root, OFFER_OPEN + "%", OFFER_ACCEPTED))
         row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
         if row is not None:
-            withdraw_signoffs(c, p["id"], "Your held approval was withdrawn because the plan was cancelled.")
+            notice = "Your held approval was withdrawn because the plan was cancelled."
+            if withdraw_signoffs(c, p["id"], notice):
+                c.execute("UPDATE plans SET approval_notice=? WHERE id=?", (notice, p["id"]))
             shared_docs.drop_share(c, row)
         for t in held:
             c.execute("INSERT OR REPLACE INTO plan_cancel_holds (task_id, plan_id, created_at)"

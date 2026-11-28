@@ -620,12 +620,7 @@ def _add(db: DB, p: dict, rev: int, kind: str, anchor: dict | None, author: str,
         if not question and parent is None:
             from brindle import plans
 
-            row = c.execute("SELECT approve_wanted FROM plan_shares WHERE plan_id=?"
-                            " AND json_extract(approve_wanted,'$.signoffs')=1", (p["id"],)).fetchone()
-            if row:
-                gate = plans._gate(c, p)
-                if gate and gate["state"] == plans.CHANGES:
-                    plans.withdraw_signoffs(c, p["id"], f"Your held approval was withdrawn. {gate['reason']}")
+            plans.withdraw_on_objection(c, p)
     _changed(db, p, p["rev"])
     return tid
 
