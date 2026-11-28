@@ -1266,6 +1266,10 @@ CREATE TABLE IF NOT EXISTS plans (
     approval_notice TEXT           -- author inbox notice retained after a cancelled share is removed
 );
 CREATE INDEX IF NOT EXISTS plans_root ON plans(root_id, state);
+CREATE TABLE IF NOT EXISTS plan_reply_holds (
+    plan_id TEXT PRIMARY KEY REFERENCES plans(id) ON DELETE CASCADE,
+    lease TEXT NOT NULL
+);
 -- A plan as a design doc (brindle.plan_docs): every revision, the supervisor's
 -- and the person's own edits alike; the plans row holds the current one.
 CREATE TABLE IF NOT EXISTS plan_history_events (
