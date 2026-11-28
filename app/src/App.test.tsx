@@ -1024,7 +1024,7 @@ describe("App", () => {
     expect(within(nav()).queryByRole("navigation", { name: "Sessions" })).toBeNull();
     const rail = within(nav()).getByRole("navigation", { name: "Library" });
     // All designs, Needs you and the five stages, then the Sources. No tab strip on the page, and no repo picker on the designs.
-    expect([...rail.querySelectorAll("button")].map((row) => row.textContent?.replace(/^\W+/, "").replace(/\s*\d*$/, ""))).toEqual(["All plans", "Needs you", "Drafting", "Approvals", "Approved", "Building", "Shipped", "Map", "Imported docs", "Decisions", "Kept docs"]);
+    expect([...rail.querySelectorAll("button")].map((row) => row.textContent?.replace(/^\W+/, "").replace(/\s*\d*$/, ""))).toEqual(["All plans", "Needs you", "Drafting", "In review", "Approved", "Building", "Shipped", "Map", "Imported docs", "Decisions", "Kept docs"]);
     expect(within(screen.getByRole("main")).queryByRole("tablist")).toBeNull();
     expect(screen.queryByRole("combobox", { name: "Repo" })).toBeNull();
     // A Source's row counts what it holds, opens today's view of it, and is marked.
@@ -1084,15 +1084,15 @@ describe("App", () => {
     fireEvent.click(await within(screen.getByTestId("sidebar-foot-row")).findByRole("button", { name: /^Library/ }));
     const rail = await within(nav()).findByRole("navigation", { name: "Library" });
     // a4 waits on the person and is still in review; the unrelated question isn't a Library design; a3 is a draft.
-    await waitFor(() => expect(within(rail).getByRole("button", { name: /^Approvals/ }).textContent).toContain("2"));
+    await waitFor(() => expect(within(rail).getByRole("button", { name: /^In review/ }).textContent).toContain("2"));
     expect(within(rail).getByRole("button", { name: /^Approved/ }).textContent).toContain("1");
     expect(within(rail).getByRole("button", { name: /^Needs you/ }).textContent).toContain("1");
     expect(within(rail).getByRole("button", { name: /^Drafting/ }).textContent).toContain("1");
     expect(within(rail).getByRole("button", { name: /^All plans/ }).textContent).toContain("4");
     // Choosing a stage opens the Library narrowed to it, and they are the designs its count counted.
     const listed = () => [...screen.getByTestId("docs").querySelectorAll("li[data-doc]")].map((li) => li.getAttribute("data-doc"));
-    fireEvent.click(within(rail).getByRole("button", { name: /^Approvals/ }));
-    expect(within(rail).getByRole("button", { name: /^Approvals/ }).getAttribute("aria-current")).toBe("page");
+    fireEvent.click(within(rail).getByRole("button", { name: /^In review/ }));
+    expect(within(rail).getByRole("button", { name: /^In review/ }).getAttribute("aria-current")).toBe("page");
     await waitFor(() => expect(listed()).toEqual(["a4", "a1"]));
     fireEvent.click(within(rail).getByRole("button", { name: /^Needs you/ }));
     await waitFor(() => expect(listed()).toEqual(["a4"]));

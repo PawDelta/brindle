@@ -20,7 +20,7 @@ export type DesignRecord = Pick<AnalysisDocDetail, "design" | "tasks" | "threads
 export type DesignStage = Exclude<LibraryStage, "needs-you">;
 export const BOARD_STAGES: { id: DesignStage; label: string }[] = [
   { id: "drafting", label: "Drafting" },
-  { id: "in-review", label: "Approvals" },
+  { id: "in-review", label: "In review" },
   { id: "approved", label: "Approved" },
   { id: "building", label: "Building" },
   { id: "shipped", label: "Shipped" },
