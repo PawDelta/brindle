@@ -1293,7 +1293,7 @@ export interface PlanDeliveryItemDTO {
   };
   client_id: string;
   code?: string | null;
-  state: "waiting" | "sending" | "refused" | "sent";
+  state: "waiting" | "sending" | "refused" | "unconfirmed" | "sent";
   tail: string;
 }
 /**

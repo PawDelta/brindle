@@ -666,7 +666,7 @@ class DesignTaskDTO(_DTO):
 class PlanDeliveryItemDTO(_DTO):
     client_id: str
     tail: str
-    state: Literal["waiting", "sending", "refused", "sent"]
+    state: Literal["waiting", "sending", "refused", "unconfirmed", "sent"]
     body: dict[str, Any]
     code: str | None = None
 

@@ -112,7 +112,7 @@ const optionRow = "grid grid-cols-[14px_minmax(0,1.15fr)_minmax(0,1.5fr)_minmax(
    A row is a radio: the person's selection is sent with their verdict. */
 export function Decision({ decision: d, chosen, open, onPick, nameOf }: { decision: PlanDecisionDTO; chosen: string | null; open: boolean; onPick(option: string): void; nameOf?(who: string): string }) {
   const delivery = useQueuedPick(d.id);
-  if (delivery) chosen = delivery.state === "refused" ? null : delivery.body.option ?? chosen;
+  if (delivery && delivery.state !== "unconfirmed") chosen = delivery.state === "refused" ? null : delivery.body.option ?? chosen;
   return (
     <div role="radiogroup" aria-label={d.title} className="-mx-2.5 grid min-w-0 [overflow-wrap:anywhere] font-sans text-[13px] leading-normal">
       {delivery && <DeliveryStatus item={delivery} />}

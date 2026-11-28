@@ -29,21 +29,51 @@ def test_offline_comment_sent_once(app, lib, db):
     assert len(app.get(ROUTE).json()["threads"]) == 1
 
 
-def test_refused_vote_leaves_following_signoff_deliverable(app, lib):
+@pytest.mark.parametrize("attempted", [False, True])
+def test_refused_vote_leaves_following_signoff_deliverable(app, lib, attempted):
     route = f"POST {DESIGN}/votes"
 
     def offline(fields, headers):
         raise TransportError("offline", network="offline")
 
     lib.calls.routes[route] = offline
+    if not attempted:
+        read = lib.calls.routes[f"GET {DESIGN}"]
+        lib.calls.routes[f"GET {DESIGN}"] = offline
+        assert app.post(f"{ROUTE}/comments", json={"client_id": "comment", "rev": 1, "anchor": SECTION,
+                                                  "text": "Check this"}).is_success
     assert app.post(f"{ROUTE}/votes", json={"client_id": "pick", "rev": 1,
                                             "decision": "d1", "option": "a"}).is_success
     assert app.post(f"{ROUTE}/sign-offs", json={"client_id": "sign", "rev": 1}).is_success
     assert not lib.sign_offs
+    if not attempted:
+        lib.calls.routes[f"GET {DESIGN}"] = read
     lib.calls.routes[route] = [(409, {"error": "stale"})]
     delivered = app.get(ROUTE).json()
     assert delivered["signed_off"]
-    assert next(item for item in delivered["outbox"] if item["client_id"] == "pick")["state"] == "refused"
+    state = next(item for item in delivered["outbox"] if item["client_id"] == "pick")["state"]
+    assert state == ("unconfirmed" if attempted else "refused")
+    if attempted:
+        # A later read can supply the missing evidence without another POST.
+        lib.votes["d1"] = {"a": ["user_1"]}
+        confirmed = app.get(ROUTE).json()
+        assert next(item for item in confirmed["outbox"] if item["client_id"] == "pick")["state"] == "sent"
+
+
+def test_signoff_confirmed_from_history_after_plan_advances(app, lib):
+    route = f"POST {DESIGN}/sign-offs"
+    save = lib.calls.routes[route]
+
+    def lose_response(form, headers):
+        save(form, headers)
+        raise TransportError("connection lost", network="offline")
+
+    lib.calls.routes[route] = lose_response
+    assert app.post(f"{ROUTE}/sign-offs", json={"rev": 1, "client_id": "signed"}).is_success
+    lib.rev = 2
+    lib.calls.routes[route] = lambda *_: (409, {"error": "stale"})
+    receipt = app.get(ROUTE).json()["outbox"][0]
+    assert receipt["state"] == "sent" and receipt["body"]["rev"] == 1
 
 
 @pytest.mark.parametrize("supported", [False, True])
@@ -94,6 +124,7 @@ def test_lost_response_after_save(app, lib, supported, tail, db):
     assert not details.get("refused_changes")
     assert details["unconfirmed_changes"] == [{"client_id": "lost-response", "tail": f"/{tail}", "rev": 1}]
     lib.calls.routes[f"GET {DESIGN}"] = read
+    lib.calls.routes[route] = lambda *_: (403, {"error": "forbidden"})
     sent = app.get(ROUTE).json()
     assert len(sent["threads"]) == 2
     assert sent["outbox"][0]["state"] == "sent"

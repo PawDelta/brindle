@@ -190,7 +190,7 @@ it("a teammate signs off through the Library, keeps a draft across a stale write
   expect(screen.queryByText("Workers run here.")).toBeNull();
   expect(screen.getByRole("alert")).toBeTruthy();
   expect(screen.getByText("Not sent").closest('[data-state="refused"]')).toBeTruthy();
-  expect(screen.getByText("Delivery unconfirmed").closest('[data-state="unconfirmed"]')).toBeTruthy();
+  expect(screen.getByTestId("shared-design-reader").querySelector('[data-state="unconfirmed"]')?.textContent).toContain("Revision 1");
 
   let granted!: (d: SharedDesign) => void;
   reading = () => new Promise<SharedDesign>((resolve) => { granted = resolve; });

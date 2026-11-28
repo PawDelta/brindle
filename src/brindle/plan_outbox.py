@@ -90,7 +90,7 @@ def _read_for_delivery(db, owner, doc, load):
             refused, unconfirmed = [], []
             for row in tx.execute(
                 "SELECT state,client_id,tail,json_extract(payload,'$.rev') AS rev FROM plan_outbox "
-                "WHERE owner=? AND doc=? AND state IN ('refused','waiting') ORDER BY seq", (owner, doc)
+                "WHERE owner=? AND doc=? AND state IN ('refused','waiting','unconfirmed') ORDER BY seq", (owner, doc)
             ):
                 receipts = refused if row["state"] == "refused" else unconfirmed
                 receipts.append({k: row[k] for k in ("client_id", "tail", "rev")})
@@ -112,7 +112,7 @@ def deliver(db, owner, doc, send, load, *, item=None, read=False, legacy=False):
     with _locks[hash((db.path, owner, doc)) % len(_locks)]:
         view = _read_for_delivery(db, owner, doc, load) if read else None
         features = view.get("features", []) if view is not None else None
-        for row in conn.execute("SELECT * FROM plan_outbox WHERE owner=? AND doc=? AND state='waiting' ORDER BY seq",
+        for row in conn.execute("SELECT * FROM plan_outbox WHERE owner=? AND doc=? AND state IN ('waiting','unconfirmed') ORDER BY seq",
                                 (owner, doc)).fetchall():
             body = mask_data(json.loads(row["payload"]))
             if row["repo"]:
@@ -130,16 +130,28 @@ def deliver(db, owner, doc, send, load, *, item=None, read=False, legacy=False):
                 features = view.get("features") or []
             try:
                 already_saved = False
-                prior_match, keyed = row["prior_match"], row["keyed"]
+                prior_match = row["prior_match"]
+                keyed = False
                 if tail in ("/comments", "/suggestions"):
                     feature = "comment_idempotency" if tail == "/comments" else "suggestion_idempotency"
+                    keyed = feature in features
                     match = _matching_id(view, owner, tail, body)
                     if not row["attempted"]:
-                        prior_match, keyed = match, feature in features
-                    elif not keyed or feature not in features:
+                        prior_match = match
+                    else:
                         already_saved = match > prior_match
-                    if feature in features:
+                    if keyed:
                         body["idempotency_key"] = row["client_id"]
+                elif row["attempted"] and tail == "/sign-offs":
+                    already_saved = any(isinstance(s, dict) and s.get("sub") == owner and s.get("rev") == body["rev"]
+                                        for s in view.get("sign_offs") or [])
+                elif row["attempted"] and tail == "/votes" and view.get("rev") == body["rev"]:
+                    already_saved = any(d.get("id") == body["decision"] and
+                                        owner in (d.get("votes") or {}).get(body["option"], [])
+                                        for d in view.get("decisions") or [] if isinstance(d, dict))
+                if not already_saved and row["state"] == "unconfirmed":
+                    # The replay was refused. Later reads may still confirm the original POST.
+                    continue
                 if not already_saved:
                     if not row["attempted"]:
                         # Record the replay evidence before the POST can reach the Library.
@@ -152,7 +164,8 @@ def deliver(db, owner, doc, send, load, *, item=None, read=False, legacy=False):
                 if not isinstance(exc, Refused) or exc.status not in (400, 403, 404, 409, 422):
                     raise
                 reason = {403: "forbidden", 404: "forbidden", 409: "stale"}.get(exc.status, "invalid")
-                conn.execute("UPDATE plan_outbox SET state='refused', code=? WHERE seq=?", (reason, row["seq"]))
+                state = "unconfirmed" if row["attempted"] else "refused"
+                conn.execute("UPDATE plan_outbox SET state=?, code=? WHERE seq=?", (state, reason, row["seq"]))
                 if legacy and item and item[0] == row["client_id"]:
                     raise
             else:

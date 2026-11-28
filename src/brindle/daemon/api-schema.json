@@ -6978,6 +6978,7 @@
                 "waiting",
                 "sending",
                 "refused",
+                "unconfirmed",
                 "sent"
               ],
               "title": "State",
@@ -8384,6 +8385,7 @@
             "waiting",
             "sending",
             "refused",
+            "unconfirmed",
             "sent"
           ],
           "title": "State",
@@ -13626,6 +13628,7 @@
                 "waiting",
                 "sending",
                 "refused",
+                "unconfirmed",
                 "sent"
               ],
               "title": "State",

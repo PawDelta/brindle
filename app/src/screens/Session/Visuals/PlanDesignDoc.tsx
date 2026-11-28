@@ -369,7 +369,7 @@ export function DecisionCard({ decision: d, n, of, open, canPick, disabled = fal
   onComment?: () => void;
 }) {
   const delivery = useQueuedPick(d.id);
-  if (delivery) picked = delivery.state === "refused" ? null : delivery.body.option ?? picked;
+  if (delivery && delivery.state !== "unconfirmed") picked = delivery.state === "refused" ? null : delivery.body.option ?? picked;
   const waiting = open && !picked;
   const needsPick = waiting && canPick;
   const done = !!picked;

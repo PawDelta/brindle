@@ -60,7 +60,7 @@ function named(doc: SharedDesign, directory: LibraryPerson[]): SharedDesign {
     signed_off: doc.signed_off || doc.outbox?.some(item => item.state === "waiting" && item.tail === "/sign-offs" && item.body.rev === doc.rev),
     decisions: doc.decisions.map(d => {
       const pick = doc.outbox?.filter(item => item.tail === "/votes" && item.body.rev === doc.rev && item.body.decision === d.id).at(-1);
-      if (!pick || pick.state === "sent") return d;
+      if (!pick || pick.state === "sent" || pick.state === "unconfirmed") return d;
       return { ...d, confirmed: pick.state === "refused" ? null : pick.body.option };
     }),
     teammate_names: names,
