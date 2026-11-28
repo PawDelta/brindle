@@ -127,7 +127,7 @@ it.each(["author", "shared"])("opens %s history through the reader and shows the
     const before = reads;
     await act(async () => {
       if (reader === "shared") vi.advanceTimersByTime(30_000);
-      else store.dispatch({ type: "stream", message: { type: "event", id: reads, ts: reads, kind: "agent.status", root_id: "boss", repo_root: null, agent_id: "boss", workspace_id: null, task_id: null, payload: {} } });
+      else store.dispatch({ type: "stream", message: { type: "event", id: reads, ts: reads, kind: "visual.plan_changed", root_id: "boss", repo_root: null, agent_id: "boss", workspace_id: null, task_id: null, payload: { visual: plan.id } } });
     });
     expect(reads).toBe(before + 1);
   };
@@ -690,7 +690,7 @@ it("the author's plan opened in its session offers its Library link by plan id, 
   inLibrary = true;
   plan = { ...plan, gate: { state: "waiting", required: 1, signed: 0, waiting_on: ["u_r"], reviewers: [{ sub: "u_r", required: true, status: "waiting" }] } };
   await act(async () => {
-    store.dispatch({ type: "stream", message: { type: "event", id: 1, ts: 1, kind: "agent.status", root_id: "boss", repo_root: null, agent_id: "boss", workspace_id: null, task_id: null, payload: {} } });
+    store.dispatch({ type: "stream", message: { type: "event", id: 1, ts: 1, kind: "visual.plan_changed", root_id: "boss", repo_root: null, agent_id: "boss", workspace_id: null, task_id: null, payload: { visual: plan.id } } });
   });
   await openShare();
   const panel = screen.getByTestId("plan-share");
