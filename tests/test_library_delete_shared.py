@@ -6,6 +6,7 @@ and, on confirm, unshares the plan here so it is a personal doc again."""
 import pytest
 
 from brindle import plans
+from brindle.approval_sources import PERSON_IN_APP
 from brindle.daemon import routes_actions
 from brindle.pro import local_library
 from brindle.pro import shared_docs as sd
@@ -31,5 +32,5 @@ def test_deleting_a_shared_plans_doc_warns_then_unshares_the_plan_so_it_can_be_a
     routes_actions.delete_doc(db, {"id": DOC}, {"confirm": True})
     assert sent == [("DELETE", BASE)]
     assert sd.link(db, pid) is None
-    plans.decide(db, pid, 1, True, person=True)
+    plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
     assert plans.get(db, pid)["state"] == "approved"

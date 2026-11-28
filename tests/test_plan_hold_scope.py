@@ -12,6 +12,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from brindle import mcp_server, plans, tasks, visual_offers
+from brindle.approval_sources import PERSON_IN_APP
 from brindle.daemon.app import build_app
 from test_plans import AUTH, ONE, PLAN, TOKEN, _shared, library, messages, session  # noqa: F401 - fixtures
 
@@ -50,7 +51,7 @@ def test_plan_worker_task_stays_held_while_alongside_work_runs(db, session):
     assert tasks.sweep(db) == 0 and started == ["bump the release version"]
     # "Holding N tasks" counts only the plan's own work.
     assert plans.holding_count(db, boss.id, pid) == 1
-    plans.decide(db, pid, 1, True, person=True)
+    plans.decide(db, pid, 1, True, approval=PERSON_IN_APP)
     assert started == ["bump the release version", "build the schema"]
 
 
@@ -83,7 +84,7 @@ def test_a_pending_reviewer_holds_only_the_shared_plans_work(db, session, librar
 def test_work_linked_to_an_older_plan_runs_alongside_the_open_one(db, session):
     boss, started = session
     old = _open_plan(db, boss)
-    plans.decide(db, old, 1, True, person=True)
+    plans.decide(db, old, 1, True, approval=PERSON_IN_APP)
     pid = _open_plan(db, boss)
 
     # Linked to the approved plan, not the open one: it needs the reason like any other work.

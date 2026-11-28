@@ -1467,7 +1467,7 @@ def approve_plan(agent_id: str, feedback: str = "", approved: bool = True) -> st
         from brindle.service.errors import ServiceError
 
         try:   # an agent is never the person: refused, whatever it passes
-            plans.decide(db, agent_id, None, approved, note=feedback, person=False)
+            plans.decide(db, agent_id, None, approved, note=feedback, approval=None)
         except ServiceError as e:
             return f"Not decided: {e.message}."
     try:

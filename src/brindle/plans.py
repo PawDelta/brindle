@@ -278,22 +278,27 @@ def open_offer_id(offer: str | None) -> str | None:
     return offer[len(OFFER_OPEN):] if offer and offer.startswith(OFFER_OPEN) else None
 
 
-def close_with_session(db: DB, root_id: str) -> None:
+def close_with_session(db: DB, root_id: str, dismissed_at: float | None = None) -> None:
     """Close session ``root_id``'s unfinished plans without approving work or
     withdrawing shared copies. The queued tasks its open plan held stay
     queued for the supervisor's decision, as after a cancel
-    (_hold_for_supervisor), so continuing the session starts none of them;
-    the supervisor is told which at its next turn."""
+    (_hold_for_supervisor), whatever the visuals setting is now, so
+    continuing the session starts none of them; the supervisor is told which
+    at its next turn. ``dismissed_at`` dismisses the supervisor in the same
+    transaction (agents.close): a dismissed supervisor's plan reads as
+    closed, so a sweep must never see the dismissal without the holds."""
     from brindle import plan_docs
 
     at = time.time()
     queued = None
     with db.tx() as c:
-        # The stored row, not open_plan: once the supervisor is dismissed its plan already reads as closed.
+        # The stored row, not open_plan: a dismissed supervisor's plan already reads as closed.
         row = c.execute(f"SELECT id, rev FROM plans WHERE root_id=? AND state IN ({','.join('?' * len(HOLDING))})"
                         " ORDER BY created_at LIMIT 1", (root_id, *HOLDING)).fetchone()
         plan = dict(row) if row else None
-        held = _hold_for_supervisor(c, db, root_id, plan["id"], at) if plan and visuals.enabled() else []
+        held = _hold_for_supervisor(c, db, root_id, plan["id"], at) if plan else []
+        if dismissed_at is not None:
+            c.execute("UPDATE agents SET dismissed_at=? WHERE id=?", (dismissed_at, root_id))
         changed = c.execute("UPDATE plans SET state=?, updated_at=? WHERE root_id=?"
                             " AND state IN ('open','redirected','writing') RETURNING id, rev",
                             (CLOSED, at, root_id)).fetchall()
@@ -1236,6 +1241,8 @@ def settle_held_approval(db: DB, plan_id: str) -> None:
     earlier if the gate reads ready for that same revision. If it doesn't, the
     person is told and nothing is approved. While the Team plan's end stands
     there is no gate to read, and the approval keeps waiting."""
+    from brindle import approval_sources
+
     row = db.conn.execute("SELECT approve_wanted FROM plan_shares WHERE plan_id=?", (plan_id,)).fetchone()
     if row is None or row["approve_wanted"] is None:
         return
@@ -1261,8 +1268,11 @@ def settle_held_approval(db: DB, plan_id: str) -> None:
         _drop_held_approval(db, p, f"Your approval wasn't applied: {found['reason']}")
     else:
         try:
+            # The source the held approval was made with; one held before sources were recorded came
+            # from the app's route, the only one that could hold it.
+            made_by = approval_sources.Approval(wanted.get("source", approval_sources.APP))
             decide(db, plan_id, wanted["rev"], True, wanted["picks"], wanted["comments"], wanted["note"],
-                   person=True, attachments=wanted["attachments"], confirmed=True, version=version)
+                   approval=made_by, attachments=wanted["attachments"], confirmed=True, version=version)
         except ServiceError as e:
             _drop_held_approval(db, p, f"Your approval wasn't applied: {e.message}")
 
@@ -1306,12 +1316,14 @@ def _is_version(c, plan_id: str, rev: int, version: int) -> bool | None:
 
 
 def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, comments: Any = None,
-           note: Any = None, *, person: bool, attachments: Any = None, confirmed: bool = False,
+           note: Any = None, *, approval: Any, attachments: Any = None, confirmed: bool = False,
            version: Any = None) -> dict:
     """The person's verdict on the revision on their screen (``rev``):
-    approve, or redirect with their picks and per-section comments. Only the
-    person (the app, through the daemon's guarded route) decides: anyone
-    else is refused.
+    approve, or redirect with their picks and per-section comments. Only a
+    verdict an approval source vouches for (brindle.approval_sources) is
+    taken: ``approval``, as the trusted caller that received it states it
+    (the daemon's guarded route hands ``PERSON_IN_APP``). Anyone else,
+    ``approval`` None, is refused.
 
     One transaction makes the verdict: the plan's state (claimed only from
     'open', so a second click is refused instead of delivered twice), the
@@ -1338,7 +1350,9 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     from brindle import agents, approval_sources, plan_docs, tasks
 
     visuals.require_enabled()
-    if not approval_sources.may_release(approval_sources.Release(plan_id, approval_sources.APP if person else None)):
+    if not isinstance(approval, approval_sources.Approval):
+        approval = None
+    if not approval_sources.may_release(approval_sources.Release(plan_id, approval)):
         raise ServiceError("forbidden", "only the person approves or redirects a plan, from the app", 403)
     p = get(db, plan_id)
     visuals._unlocked(p["root_id"])
@@ -1383,7 +1397,8 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     if unconfirmed is not None:
         held = _hold_approval(db, p, unconfirmed, was_ready, {"rev": rev, "version": version, "picks": picks,
                                                               "comments": comments, "note": note,
-                                                              "attachments": attachments})
+                                                              "attachments": attachments,
+                                                              "source": approval.source})
         raise ServiceError("gate_unverified", UNCONFIRMED[unconfirmed], 503, reason=unconfirmed, approval_held=held)
     files = plan_docs._attachments(db, p, attachments)
     at = time.time()
