@@ -84,7 +84,7 @@ export function EarlierRefusals({ rev, signOffVersion }: { rev: number; signOffV
     ((item.tail === "/votes" && item.body.rev !== rev) ||
      (item.tail === "/sign-offs" && item.body.rev !== signOffVersion)));
   return earlier.map(item => <div key={item.client_id} className="px-4 py-2 text-xs text-ink-2">
-    {item.tail === "/votes" ? "Pick" : "Sign-off"} · Revision {item.body.rev}
+    {item.tail === "/votes" ? "Pick" : "Approval"} · Revision {item.body.rev}
     <DeliveryStatus item={item} />
   </div>);
 }

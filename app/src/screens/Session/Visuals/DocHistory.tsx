@@ -42,7 +42,7 @@ export function DocHistory({ events, current, onPick }: { events: HistoryEvent[]
     return (
       <div className="grid gap-1.5 px-3.5 py-3 text-ink-3" data-testid="doc-history" data-state="pending">
         <span className={`${label} text-[11px]`}>History</span>
-        <p>Every revision, freeze, reopen and sign-off of this plan will be listed here in order, with who and when. Pick a revision to see what it changed in the plan.</p>
+        <p>Every revision, freeze, reopen and approval will be listed here in order, with who and when. Pick a revision to see what changed.</p>
       </div>
     );
   }
@@ -79,9 +79,9 @@ export function historyEvents(entries: DocHistoryEntry[]): HistoryEvent[] {
   return [...entries].sort((a, b) => b.at - a.at || b.id.localeCompare(a.id)).map((e) => ({
     id: e.id, kind: e.kind, who: e.actor === "person" ? "You" : e.actor.replace(/^teammate:/, ""),
     what: e.kind === "revision" ? `made revision ${e.rev} · ${e.source ?? "edit"}`
-      : e.kind === "freeze" ? `froze version ${e.version} for sign-off`
-      : e.kind === "reopen" ? `reopened version ${e.version} · its sign-offs withdrawn`
-      : e.kind === "sign_off" ? `signed ${e.version == null ? `revision ${e.rev}` : `version ${e.version}`}`
+      : e.kind === "freeze" ? `froze version ${e.version} for approval`
+      : e.kind === "reopen" ? `reopened version ${e.version} · approvals withdrawn`
+      : e.kind === "sign_off" ? `approved ${e.version == null ? `revision ${e.rev}` : `version ${e.version}`}`
       : "requested changes",
     when: `${e.observed ? "Observed " : ""}${new Date(e.at * 1000).toLocaleString()}`, detail: e.changed?.join(", "),
     rev: e.kind === "revision" ? e.rev ?? undefined : undefined,

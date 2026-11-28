@@ -310,7 +310,7 @@ function Policies({ client }: { client: DaemonClient }) {
           <p className={notice} data-testid="review-policy-applies" data-count={shown.count} data-truncated={shown.truncated || undefined}>
             <b className="font-medium">{`Saving applies it to ${shown.truncated ? "at least " : ""}${shown.count} plan${shown.count === 1 ? "" : "s"} in review now`}</b>
             {shown.designs.length > 0 && ` (${shown.designs.map((d) => d.title).join(", ")}${shown.count > shown.designs.length ? ", …" : ""})`}
-            {shown.reopened > 0 && `. ${shown.reopened} that ${shown.reopened === 1 ? "is" : "are"} ready now would stop being ready until the new reviewers sign off`}
+            {shown.reopened > 0 && `. ${shown.reopened} that ${shown.reopened === 1 ? "is" : "are"} ready now would wait for the new reviewers to approve`}
             {". Only plans you can open are counted; plans already building aren't stopped."}
           </p>
         )}

@@ -216,7 +216,7 @@ describe("a design opened in the Library", () => {
     const text = EditorView.findFromDOM((await screen.findByLabelText("Text of Summary")).closest<HTMLElement>(".cm-editor")!)!;
     await act(async () => text.dispatch({ changes: { from: 0, insert: "Our " } }));
     await settle();
-    fireEvent.click(screen.getByRole("button", { name: "Freeze for sign-off" }));
+    fireEvent.click(screen.getByRole("button", { name: "Freeze for approval" }));
     await settle();
     expect(screen.getByTestId("doc-version").textContent).toContain("Version 1 is locked");
     expect(daemon.liveText("v_plan", "summary")).toBe("Our Workers run here.");

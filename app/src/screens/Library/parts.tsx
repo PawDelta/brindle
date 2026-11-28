@@ -16,7 +16,7 @@ export function scopeLabel(scope?: DocScope, named?: DocScope[]): string {
 /* What the pill says: the person's part when the design waits on them, else its stage (Building
    with how many of its plan's tasks merged). */
 export function StagePill({ stage, need, record }: { stage: DesignStage; need: "review" | "changes" | null; record?: DesignRecord | null }) {
-  if (need) return <span className={`${pill} whitespace-nowrap text-sap`} data-stage="needs-you">{need === "review" ? "Your review" : "Changes asked"}</span>;
+  if (need) return <span className={`${pill} whitespace-nowrap text-sap`} data-stage="needs-you">{need === "review" ? "Needs your approval" : "Changes asked"}</span>;
   const progress = taskProgress(record);
   switch (stage) {
     case "building":

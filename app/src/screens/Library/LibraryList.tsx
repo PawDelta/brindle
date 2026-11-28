@@ -338,7 +338,7 @@ export function LibraryList({ client, repo, groups, queue, records, scopes, fold
           <span>Plan</span>
           {!stacked && <>
             <span>Stage</span>
-            <span>Sign-offs</span>
+            <span>Approvals</span>
             <span>Open</span>
             <span>Shared with</span>
             <span className="text-right text-branch" title="Most recently changed first">Changed ↓</span>

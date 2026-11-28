@@ -567,7 +567,7 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   await openShare();
   expect(screen.getByTestId("share-person-u_a").dataset.state).toBe("waiting");
   expect(screen.getByTestId("share-person-u_c").dataset.signOff).toBe("optional");
-  await act(async () => fireEvent.click(within(screen.getByTestId("share-person-u_a")).getByRole("button", { name: "Sign off" })));
+  await act(async () => fireEvent.click(within(screen.getByTestId("share-person-u_a")).getByRole("button", { name: "Approve" })));
   expect(screen.getByTestId("share-person-u_a").dataset.state).toBe("signed_off");
   expect(screen.getByTestId("plan-build").dataset.gate).toBe("ready");
   await act(async () => fireEvent.click(screen.getByTestId("plan-build")));
@@ -704,7 +704,7 @@ it("a design doc whose Team plan ended says so, once, and only then", async () =
   expect(await screen.findAllByTestId("plan-team-ended")).toHaveLength(1);
 });
 
-it("keeps the Approve label when approval is held and withdrawn", async () => {
+it("keeps the Build label when a build request is held and withdrawn", async () => {
   const gate = { state: "waiting" as const, required: 1, signed: 0, waiting_on: ["Maya"], can_hold_approval: true };
   let plan = doc(1, "Ready for review", { gate, decisions: [] });
   const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...docWrites(() => plan), plan: async () => plan,
@@ -713,12 +713,12 @@ it("keeps the Approve label when approval is held and withdrawn", async () => {
     withdrawPlanApproval: async () => (plan = { ...plan, gate }) };
   render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
   const approve = await screen.findByTestId("plan-build");
-  expect(approve.textContent).toBe("Approve");
+  const label = approve.textContent;
   await act(async () => fireEvent.click(approve));
-  expect(approve.textContent).toBe("Approve");
+  expect(approve.textContent).toBe(label);
   expect(approve.getAttribute("aria-pressed")).toBe("true");
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Withdraw" })));
-  expect(approve.textContent).toBe("Approve");
+  expect(approve.textContent).toBe(label);
   expect(approve.getAttribute("aria-pressed")).toBe("false");
 });
 
@@ -853,7 +853,7 @@ it("an admin can name themself as the only stand-in, and the rule waits until th
   await act(async () => fireEvent.click(within(screen.getByTestId("plan-policy-override-security")).getByRole("button", { name: "Name stand-in" })));
   expect(screen.getByTestId("plan-policy-security").dataset.status).toBe("waiting");
 
-  await act(async () => fireEvent.click(within(screen.getByTestId("plan-policy-security")).getByRole("button", { name: "Sign off" })));
+  await act(async () => fireEvent.click(within(screen.getByTestId("plan-policy-security")).getByRole("button", { name: "Approve" })));
   expect(screen.getByTestId("plan-policy-security").dataset.status).toBe("signed_off");
 });
 

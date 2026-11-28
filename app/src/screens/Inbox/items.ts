@@ -27,11 +27,12 @@ export const REVIEW_KINDS = ["review_requested", "changes_requested", "signed_of
 
 export const KIND_LABEL: Record<string, string> = {
   doc: "Doc to read",
-  review_requested: "Review requested",
+  review_requested: "Ready for your approval",
   shared_with_you: "Shared with you",
   access_requested: "Access requested",
   changes_requested: "Changes requested",
-  signed_off: "Signed off",
+  signed_off: "Ready to build",
+  signoff_progress: "Approvals",
   waiting: "Waiting for you",
   permission: "Permission",
   question: "Question",
@@ -74,9 +75,9 @@ export const kindLabel = (item: InboxItemDTO) => KIND_LABEL[item.kind] ?? item.k
 /* A short word for the kind, as a pill. */
 export const KIND_SHORT: Record<string, string> = {
   doc: "Doc to read",
-  review_requested: "review requested",
+  review_requested: "needs your approval",
   changes_requested: "changes requested",
-  signed_off: "signed off",
+  signed_off: "ready to build",
   waiting: "waiting",
   permission: "permission",
   question: "question",
@@ -118,6 +119,11 @@ export function describeItem(item: InboxItemDTO): string {
     }
     case "question":
       return "Has a question for you";
+    case "review_requested":
+    case "signed_off":
+      return kindLabel(item);
+    case "signoff_progress":
+      return item.signoff ? `${item.signoff.signed} of ${item.signoff.required} approvals` : item.reason.replace(/ signed off$/i, " approvals");
     case "review":
       return item.reason === "to review" ? "Branch ready to review" : `Branch ${item.reason}`;
     case "merge_failed":

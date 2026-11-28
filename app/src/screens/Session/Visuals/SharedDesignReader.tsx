@@ -1,6 +1,6 @@
 /* A design someone else shared, opened from the Inbox's "Review requested" card: the doc screen
    (PlanReader.tsx) on the Library's copy. Read, comment, suggest,
-   vote and sign off, as far as the Library lets this account; never approve or build. Editing is
+   vote and approve as far as the Library lets this account. The author starts the build. Editing is
    offered only where the doc's text is live and the Library lets this account write: the live
    text, never a revision of its own. The document lives in memory and access is checked again
    while open. The daemon holds pending review changes for this account. */
@@ -44,7 +44,7 @@ function observeVisibleReads(read: () => void) {
 }
 
 const COLUMN_MODES = MODES.filter((m) => m.id !== "editing");
-const changeNames: Record<string, string> = { "/votes": "Pick", "/comments": "Comment", "/suggestions": "Suggestion", "/sign-offs": "Sign-off" };
+const changeNames: Record<string, string> = { "/votes": "Pick", "/comments": "Comment", "/suggestions": "Suggestion", "/sign-offs": "Approval" };
 
 /* Who wrote and voted, by name where the org's directory knows them. */
 function named(doc: SharedDesign, directory: LibraryPerson[]): SharedDesign {

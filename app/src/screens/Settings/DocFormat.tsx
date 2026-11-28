@@ -23,7 +23,7 @@ const KINDS: { kind: DocSectionKind; name: string }[] = [
 ];
 
 const BLOCKS: { block: DocFormatBlock; name: string; help: string }[] = [
-  { block: "sign_off", name: "Sign-off", help: "Approve, a reviewer's sign-off and the author's Freeze wait until it is filled." },
+  { block: "sign_off", name: "Approval", help: "Build, Approve and Freeze wait until the section is filled." },
   { block: "share", name: "Sharing", help: "The plan can't be shared to the Library until it is filled." },
 ];
 
