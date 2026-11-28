@@ -434,9 +434,27 @@ class _DecidePlan:
         action = asyncio.create_task(decide_plan(request))
         try:
             response = await asyncio.shield(action)
-            await response(scope, receive, send)
+            await _send_plan_reply(response, scope, receive, send)
         finally:
             await asyncio.shield(finish())
+
+
+async def _send_plan_reply(response: Response, scope: Scope, receive: Receive, send: Send) -> None:
+    async def wait_for_disconnect() -> None:
+        while (await receive())["type"] != "http.disconnect":
+            pass
+
+    # Deadlines forwards the disconnect even when the server leaves send
+    # blocked. Race those events so the approval can release its queue.
+    write = asyncio.create_task(response(scope, receive, send))
+    disconnect = asyncio.create_task(wait_for_disconnect())
+    try:
+        done, _ = await asyncio.wait((write, disconnect), return_when=asyncio.FIRST_COMPLETED)
+        await (write if write in done else disconnect)
+    finally:
+        write.cancel()
+        disconnect.cancel()
+        await asyncio.gather(write, disconnect, return_exceptions=True)
 
 
 def withdraw_plan_approval(db: DB, params: dict, body: dict) -> Any:

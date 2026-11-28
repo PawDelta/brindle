@@ -24,7 +24,7 @@ def _plan_with_task(db, boss):
 
 @pytest.mark.parametrize("disconnect", [
     False,
-    pytest.param(True, marks=pytest.mark.variant("a failed response write must release the temporary approval hold")),
+    pytest.param(True, marks=pytest.mark.variant("a disconnect must release the hold even if the response write is blocked")),
 ])
 def test_approve_answers_before_dispatch(db, session, monkeypatch, disconnect):
     boss, started = session
@@ -59,13 +59,13 @@ def test_approve_answers_before_dispatch(db, session, monkeypatch, disconnect):
             return
 
         request_complete = False
-        client_left, disconnect_received = asyncio.Event(), asyncio.Event()
+        client_left = asyncio.Event()
 
         async def receive_from_client():
             nonlocal request_complete
             if disconnect and request_complete:
                 await client_left.wait()
-                disconnect_received.set()
+                events.append("disconnect")
                 return {"type": "http.disconnect"}
             message = await receive()
             request_complete = message["type"] == "http.request" and not message.get("more_body")
@@ -76,9 +76,14 @@ def test_approve_answers_before_dispatch(db, session, monkeypatch, disconnect):
                 assert await asyncio.to_thread(sweep_while_reply_is_blocked) == 0
                 if disconnect:
                     client_left.set()
-                    await disconnect_received.wait()
-                    events.append("disconnect")
-                    raise OSError("client disconnected")
+                    try:
+                        # The write never completes on its own. Bound a broken test
+                        # so a route that ignores the disconnect fails promptly.
+                        async with asyncio.timeout(3):
+                            await asyncio.Future()
+                    except asyncio.CancelledError:
+                        events.append("write cancelled")
+                        raise
                 await send(message)
                 events.append("reply")
             else:
@@ -88,14 +93,12 @@ def test_approve_answers_before_dispatch(db, session, monkeypatch, disconnect):
 
     before = len(messages(db))
     with TestClient(record_reply, headers=AUTH) as client:
-        if disconnect:
-            with pytest.raises(OSError):
-                client.post(f"/v1/plans/{pid}/decide", json={"rev": 1, "approved": True})
-        else:
-            response = client.post(f"/v1/plans/{pid}/decide", json={"rev": 1, "approved": True})
+        response = client.post(f"/v1/plans/{pid}/decide", json={"rev": 1, "approved": True})
+        if not disconnect:
             assert response.status_code == 200 and response.json()["state"] == "approved"
 
-    assert events == ["disconnect" if disconnect else "reply", "dispatch", "worker"]
+    transport_events = ["disconnect", "write cancelled"] if disconnect else ["reply"]
+    assert events == [*transport_events, "dispatch", "worker"]
     assert plans.get(db, pid)["state"] == "approved"
     assert plans.holding(db, boss.id) is None
     assert db.get_task(task.id).state == "started" and started == [task.task_text]
