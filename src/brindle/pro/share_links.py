@@ -96,11 +96,15 @@ def _link(raw: Any) -> dict | None:
             "scope": raw.get("scope") if isinstance(raw.get("scope"), dict) else None}
 
 
+class LinkPolicyRefused(ServiceError):
+    """A Library refusal with the server's policy description."""
+
+
 def _refused(status: int, resp: dict) -> ServiceError | ad.Refused:
     code = resp.get("error") if isinstance(resp.get("error"), str) else None
     why = resp.get("error_description") if isinstance(resp.get("error_description"), str) else None
     if 400 <= status < 500 and code in POLICY_REFUSALS:
-        return ServiceError(code, mask(why or "your organization's link policy doesn't allow this link"), 403)
+        return LinkPolicyRefused(code, mask(why or "your organization's link policy doesn't allow this link"), 403)
     if status == 403 and code in (None, "forbidden"):
         return ServiceError("forbidden", "only an editor of this plan can make or revoke its link", 403)
     if status == 404:

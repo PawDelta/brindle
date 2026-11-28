@@ -37,6 +37,9 @@ PRIVATE_URL = "https://example.test/private-plan"
                      (502, "bad_response"), PRIVATE_URL, id="malformed-sign-in-response"),
         pytest.param(f"/v1/library/designs/{DOC}/share-link", ORG_POLICY, (500, {}),
                      (502, "upstream"), "HTTP 500", id="enterprise-policy"),
+        pytest.param(f"/v1/library/designs/{DOC}/share-link", f"{DESIGN}/share-link",
+                     (403, {"error": "share_links_off", "error_description": PRIVATE_URL}),
+                     (403, "share_links_off"), PRIVATE_URL, id="share-link-policy-refusal"),
     ],
 )
 def test_library_route_errors(app, lib, route, library_route, reply, expected, hidden):

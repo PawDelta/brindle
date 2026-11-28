@@ -1071,9 +1071,9 @@ def library_design_plan(db: DB, request: Request) -> Any:
 
 def _share_link(repo: str | None, work: Callable[[Any], Any]) -> Any:
     """A design's share link (brindle.pro.share_links), by its Library doc id.
-    Below Pro a read answers ``available: false`` and nothing is sent; the
-    Library's refusal (an org's link policy, not an editor) keeps its reason."""
-    from brindle import config, keystore, redact
+    Below Pro a read answers ``available: false`` without contacting the Library.
+    Library refusals keep their codes for the app."""
+    from brindle import config, keystore
     from brindle.daemon import routes_actions as actions
     from brindle.pro import analysis_docs, auth, share_links
 
@@ -1081,9 +1081,10 @@ def _share_link(repo: str | None, work: Callable[[Any], Any]) -> Any:
         config.load_repo_config(repo)        # its air-gap setting applies first
     try:
         return work(share_links)
+    except share_links.LinkPolicyRefused as e:
+        raise actions.upstream_error(analysis_docs.Refused(e.message, e.http_status, e.code)) from e
     except (analysis_docs.Refused, analysis_docs.SignInBusy, auth.AuthError, keystore.KeychainReadBlocked) as e:
-        err = actions.upstream_error(e)
-        raise ServiceError(err.code, redact.mask(err.message), err.http_status) from e
+        raise actions.upstream_error(e) from e
 
 
 @_json
