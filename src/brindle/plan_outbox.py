@@ -200,10 +200,15 @@ def deliver(db, owner, doc, send, load, *, item=None, read=False, legacy=False):
                                  "WHERE owner=? AND doc=? AND tail=? AND seq<? AND state='refused' "
                                  "AND json_extract(payload,'$.decision') IS ? AND json_extract(payload,'$.rev') IS ?",
                                  (owner, doc, tail, row["seq"], body.get("decision"), body.get("rev")))
-                conn.execute("UPDATE plan_outbox SET state='sent', sent_at=?, payload=? WHERE seq=?",
-                             (time.time(), json.dumps(target), row["seq"]))
+                conn.execute("UPDATE plan_outbox SET state='sent', sent_at=NULL, payload=? WHERE seq=?",
+                             (json.dumps(target), row["seq"]))
+        now = time.time()
+        if read or item:
+            # Start the display window with a reader response, even when background sync delivered it.
+            conn.execute("UPDATE plan_outbox SET sent_at=? WHERE owner=? AND doc=? AND state='sent' AND sent_at IS NULL",
+                         (now, owner, doc))
         rows = conn.execute("SELECT * FROM plan_outbox WHERE owner=? AND doc=? AND "
-                            "(state!='sent' OR sent_at>?) ORDER BY seq", (owner, doc, time.time() - 3))
+                            "(state!='sent' OR sent_at>?) ORDER BY seq", (owner, doc, now - 3))
         items = []
         for row in rows:
             body = json.loads(row["payload"])

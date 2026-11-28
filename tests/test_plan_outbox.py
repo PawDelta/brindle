@@ -1,7 +1,10 @@
 """A shared reader's pending changes survive separate daemon requests."""
 
+from types import SimpleNamespace
+
 import pytest
 
+from brindle import plan_outbox
 from brindle.pro import analysis_docs, shared_docs
 from brindle.redact import mask_data
 from test_pro_remote_learning import login_as
@@ -10,7 +13,9 @@ from pro_fixtures import backend, pro_env, signing_key  # noqa: F401
 from test_shared_reader import DESIGN, ROUTE, SECTION, app, lib  # noqa: F401
 
 
-def test_offline_comment_sent_once(app, lib, db):
+def test_offline_comment_sent_once(app, lib, db, monkeypatch):
+    now = 100.0
+    monkeypatch.setattr(plan_outbox, "time", SimpleNamespace(time=lambda: now))
     login_as(lib.calls, analysis_docs._session()[1], features=("analysis_docs",))
     route = f"POST {DESIGN}/comments"
     send = lib.calls.routes[route]
@@ -38,8 +43,12 @@ def test_offline_comment_sent_once(app, lib, db):
     features.append("comment_idempotency")
     shared_docs.sync_open(db)
     assert len(lib.threads) == 1
+    now += 30
     delivered = app.get(ROUTE).json()
+    assert [(r["client_id"], r["state"]) for r in delivered.get("outbox", [])] == [("comment-one", "sent")]
     assert [thread["text"] for thread in delivered["threads"]] == ["Which VM?"]
+    now += 30
+    assert not app.get(ROUTE).json().get("outbox")
     assert app.post(f"{ROUTE}/comments", json=body).is_success
     assert len(app.get(ROUTE).json()["threads"]) == 1
 
