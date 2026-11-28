@@ -11,6 +11,7 @@
    No worker split or file lists: brindle handles the split once the plan is approved. */
 
 import { createContext, memo, useContext, useEffect, useLayoutEffect, useRef, useState, type FormEvent, type ReactNode, type RefObject } from "react";
+import { createPortal } from "react-dom";
 import { usePlanDraft } from "./planDrafts";
 import type { Plan } from "../../../api/client";
 import type { PlanAnswerDTO, PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
@@ -124,7 +125,7 @@ export const menuRow = "flex items-center justify-between gap-2";
 export const menuNote = "min-h-[76px] w-full resize-y rounded-md border border-line-strong bg-field px-2.5 py-2 text-[13px] leading-normal text-ink placeholder:text-ink-3 focus:border-branch focus:outline-none";
 
 /* The toolbar's mode: one word ("Viewing ▾") until the person wants another. */
-export function ModeMenu({ modes, current, allowed, onPick }: { modes: typeof MODES; current: Mode; allowed(mode: Mode): boolean; onPick(mode: Mode): void }) {
+export function ModeMenu({ modes, current, allowed, onPick, markdown }: { modes: typeof MODES; current: Mode; allowed(mode: Mode): boolean; onPick(mode: Mode): void; markdown?: { pressed: boolean; toggle(): void } }) {
   const [open, setOpen] = useState(false);
   return (
     <Menu label={<>{modes.find((m) => m.id === current)?.name} ▾</>} buttonClass={`${quiet} ${open ? "bg-surface-2" : ""}`} place="down" panelClass="w-[290px] !gap-px !p-1.5" open={open} onOpenChange={setOpen} testid="plan-mode-menu">
@@ -138,16 +139,15 @@ export function ModeMenu({ modes, current, allowed, onPick }: { modes: typeof MO
           </button>
         ))}
       </div>
+      {markdown && <button type="button" aria-pressed={markdown.pressed} data-testid="doc-markdown-switch" className={quiet} onClick={() => { markdown.toggle(); setOpen(false); }}>Show as Markdown</button>}
     </Menu>
   );
 }
 
 /* "On this page": the numbered sections, each decision under its section with a dot while it
    waits for the person's pick and a tick once picked. */
-export function Outline({ parts, placed, isOpen, canPick, decided, total, scrollPane, footer }: {
+export function Outline({ parts, placed, isOpen, canPick, decided, total, scrollPane }: {
   parts: SpinePart[]; placed: Map<string, PlanDecisionDTO[]>; isOpen(d: PlanDecisionDTO): boolean; canPick: boolean; decided: number; total: number; scrollPane: RefObject<HTMLDivElement | null>;
-  /* Under the sections: a shared doc's sign-off sheet. */
-  footer?: ReactNode;
 }) {
   const [current, setCurrent] = useState<string | null>(null);
   useEffect(() => {
@@ -201,7 +201,6 @@ export function Outline({ parts, placed, isOpen, canPick, decided, total, scroll
         ))}
         {(placed.get("") ?? []).map(decisionRow)}
       </div>
-      {footer && <div className="mt-5 grid border-t border-line text-[12.5px]">{footer}</div>}
     </nav>
   );
 }
@@ -429,7 +428,7 @@ export function DecisionCard({ decision: d, n, of, open, canPick, disabled = fal
           <p className="m-0 text-[12.5px] leading-normal text-ink-3">
             {d.challenge && (d.mine ? <><b className="font-medium text-ink-2">The case against the recommendation:</b> {d.challenge}</> : d.challenge)}
           </p>
-          {onComment && <button type="button" className={link} onClick={onComment}>Comment</button>}
+          {onComment && <button type="button" className={`${link} flex-none whitespace-nowrap`} onClick={onComment}>Comment</button>}
         </div>
       )}
     </section>
@@ -524,52 +523,40 @@ export const SectionText = memo(function SectionText({ section, body, marks, lay
   );
 }, (a, b) => a.section === b.section && a.body === b.body && a.layout === b.layout && a.approver === b.approver && a.onOpen === b.onOpen && sameMarks(a.marks, b.marks));
 
-/* Text with its notes in the margin beside it: each note level with the words it is on (`anchor`,
-   a selector inside the text; none: the top), pushed down past the one above it. Under 1180px
-   wide the margin is gone and the notes follow the text. */
-export function Annotated({ children, notes, content, className = "" }: {
+/* Anchor review notes in the reading flow immediately after the paragraph they discuss. */
+export function Annotated({ children, notes, className = "" }: {
   children: ReactNode; notes: { key: string; anchor: string | null; offset?: number | null; node: ReactNode }[]; content?: string; className?: string;
 }) {
   const box = useRef<HTMLDivElement>(null);
-  const els = useRef<(HTMLElement | null)[]>([]);
-  const [tops, setTops] = useState<number[]>([]);
   const [hovered, setHovered] = useState<number | null>(null);
-  const anchors = useRef(notes.map((n) => n.anchor));
-  anchors.current = notes.map((n) => n.anchor);
-  const measure = useRef(() => {});
-  measure.current = () => {
-    const root = box.current;
-    if (!root || !anchors.current.length) return;
-    const origin = root.getBoundingClientRect().top;
-    let floor = 0;
-    const next = anchors.current.map((anchor, i) => {
-      const at = anchor ? root.querySelector(anchor) : null;
-      const top = Math.max(at ? at.getBoundingClientRect().top - origin : 0, floor);
-      floor = top + (els.current[i]?.offsetHeight ?? 0) + 12;
-      return Math.round(top);
-    });
-    setTops((now) => (next.join() === now.join() ? now : next));
-  };
-  const positions = JSON.stringify(notes.map(({ key, anchor, offset }) => [key, anchor, offset]));
-  useLayoutEffect(() => measure.current(), [positions, content]);
-  // A note that grows (a reply opened under it) or text that reflows moves the notes below it.
-  const keys = notes.map((n) => n.key).join();
-  useEffect(() => {
-    if (!keys || typeof ResizeObserver === "undefined" || !box.current) return;
-    const watch = new ResizeObserver(() => measure.current());
-    watch.observe(box.current);
-    for (const el of els.current) if (el) watch.observe(el);
-    return () => watch.disconnect();
-  }, [keys]);
-  return (
-    <div ref={box} className={`relative ${className}`}>
-      <HoveredThread.Provider value={hovered}>{children}</HoveredThread.Provider>
-      <SetHoveredThread.Provider value={setHovered}>{notes.map((n, i) => (
-        <aside key={n.key} ref={(el) => { els.current[i] = el; }} style={{ top: tops[i] ?? 0 }}
-          className="absolute left-[calc(100%+36px)] w-[252px] max-[1180px]:static max-[1180px]:mb-1.5 max-[1180px]:mt-2.5 max-[1180px]:w-auto">
-          {n.node}
-        </aside>
-      ))}</SetHoveredThread.Provider>
-    </div>
-  );
+  const [targets, setTargets] = useState<Map<string, HTMLElement>>(new Map());
+  const hosts = useRef(new Map<Element, HTMLElement>());
+  useLayoutEffect(() => {
+    const next = new Map<string, HTMLElement>();
+    const used = new Set<Element>();
+    for (const { key, anchor } of notes) {
+      const paragraph = anchor && box.current?.querySelector(anchor)?.closest("p, ul, ol, pre, blockquote, table");
+      if (!paragraph) continue;
+      used.add(paragraph);
+      let host = hosts.current.get(paragraph);
+      if (!host) {
+        host = document.createElement("div");
+        paragraph.after(host);
+        hosts.current.set(paragraph, host);
+      }
+      next.set(key, host);
+    }
+    for (const [paragraph, host] of hosts.current) {
+      if (!used.has(paragraph)) { host.remove(); hosts.current.delete(paragraph); }
+    }
+    if (next.size !== targets.size || [...next].some(([key, host]) => targets.get(key) !== host)) setTargets(next);
+  });
+  return <div className={className}>
+    <div ref={box}><HoveredThread.Provider value={hovered}>{children}</HoveredThread.Provider></div>
+    <SetHoveredThread.Provider value={setHovered}>{notes.map(note => {
+      const element = <aside key={note.key} className="my-2">{note.node}</aside>;
+      const target = targets.get(note.key);
+      return target ? createPortal(element, target, note.key) : element;
+    })}</SetHoveredThread.Provider>
+  </div>;
 }

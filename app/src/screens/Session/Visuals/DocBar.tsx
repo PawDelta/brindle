@@ -49,13 +49,14 @@ export function Popover({ label, open, onOpenChange, children, testid }: { label
   );
 }
 
-export function ReaderBar({ lead, version, badges, presence, markdown, modes, share, actions }: {
+export function ReaderBar({ lead, version, badges, presence, markdown, queue, modes, share, actions }: {
   /* Back and the title. */
   lead: ReactNode;
   /* "rev 3" or "Version 2". */
   version?: ReactNode;
   badges?: ReactNode;
   presence?: ReactNode;
+  queue?: ReactNode;
   markdown?: { pressed: boolean; onToggle(): void };
   modes?: { picker: ReactNode; current: Mode };
   share?: ReactNode;
@@ -69,6 +70,7 @@ export function ReaderBar({ lead, version, badges, presence, markdown, modes, sh
       <span className="flex-1" />
       {presence}
       {markdown && <MarkdownButton pressed={markdown.pressed} onToggle={markdown.onToggle} />}
+      {queue}
       {modes?.picker}
       {share}
       {actions}

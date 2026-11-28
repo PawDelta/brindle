@@ -35,18 +35,19 @@ import type { PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../ap
 import { DocReference } from "../../../components/DocReference";
 import { LoadingButton } from "../../../components/LoadingButton";
 import { ago } from "../../../components/ProviderConnect";
-import { PaperclipIcon } from "../../../components/icons";
+import { CheckIcon as ApprovalCheck, PaperclipIcon } from "../../../components/icons";
 import { button, danger, field, label, main, pill, quiet } from "../../../components/ui";
 import { CloudLoginStatus, useCloudLogin } from "../../Inbox/CloudSignIn";
 import type { ExportClient } from "../../Knowledge/ExportMenu";
 import type { PlanDocClient, PlanShareLinkClient, PlanSharingClient, PlansClient, VisualsClient } from "./client";
 import { BackButton, KeepButton, fileAttachment, fileName, message, useEscBack } from "./chrome";
 import { ReaderBar } from "./DocBar";
+import { ReviewRail, useRailWidth } from "./ReviewRail";
 import { Diagram } from "./DocDiagram";
 import { FormatBar, FormatProvider, textareaTarget, useFormatTarget } from "./DocFormat";
 import { DocumentHistory, DocHistoryComparison, type HistoryEvent, type WorkItem } from "./DocHistory";
 import { DocMarkdown } from "./DocMarkdown";
-import { DraftCard, Review, ReviewStrip, SignOffSheet, isSupervisorReplying, type Draft, type ReviewTab, type SignOffRow, type ThreadActions, type TodoItem } from "./DocReview";
+import { DraftCard, Review, ReviewStrip, SignOffSheet, Thread, isSupervisorReplying, type Draft, type ReviewTab, type SignOffRow, type ThreadActions, type TodoItem } from "./DocReview";
 import { SharePanel } from "./SharePanel";
 import { Policies } from "./DocPolicies";
 import type { LiveClient } from "./DocEditor";
@@ -64,7 +65,7 @@ import { EarlierRefusals, PendingNote, PlanDeliveryProvider, QueueCount, ShowPla
 import { StoreContext } from "../../../store/useStore";
 import { PlanDraftScope, readPlanDraft, savePlanDraft, usePlanDraft, usePlanDraftScope } from "./planDrafts";
 
-type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach" | "cancelPlan" | "stopAlongside">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient>;
+type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach" | "cancelPlan" | "stopAlongside" | "withdrawPlanApproval">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient>;
 
 /* How far along a plan is: its revision, then decided or not. Revisions only grow and a decided
    revision never reopens, so a response with less progress than the one on screen is stale. */
@@ -118,27 +119,6 @@ function storedCollapsed(): boolean {
   }
 }
 
-/* The revision this viewer last read of each doc, kept on this device: the sign-off sheet says what
-   changed since. Reading a doc moves it on to the revision on screen. */
-export const LAST_READ_KEY = "brindle.plan.lastRead.";
-function useLastRead(id: string, rev: number): number | null {
-  const [before] = useState(() => {
-    try {
-      const got = Number(localStorage.getItem(`${LAST_READ_KEY}${id}`));
-      return Number.isFinite(got) && got > 0 ? got : null;
-    } catch {
-      return null;
-    }
-  });
-  useEffect(() => {
-    try {
-      localStorage.setItem(`${LAST_READ_KEY}${id}`, String(rev));
-    } catch {
-      // Not kept: the sheet only says less next time.
-    }
-  }, [id, rev]);
-  return before;
-}
 
 /* A box of Markdown the formatting toolbar writes into while it has the focus. */
 function FormatTextarea({ value, onValue, ...rest }: Omit<TextareaHTMLAttributes<HTMLTextAreaElement>, "value" | "onChange"> & { value: string; onValue(value: string): void }) {
@@ -158,6 +138,7 @@ export interface ReaderChrome {
   onMode(mode: Mode): void;
   /* Back to where the doc was opened from (the planning doc's "Back to the session" once approved). */
   onBack?: () => void;
+  onStopAlongside?(task: string): Promise<void>;
 }
 
 /* The doc from its source, kept current, with its writes kept in order. `version` changing asks
@@ -342,7 +323,6 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
   const lead = (
     <>
       <BackButton onBack={onBack} asking={asking} label={backLabel} />
-      <QueueCount items={shown?.outbox} />
       <span className="mx-1 h-5 w-px bg-line" aria-hidden />
       <h2 title={visual.title} className="min-w-0 truncate text-[13px] font-semibold">{visual.title}</h2>
     </>
@@ -365,16 +345,12 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged, ba
       {shown ? (
         <PlanDeliveryProvider key={shown.id} items={shown.outbox ?? []}><DesignDoc source={source} author={{ client, visual }} plan={shown} mode={current} writes={writes} work={work}
           shareLink={planLinkTarget(client, shown.id, repo)}
-          chrome={{ lead, badges, actions, modes: MODES, allowed, onMode: setMode, onBack }}
+          chrome={{ lead, badges, actions, modes: MODES, allowed, onMode: setMode, onBack, onStopAlongside: stopAlongside }}
           top={shown.state === "approved" ? (
             <section aria-label="Plan board" className="flex max-h-[50vh] shrink-0 flex-col gap-3.5 overflow-auto border-b border-line px-s3 py-5">
               <Tasks plan={shown} shared={overlaps(shown)} />
             </section>
-          ) : !!shown.alongside?.length && (
-            <div className="max-h-[30vh] shrink-0 overflow-auto border-b border-line px-s3 py-3">
-              <Alongside rows={shown.alongside} onStop={stopAlongside || undefined} />
-            </div>
-          )} /></PlanDeliveryProvider>
+          ) : null} /></PlanDeliveryProvider>
       ) : (
         <>
           <ReaderBar lead={lead} version={<span className="whitespace-nowrap text-xs text-ink-3" data-testid="plan-rev">{`rev ${visual.rev}`}</span>} actions={actions} />
@@ -518,7 +494,6 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const [stripHost, setStripHost] = useState<HTMLDivElement | null>(null);
   const [historyRev, setHistoryRev] = useState<number | null>(null);
   const [historical, setHistorical] = useState<{ comparison: DocRevisionComparison; close(): void } | null>(null);
-  const lastRead = useLastRead(receivedPlan.id, receivedPlan.rev);
   const plan = useLiveReview ? { ...receivedPlan, gate: liveReviewGate(receivedPlan.gate, liveState) } : receivedPlan;
   const reviewVersion = useLiveReview ? liveState?.version?.id : undefined;
   const pendingSignOff = receivedPlan.outbox?.some(item => item.tail === "/sign-offs" &&
@@ -570,6 +545,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   // (solo, shared with reviewers, live, frozen for sign-off, or a teammate's). Only an older
   // free-form doc keeps the side column.
   const designDoc = onSpine(receivedPlan);
+  const railWidth = useRailWidth();
   const [historyOpen, setHistoryOpen] = useState(false);
   const pendingNotes = usePendingNotes();
   const [cancelOpen, setCancelOpen] = useState(false);
@@ -598,7 +574,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     sharing.docScopes().then((got) => { if (alive.current) setScopes(got.scopes); }, () => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once for this doc: the reader is keyed by plan
   }, []);
-  const gate = plan.gate ?? null;
+  const gate: (NonNullable<Plan["gate"]> & { approval_held?: { rev: number; waiting_on: string[] } | null; can_hold_approval?: boolean }) | null = plan.gate ?? null;
   const shared = !!gate;
   const sharePeople = (!teammate || plan.can_edit) && plan.state !== "approved" ? source.people : undefined;
   const wasShared = useRef(shared);
@@ -615,7 +591,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     const ownName = sub === (teammate?.me ?? me) && account?.signed_in ? displayName(account) : "";
     const member = directory.find((p) => p.sub === sub);
     const saved = plan.teammate_names?.[sub];
-    return ownName || displayName(member && { ...member, email: null }) || (saved !== "A teammate" && saved) || member?.email || "A teammate";
+    return ownName || displayName(member && { ...member, email: null }) || (saved !== "A teammate" && saved) || gate?.reviewers?.find(row => row.sub === sub)?.name || member?.email || "A teammate";
   };
   // A person in a sentence: "You", or their name's first word ("dana.okafor@…" → "Dana").
   const firstName = (who: string) => {
@@ -994,10 +970,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     else if (alive.current) setSending(null);
   };
   const signOff = async () => {
-    if (historical || !source.signOff || reviewBlocked) return;
+    if (historical || busy || !source.signOff || reviewBlocked) return;
     failedControl.current = "signoff";
     setSending("approve");
-    if (await write(() => source.signOff!(plan.rev, reviewVersion)) && frozen) setRefreshes((n) => n + 1);
+    if (await write(() => source.signOff!(plan.rev, reviewVersion)) && frozen) setRefreshes(n => n + 1);
     if (alive.current) setSending(null);
   };
   // A write that may change the review (the Share panel's sign-off) asks for the frozen version again.
@@ -1098,11 +1074,11 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             {here ? (live ? "You are writing here · live" : "You are editing") : !diagram && editControl(s.id, s.title)}
           </span>
         </h3>
-        {diagram ? (
+        {freeFormNotes(s.id, diagram ? (
           <Diagram section={s} figure={figures.get(s.id) ?? 1}>
             {commentButton(() => comment({ kind: "diagram", section: s.id }, `Figure ${figures.get(s.id)}`))}
           </Diagram>
-        ) : textBody(s.id, s.title)}
+        ) : textBody(s.id, s.title))}
       </section>
     );
   };
@@ -1158,10 +1134,31 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   if (teammate?.me && teammate.signOff === "optional" && sheetRev === plan.rev && !listed.has(teammate.me)) {
     sheetRows.push({ key: teammate.me, who: "person", name: "You", required: false, state: teammate.signedOff ? "signed" : "waiting" });
   }
-  const sinceRevs = lastRead !== null && lastRead < plan.rev ? (plan.revisions ?? []).filter((r) => r.rev > lastRead).map((r) => ({ rev: r.rev, sections: (r.changed ?? []).map((id) => partName(id)) })) : null;
-  const sheet = gate && (frozen || !useLiveReview) ? (
-    <SignOffSheet version={frozen ? `version ${frozen.id}` : `rev ${plan.rev}`} rows={sheetRows} since={sinceRevs && lastRead !== null ? { from: lastRead, changes: sinceRevs } : null} onShowChanges={() => setTab("history")} />
-  ) : undefined;
+  const sheet = <SignOffSheet version={frozen ? `version ${frozen.id}` : `rev ${plan.rev}`} rows={sheetRows} />;
+  const alongside = <Alongside rows={plan.alongside ?? []} onStop={chrome?.onStopAlongside} />;
+  const held = gate?.approval_held?.rev === plan.rev;
+  const gateHolds = !!gate && gate.state !== "ready" && !gate.can_hold_approval;
+  const withdraw = held && !teammate && client?.withdrawPlanApproval && <button type="button" className="cursor-pointer text-xs font-normal text-ink-2 underline disabled:opacity-50" disabled={busy || !!historical}
+    onClick={() => void send(() => client.withdrawPlanApproval!(plan.id, plan.rev))}>Withdraw</button>;
+  const waitingRows = sheetRows.filter(r => r.required && r.state === "waiting");
+  const waitingNames = waitingRows.map(r => r.name).join(" and ");
+  const signersLeft = held && gate?.approval_held?.waiting_on.length ? gate.approval_held.waiting_on.map(firstName) : waitingRows.map(r => r.name);
+  const signature = `${signersLeft.join(" and ") || "the last required reviewer"} ${signersLeft.length > 1 ? "sign" : "signs"} off`;
+  const buildSentence = held ? `Your plan builds when ${signature}.`
+    : gate?.state === "waiting" && waitingNames ? `The build starts once you approve and ${signature}.`
+    : gate && gate.state !== "ready" ? gateWhy || summary : "Approve starts the build.";
+  const railProps = { sheet, plan, rows: sheetRows, settled, chosen, held, jump, alongside, workItem, folded: railWidth.folded };
+  const compactReview = railWidth.folded && <div className="my-3 grid gap-1 border-y border-line py-2 font-sans text-xs" data-testid="review-summary">
+    <span>Sign-offs · {gate?.signed ?? 0} of {gate?.required ?? 0} required{waitingNames && ` · waiting on ${waitingNames}`}</span>
+    <span>Decisions · {decided} of {plan.decisions.length} decided</span>
+    {alongside}
+  </div>;
+  const railDraft = draft?.kind === "comment" && draft.rail;
+  const reviewerComment = teammate && canComment && open && (railDraft
+    ? <DraftCard draft={draft} number={Math.max(0, ...threads.map(t => t.id)) + 1} stale={draftStale} busy={busy || !!historical}
+        text={drafting?.text ?? ""} onText={setDraftReason} onSend={text => void sendDraft(text)} onCancel={() => setDrafting(null)} />
+    : <button type="button" className={quiet} disabled={busy || !!historical || !!draft}
+        onClick={() => begin({ kind: "comment", rail: true, where: partName(LEDE), anchor: { kind: "section", section: LEDE } })}>Comment</button>);
 
   // The first share happens in the panel too: adding a person or a team shares the plan.
   const canShare = !!gate || (!!sharing && !!sharePeople && plan.state !== "approved" && scopes.some((s) => s.kind !== "user" && s.can_share !== false));
@@ -1304,14 +1301,13 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         node: <MarginNote thread={t} busy={busy} canJudge={!teammate && plan.state === "open"} canReply={canComment} canResolve={!teammate || (canComment && t.author === "person")} actions={actions} lit={followed?.thread === String(t.id)}
           supervisorReplying={isSupervisorReplying(t, plan)} />,
       })),
-      ...(draft && draftAt?.at === at ? [{
+      ...(draft && !railDraft && draftAt?.at === at ? [{
         key: "draft", anchor: draftAt.anchor,
         node: <DraftCard key={`${draft.kind}:${draft.where}`} draft={draft} number={Math.max(0, ...threads.map((t) => t.id)) + 1} stale={draftStale} busy={busy}
           text={drafting?.text ?? ""} onText={setDraftReason} onSend={(text) => void sendDraft(text)} onCancel={() => setDrafting(null)} change={draftChange}
           className="grid gap-1.5 border-l border-branch pb-0.5 pl-[13px] pt-px font-sans text-[12.5px] leading-normal text-ink-2" />,
       }] : []),
     ];
-    const noted = openThreads.length > 0 || !!pendingNotes.length || !!draft;
     const body = (s: PlanSectionDTO) => (s.kind === "mermaid" || s.kind === "svg" ? <Diagram section={s} figure={figures.get(s.id) ?? 1} /> : textBody(s.id, s.title));
     const cards = (at: string) => (placed.get(at) ?? []).map((d) => (
       <Annotated key={d.id} notes={notesFor(`decision:${d.id}`)}>
@@ -1324,7 +1320,6 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       const here = editing?.section === s.id;
       return (here || mode === "editing") && <span className={`${aside} ml-3`}>{here ? (live ? "You are writing here · live" : "You are editing") : s.kind !== "mermaid" && s.kind !== "svg" && editControl(s.id, s.title)}</span>;
     };
-    const stillOpen = [openThreads.length - suggestions > 0 && plural(openThreads.length - suggestions, "comment"), suggestions > 0 && plural(suggestions, "suggestion")].filter(Boolean);
     const lineFor = plan.state === "open" ? "Nothing is built until you approve" : plan.state === "approved" ? "brindle is building it" : statusLine;
     const stageTone = plan.state === "open" ? "text-sap" : plan.state === "approved" ? "text-pass" : "text-ink-3";
     // The bottom bar while decisions are open: how many, and the next one.
@@ -1353,11 +1348,6 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         <span className="text-ink-3">{byline}</span>
       </div>
     );
-    // The sign-off sheet under the outline: once a version is frozen (or for a doc reviewed without live text).
-    const signOffs = gate && (frozen || !useLiveReview) && (
-      <SignOffSheet version={frozen ? `version ${frozen.id}` : `rev ${plan.rev}`} rows={sheetRows} since={sinceRevs && lastRead !== null ? { from: lastRead, changes: sinceRevs } : null}
-        onShowChanges={source.history ? () => setHistoryOpen(true) : undefined} />
-    );
     const teammateBar = teammate && (
       <>
         <div role="status" className="grid gap-px" data-testid="plan-next" data-state={left.length ? "open" : teammate.signedOff ? "signed" : "ready"} data-left={left.length}>
@@ -1373,10 +1363,12 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           )}
         </div>
         <SignOffDelivery rev={frozen?.id ?? plan.rev} />
+        {reviewerComment}
+        <div className="flex gap-2">
         {teammate.rights.signOff && !teammate.signedOff && (
           <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked || left.length > 0} data-testid="plan-sign-off"
-            title={left.length ? "Pick an option in every decision first" : undefined} data-again="signoff" onClick={() => void signOff()}>{signName}</LoadingButton>
-        )}
+            title={left.length ? "Pick an option in every decision first" : undefined} data-again="signoff" onClick={() => void signOff()}>Sign off</LoadingButton>
+        )}</div>
       </>
     );
     const versionMenu = source.history ? (
@@ -1387,28 +1379,29 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       </Menu>
     ) : <span className="whitespace-nowrap px-[9px] text-xs text-ink-3" data-testid="plan-rev">{versionLabel}</span>;
     // A shared plan builds only once every required reviewer has signed.
-    const gateHolds = !!gate && gate.state !== "ready";
     const approveBlocked = !!historical || busy || left.length > 0 || reviewBlocked || uploading > 0 || gateHolds;
     return (
       <>
         {chrome && (
-          <ReaderBar lead={chrome.lead} version={versionMenu} presence={presence}
-            modes={{ current: mode, picker: <ModeMenu modes={chrome.modes} current={mode} allowed={(m) => (locked ? m === "viewing" : chrome.allowed(m))} onPick={chrome.onMode} /> }}
+          <ReaderBar lead={chrome.lead} version={versionMenu} presence={presence} actions={chrome.actions} queue={<QueueCount items={plan.outbox} />}
+            modes={{ current: mode, picker: <ModeMenu modes={chrome.modes} current={mode} allowed={(m) => (locked ? m === "viewing" : chrome.allowed(m))} onPick={chrome.onMode} markdown={{ pressed: raw, toggle: () => setRaw(!raw) }} /> }}
             share={!historical && shareMenu} />
         )}
         {!chrome && presence && <div className="hidden">{presence}</div>}
-        {teammate && top}
+        {(teammate || plan.state === "approved") && top}
         <div ref={setStripHost} className="contents" />
         {typing && !historical && <FormatBar />}
-        <div className="flex min-h-0 flex-1 bg-canvas" data-testid="plan-design-doc">
-          <Outline parts={parts} placed={placed} isOpen={waiting} canPick={canPick} decided={decided} total={ordered.length} scrollPane={doc} footer={signOffs || undefined} />
+        <div ref={railWidth.setHost} className={`flex min-h-0 flex-1 bg-canvas ${railWidth.folded ? "flex-col" : ""}`} data-testid="plan-design-doc">
+          {!railWidth.folded && <Outline parts={parts} placed={placed} isOpen={waiting} canPick={canPick} decided={decided} total={ordered.length} scrollPane={doc} />}
           <div ref={doc} className="relative min-h-0 min-w-0 flex-1 overflow-auto border-l border-line max-[900px]:border-l-0" data-testid="plan-doc" data-mode={historical ? "viewing" : mode}
             onMouseUp={historical ? undefined : pick} onKeyUp={historical ? undefined : pick} onClick={historical ? undefined : followAnchor}>
             {historical ? <DocHistoryComparison key={historical.comparison.revision.rev} comparison={historical.comparison} onClose={historical.close} /> : (
-              <article className={`pb-[84px] pl-[68px] pt-12 max-[900px]:pb-16 max-[900px]:pl-[46px] max-[900px]:!pr-[22px] max-[900px]:pt-8 ${noted ? "pr-6 max-[1180px]:pr-[68px]" : "pr-[68px]"}`}>
-                <div className={`font-serif text-[15.5px] leading-[1.68] text-ink-2 ${noted ? "w-[min(660px,100%_-_292px)] max-[1180px]:mx-auto max-[1180px]:w-[min(660px,100%)]" : "mx-auto w-[min(660px,100%)]"}`}>
+              <article className="pb-[84px] px-[68px] pt-12 max-[900px]:pb-16 max-[900px]:pl-[46px] max-[900px]:pr-[22px] max-[900px]:pt-8">
+                <div className="mx-auto w-[min(660px,100%)] font-serif text-[15.5px] leading-[1.68] text-ink-2">
                   <h1 className="m-0 min-w-0 [overflow-wrap:anywhere] font-serif text-[31px] font-semibold leading-[1.16] tracking-[-0.012em] text-ink [text-wrap:balance]">{plan.title}</h1>
                   {status}
+                  {compactReview}
+                  {raw ? <DocMarkdown plan={textPlan} state={markdownState} editorFor={(s, title) => live ? liveEditor(s, title, "source") : editing?.section === s ? editBox(title) : null} /> : <>
                   {plan.team_ended && <p className="m-0 mt-2 font-sans text-[12.5px] text-ink-2" data-testid="plan-team-ended">Your Team plan ended, so this is now a personal plan.</p>}
                   {textPlan.lede && (
                     <Annotated notes={notesFor(LEDE)} content={bodyOf(LEDE)} className="mt-[26px]">
@@ -1441,35 +1434,25 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                     </section>
                   ))}
                   {cards("")}
+                  </>}
                 </div>
               </article>
             )}
             {highlightBar}
           </div>
           {sharePanel}
-        </div>
-        <footer className="flex min-h-[60px] flex-wrap items-center justify-between gap-x-5 gap-y-3 border-t border-line-strong bg-canvas-2 px-4 py-2.5 font-sans" data-testid="plan-verdict" ref={verdict}>
+          <ReviewRail {...railProps}>
+        <footer className="grid shrink-0 gap-2 bg-canvas-2 px-4 py-2.5 font-sans" data-testid="plan-verdict" ref={verdict}>
           {draft?.kind === "suggest" ? suggestingBar : live && (editing || raw) ? editingBar : teammate ? teammateBar : open ? (
             <>
               <div role="status" className="grid gap-px" data-testid="plan-next" data-state={left.length ? "open" : "ready"} data-left={left.length}>
                 {left.length ? nextUp : (
                   <>
-                    <span className="flex items-center gap-2 text-[13.5px] font-semibold text-ink"><Tick className="!text-[13.5px] !font-semibold">Everything is decided</Tick></span>
-                    <span className="text-xs text-ink-3">{gateHolds ? summary || gateWhy : `Approve starts the build.${stillOpen.length ? ` ${stillOpen.join(" and ")} ${openThreads.length === 1 ? "is" : "are"} still open.` : ""}`}</span>
+                    <span className="text-[13px] text-ink">{buildSentence} {withdraw}</span>
                   </>
                 )}
               </div>
-              <div className="flex items-center gap-2">
-                {client?.cancelPlan && (
-                  <Menu label="Cancel planning" buttonClass={quiet} place="up" open={cancelOpen} onOpenChange={setCancelOpen} testid="plan-cancel-menu" again="cancel">
-                    <h4 className={menuTitle}>Close this plan without approving?</h4>
-                    <p className="m-0">Nothing is built. The tasks waiting on this plan go back to your supervisor, who asks you what to do with each.</p>
-                    <div className={menuRow}>
-                      <button type="button" className={quiet} onClick={() => setCancelOpen(false)}>Keep planning</button>
-                      <LoadingButton className={danger} busy={sending === "cancel"} disabled={!!historical || busy || uploading > 0} data-testid="plan-cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>
-                    </div>
-                  </Menu>
-                )}
+              <div className="flex flex-wrap items-center gap-2 [&>*]:flex-1 [&_button]:w-full">
                 <VerdictNote hasFeedback={hasFeedback}>{(note, setNote, canRequest) => (
                 <Menu label="Request changes" buttonClass={button} place="up" open={changesOpen} onOpenChange={setChangesOpen} testid="plan-changes-menu" again="changes">
                   <h4 className={menuTitle}>What should change?</h4>
@@ -1500,11 +1483,21 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                   </div>
                 </Menu>
                 )}</VerdictNote>
-                <LoadingButton className={main} busy={sending === "approve"} disabled={approveBlocked} data-testid="plan-build" data-gate={gate?.state}
+                <LoadingButton className={main} busy={sending === "approve"} aria-pressed={held || sending === "approve"} disabled={held || approveBlocked} data-testid="plan-build" data-state={held || sending === "approve" ? "pressed" : approveBlocked ? "blocked" : "ready"} data-gate={gate?.state}
                   title={left.length ? "Pick an option in every decision first" : gateHolds ? gateWhy : "Approve this plan and start building it"} data-again="approve" onClick={() => void decide(true)}>
-                  Approve
+                  {(held || sending === "approve") && <ApprovalCheck />}Approve
                 </LoadingButton>
               </div>
+              {client?.cancelPlan && (
+                <Menu label="Cancel planning" buttonClass={quiet} place="up" open={cancelOpen} onOpenChange={setCancelOpen} testid="plan-cancel-menu" again="cancel">
+                  <h4 className={menuTitle}>Close this plan without approving?</h4>
+                  <p className="m-0">Nothing is built. The tasks waiting on this plan go back to your supervisor, who asks you what to do with each.</p>
+                  <div className={menuRow}>
+                    <button type="button" className={quiet} onClick={() => setCancelOpen(false)}>Keep planning</button>
+                    <LoadingButton className={danger} busy={sending === "cancel"} disabled={!!historical || busy || uploading > 0} data-testid="plan-cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>
+                  </div>
+                </Menu>
+              )}
             </>
           ) : plan.state === "approved" ? (
             <>
@@ -1518,17 +1511,32 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           {footerNotes("basis-full")}
           {error && !net && <p role="alert" className="m-0 basis-full text-xs text-sap">{error}</p>}
         </footer>
+        </ReviewRail></div>
       </>
     );
   }
   const earlierRefusals = <EarlierRefusals rev={plan.rev} signOffVersion={reviewVersion ?? plan.rev} />;
   if (designDoc) return <ShowPlanChanges.Provider value={() => setHistoryOpen(true)}>{earlierRefusals}{planningDoc()}</ShowPlanChanges.Provider>;
 
+  const visibleSections = new Set(plan.sections.map(s => s.id));
+  if (textPlan.lede) visibleSections.add(LEDE);
+  const anchored = raw || historical ? [] : openThreads.filter(t => t.anchor.section && visibleSections.has(t.anchor.section) && t.anchor.state !== "detached");
+  const inlineThreads = new Set(anchored.map(t => t.id));
+  function freeFormNotes(sectionId: string, children: ReactNode) {
+    const notes = anchored.filter(t => t.anchor.section === sectionId).map(t => ({
+      key: String(t.id), anchor: t.anchor.kind === "text" ? `[data-thread="${t.id}"]` : null,
+      node: <Thread thread={t} where={where(t)} busy={busy} can={open} actions={actions} onShow={() => showThread(t)}
+        limits={teammate ? { reply: canComment, resolve: thread => canComment && thread.author === "person" } : undefined}
+        active={followed?.thread === String(t.id)} judge={teammate ? authorName : undefined} supervisorReplying={isSupervisorReplying(t, plan)} />,
+    }));
+    return <Annotated notes={notes}>{children}</Annotated>;
+  }
+
   return (
     <ShowPlanChanges.Provider value={() => { collapse(false); setTab("history"); }}>
       {earlierRefusals}
       {chrome && (
-        <ReaderBar lead={chrome.lead} badges={chrome.badges} actions={chrome.actions}
+        <ReaderBar lead={chrome.lead} badges={chrome.badges} actions={chrome.actions} queue={<QueueCount items={plan.outbox} />}
           version={<span className="whitespace-nowrap text-xs text-ink-3" title={`${plan.id} · rendered by brindle from the plan's own text${frozen ? ` · rev ${plan.rev}` : ""}`} data-testid="plan-rev">{versionLabel}</span>}
           presence={presence}
           markdown={{ pressed: raw, onToggle: () => setRaw((r) => !r) }}
@@ -1536,16 +1544,17 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           share={!historical && shareMenu} />
       )}
       {!chrome && presence && <div className="hidden">{presence}</div>}
-      {top}
+      {(teammate || plan.state === "approved") && top}
       <div ref={setStripHost} className="contents" />
       {typing && !historical && <FormatBar hint={raw ? "The buttons write the Markdown for you: Bold wraps the selection in **." : undefined} />}
-      <div className="flex min-h-0 flex-1">
+      <div ref={railWidth.setHost} className={`flex min-h-0 flex-1 ${railWidth.folded ? "flex-col" : ""}`}>
         <div ref={doc} className="relative min-h-0 min-w-0 flex-1 overflow-auto" data-testid="plan-doc" data-mode={historical ? "viewing" : mode} onMouseUp={historical ? undefined : pick} onKeyUp={historical ? undefined : pick} onClick={historical ? undefined : followAnchor}>
           {historical ? <DocHistoryComparison key={historical.comparison.revision.rev} comparison={historical.comparison} onClose={historical.close} /> : <article className="flex flex-col gap-5 pb-10 pl-14 pr-12 pt-7 font-serif text-[15px] leading-[1.65] text-ink-2">
             <div className="grid gap-3 font-sans">
               <h1 className="m-0 min-w-0 [overflow-wrap:anywhere] font-serif text-[28px] font-semibold leading-[1.2] tracking-[-0.01em] text-ink">
                 {plan.title} <DocReference reference={plan.reference} className="ml-1 font-sans" />
               </h1>
+              {compactReview}
               <DocStatus stage={stage} presentation={closed ? "closed" : undefined} tone={frozen ? "branch" : plan.state === "approved" || gate?.state === "ready" ? "pass" : "sap"} line={statusLine}
                 byline={byline} workItem={workItem}
                 brief={!!plan.ask} briefOpen={briefOpen} onBrief={() => setBriefOpen((o) => !o)}
@@ -1567,7 +1576,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             {textPlan.lede && (
               <div id="plan-lede" className="grid gap-2.5">
                 {mode === "editing" && editing?.section !== LEDE && <span className={`${aside} justify-self-end`}>{editControl(LEDE, "the overview")}</span>}
-                {textBody(LEDE, "the overview")}
+                {freeFormNotes(LEDE, textBody(LEDE, "the overview"))}
               </div>
             )}
             {plan.sections.map(section)}
@@ -1590,23 +1599,23 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             })}
             </>}
           </article>}
-          {highlightBar}
-        </div>
-        {sharePanel}
         {!sharingOpen && (columnOpen ? (
-          <Review plan={plan} tab={draft ? "comments" : tab} onTab={setTab} todo={todo} decided={decided} onJump={jump} where={where} draft={draft} draftStale={draftStale} busy={busy}
+          <Review plan={plan} inlineThreads={inlineThreads} tab={draft ? "comments" : tab} onTab={setTab} todo={todo} decided={decided} onJump={jump} where={where} draft={railDraft ? null : draft} draftStale={draftStale} busy={busy}
             draftText={drafting?.text ?? ""} onDraftText={setDraftReason}
             onDraftSend={(text) => void sendDraft(text)} onDraftCancel={() => setDrafting(null)} draftChange={draftChange}
             actions={actions} limits={teammate ? { reply: canComment, resolve: (t) => canComment && t.author === "person" } : undefined} onShow={showThread} shared={sharedFiles} onCollapse={() => { setDrafting(null); collapse(true); }}
-            active={followed ? Number(followed.thread) : null} judge={teammate ? authorName : undefined} sheet={sheet}
+            active={followed ? Number(followed.thread) : null} judge={teammate ? authorName : undefined}
             historyPanel={source.history && <DocumentHistory client={source.history} planId={plan.id} refresh={historyVersion} nameOf={nameOf}
               onCompare={(comparison, close) => setHistorical(comparison ? { comparison, close } : null)} />}
             history={history} historyRev={historyRev} onHistoryPick={setHistoryRev} workItems={workItems} work={work} canLink={!teammate || canComment} />
         ) : (
           <ReviewStrip comments={openThreads.length} decisions={plan.decisions.length - decided} onOpen={() => collapse(false)} />
         ))}
-      </div>
-      <footer className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2.5 border-t border-line-strong bg-canvas-2 px-s2 py-3" data-testid="plan-verdict" ref={verdict}>
+          {highlightBar}
+        </div>
+        {sharePanel}
+        <ReviewRail {...railProps}>
+      <footer className="grid shrink-0 gap-2 bg-canvas-2 px-4 py-3 [&_.flex]:flex-wrap" data-testid="plan-verdict" ref={verdict}>
         {draft?.kind === "suggest" ? suggestingBar : live && (editing || raw) ? editingBar : teammate ? (
           <>
             <div className="grid min-w-0 gap-0.5" data-testid="plan-next">
@@ -1620,8 +1629,9 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
               <SignOffDelivery rev={frozen?.id ?? plan.rev} />
+              {reviewerComment}
               {!next && teammate.rights.signOff && !teammate.signedOff && (
-                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked} data-testid="plan-sign-off" data-again="signoff" onClick={() => void signOff()}>{signName}</LoadingButton>
+                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked} data-testid="plan-sign-off" data-again="signoff" onClick={() => void signOff()}>Sign off</LoadingButton>
               )}
             </div>
           </>
@@ -1631,7 +1641,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             <div className="grid min-w-0 gap-0.5" data-testid="plan-next">
               <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
                 <span className={`${label} text-[11px]`}>Next</span>
-                <span className="truncate">{next ? next.title : gate ? (gate.state === "ready" ? "Ready to build" : gateWhy) : "Sign off this plan"}</span>
+                <span>{next ? next.title : buildSentence} {withdraw}</span>
               </span>
               <span className="text-xs text-ink-3">
                 {summary}
@@ -1640,20 +1650,20 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             </div>
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Choose a decision</button>}
-              {client?.cancelPlan && <LoadingButton className={quiet} busy={sending === "cancel"} disabled={!!historical || busy || uploading > 0} data-testid="plan-cancel" data-again="cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>}
               <LoadingButton className={button} busy={sending === "changes"} disabled={!!historical || busy || !canRequest || uploading > 0}
                 title={canRequest ? "Send it back to the supervisor for a new revision, with your notes" : "Comment, add a note or pick differently first"} data-again="changes" onClick={() => void decide(false)}>
                 Request changes
               </LoadingButton>
               {/* The person's selections and verdict travel together. */}
               {(
-                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || !!next || reviewBlocked || uploading > 0 || (!!gate && gate.state !== "ready")} title={next ? "Choose every decision first" : gate && gate.state !== "ready" ? gateWhy : undefined}
+                <LoadingButton className={main} busy={sending === "approve"} aria-pressed={held || sending === "approve"} disabled={held || !!historical || busy || !!next || reviewBlocked || uploading > 0 || gateHolds} title={next ? "Choose every decision first" : gateHolds ? gateWhy : undefined}
                   data-again="approve" onClick={() => { if (next) jump(next.id); else void decide(true); }}
-                  data-testid="plan-build" data-gate={gate?.state}>
-                  Approve
+                  data-testid="plan-build" data-gate={gate?.state} data-state={held || sending === "approve" ? "pressed" : next || reviewBlocked || gateHolds ? "blocked" : "ready"}>
+                  {(held || sending === "approve") && <ApprovalCheck />}Approve
                 </LoadingButton>
               )}
             </div>
+            {client?.cancelPlan && <LoadingButton className={quiet} wrapClassName="justify-self-start" busy={sending === "cancel"} disabled={!!historical || busy || uploading > 0} data-testid="plan-cancel" data-again="cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>}
             <div className="col-span-full flex items-center gap-2.5 border-t border-line pt-2.5">
               <input className={`${field} min-w-40 flex-1 text-[13px]`} aria-label="Note for the supervisor" placeholder="Note for the supervisor…" value={note} onChange={(e) => setNote(e.target.value)} />
               {attached.map((path, i) => (
@@ -1679,6 +1689,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         {footerNotes("col-span-full")}
         {error && !net && error !== gate?.unconfirmed?.message && <p role="alert" className="col-span-full text-xs text-sap">{error}</p>}
       </footer>
+      </ReviewRail></div>
     </ShowPlanChanges.Provider>
   );
 }

@@ -256,7 +256,7 @@ it.each([
     render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
     // Every pick made, Approve still waits on the reviewer's sign-off, and the sheet says who.
     return async () => {
-      expect(within(screen.getByTestId("plan-outline")).getByTestId("plan-signoffs")).toBeTruthy();
+      expect(within(screen.getByTestId("review-rail")).getByTestId("plan-signoffs")).toBeTruthy();
       const approve = screen.getByTestId("plan-build") as HTMLButtonElement;
       expect([approve.dataset.gate, approve.disabled]).toEqual(["waiting", true]);
     };
@@ -360,29 +360,14 @@ it("keeps a past revision on the page once the history menu closes, with Approve
   expect((screen.getByTestId("plan-build") as HTMLButtonElement).disabled).toBe(false);
 });
 
-it("moves the notes below a margin note that grows when a reply opens", () => {
-  const observers: ResizeObserverCallback[] = [];
-  vi.stubGlobal("ResizeObserver", class {
-    constructor(cb: ResizeObserverCallback) { observers.push(cb); }
-    observe() {}
-    disconnect() {}
-  });
-  const height = Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight")!;
-  Object.defineProperty(HTMLElement.prototype, "offsetHeight", { configurable: true, get(this: HTMLElement) { return this.querySelector("form") ? 100 : 40; } });
-  try {
-    const actions = { reply: async () => true, resolve: async () => true, accept: async () => true, reject: async () => true };
-    const note = (id: number) => ({ id, kind: "comment" as const, rev: 1, author: "person", text: "Why?", status: "open" as const, at: 1, anchor: { kind: "section" as const, section: "context", state: "current" as const } });
-    const notes = [1, 2].map((id) => ({ key: `t${id}`, anchor: null, node: <MarginNote thread={note(id)} busy={false} canJudge canReply canResolve actions={actions} lit={false} /> }));
-    render(<Annotated notes={notes}><p>Text</p></Annotated>);
-    const second = () => screen.getByTestId("thread-2").parentElement!;
-    expect(second().style.top).toBe("52px");
-    fireEvent.click(within(screen.getByTestId("thread-1")).getByRole("button", { name: "Reply" }));
-    act(() => observers.forEach((cb) => cb([], {} as ResizeObserver)));
-    expect(second().style.top).toBe("112px");
-  } finally {
-    Object.defineProperty(HTMLElement.prototype, "offsetHeight", height);
-    vi.unstubAllGlobals();
-  }
+it("keeps a thread and its reply beneath the paragraph it discusses", () => {
+  const actions = { reply: async () => true, resolve: async () => true, accept: async () => true, reject: async () => true };
+  const thread = spine().threads![0];
+  const notes = [{ key: "thread", anchor: "#anchor", node: <MarginNote thread={thread} busy={false} canJudge canReply canResolve actions={actions} lit={false} /> }];
+  render(<Annotated notes={notes}><p data-testid="paragraph"><span id="anchor">Text</span></p><p>More text</p></Annotated>);
+  const placement = screen.getByTestId("paragraph").nextElementSibling as HTMLElement;
+  fireEvent.click(within(placement).getByRole("button", { name: "Reply" }));
+  expect(within(placement).getByRole("textbox")).toBeTruthy();
 });
 
 it("draws a mermaid section as an svg, and shows its source when it can't be drawn", async () => {
@@ -408,12 +393,11 @@ it("draws a mermaid section as an svg, and shows its source when it can't be dra
   expect(document.querySelector('[id*="doc-mermaid"]')).toBeNull();
 });
 
-it("shows no worker split to the person once the plan is approved", async () => {
+it("shows the author's live board once the planning doc is approved", async () => {
   const plan = spine({ state: "approved", verdict: { approved: true, at: 2, rev: 1, picks: { store: "a", loud: "a", reach: "b" } } });
   const client: PlansClient & PlanDocClient & VisualsClient = { ...visuals, ...writes(plan), plan: async () => plan, decidePlan: async () => plan };
   render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
   expect((await screen.findByTestId("plan-next")).dataset.state).toBe("approved");
-  expect(screen.queryByRole("region", { name: "Plan board" })).toBeNull();
-  expect(screen.queryByTestId("task-outbox")).toBeNull();
+  expect(within(screen.getByRole("region", { name: "Plan board" })).getByTestId("task-outbox")).toBeTruthy();
   expect(screen.queryByTestId("plan-board-progress")).toBeNull();
 });
