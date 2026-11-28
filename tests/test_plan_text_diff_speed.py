@@ -126,6 +126,25 @@ def test_retype_keeps_a_relay_replacement_when_local_inserts_long_edges(matching
     assert doc.text("s") == prefix + relay + suffix
 
 
+@pytest.mark.parametrize("delete_locally", [
+    pytest.param(False, id="relay-deletes-first-copy"),
+    pytest.param(True, id="local-deletes-first-copy",
+                 marks=pytest.mark.variant("Word hunks must delete the first copy and preserve the relay edit")),
+])
+def test_retype_edits_the_surviving_suffix_of_two_copies(matching_budget, delete_locally):
+    body = " ".join(f"word{i:03}" for i in range(300))
+    expected = body.replace("word150", "replacement")
+    prefix = f"[{body}] "
+    base = prefix + body
+    edited = prefix + expected
+    local, relay = (body, edited) if delete_locally else (edited, body)
+    doc = SharedDoc.new({"s": relay})
+
+    plan_drafts.retype(doc, {"s": base}, {"s": local})
+
+    assert doc.text("s") == expected
+
+
 def test_small_diffs_keep_legacy_offsets():
     # A repeated character can be either the first match or a common suffix.
     # The old matcher picked the first match, which matters for draft cursors.

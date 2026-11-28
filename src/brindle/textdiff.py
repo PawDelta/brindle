@@ -178,15 +178,12 @@ def sequence_opcodes(before: Sequence[str], after: Sequence[str], *, autojunk: b
         return [_edit(0, len(before), 0, len(after))]
     if fits(len(before), len(after)):
         return SequenceMatcher(None, before, after, autojunk=autojunk).get_opcodes()
-    contained = _containment_opcodes(before, after)
-    if contained is not None:
-        return contained
     start, suffix = common_edges(before, after)
     left, right = before[start:len(before) - suffix], after[start:len(after) - suffix]
     if fits(len(left), len(right)):
         middle = SequenceMatcher(None, left, right, autojunk=autojunk).get_opcodes()
     else:
-        middle = _containment_opcodes(left, right) if start or suffix else None
+        middle = _containment_opcodes(left, right)
         if middle is None:
             middle = _sparse_opcodes(left, right)
         if middle is None:
@@ -199,10 +196,8 @@ def opcodes(before: str, after: str, *, autojunk: bool = False) -> list[Opcode]:
     """Diff at character offsets, using lines then words for large regions.
 
     Small inputs keep SequenceMatcher's original alignment, including ties
-    between repeated characters. Large inputs keep contained runs intact and
-    trim equal edges before refinement. A region that still exceeds the
-    character budget uses a bounded search for sparse edits before falling
-    back to a single replacement.
+    between repeated characters. Large inputs pin equal edges before
+    searching the remaining region for a contained run or refining it.
     """
     return _refine(before, after, autojunk, (_lines, tokens))
 
@@ -211,14 +206,11 @@ def _refine(before: str, after: str, autojunk: bool,
             splitters: tuple[Callable[[str], list[str]], ...]) -> list[Opcode]:
     if before == after or fits(len(before), len(after)) or not splitters:
         return sequence_opcodes(before, after, autojunk=autojunk)
-    contained = _containment_opcodes(before, after)
-    if contained is not None:
-        return contained
     start, suffix = common_edges(before, after)
     left, right = before[start:len(before) - suffix], after[start:len(after) - suffix]
     if fits(len(left), len(right)):
         return _with_edges(before, after, start, suffix, sequence_opcodes(left, right, autojunk=autojunk))
-    contained = _containment_opcodes(left, right) if start or suffix else None
+    contained = _containment_opcodes(left, right)
     if contained is not None:
         return _with_edges(before, after, start, suffix, contained)
 
