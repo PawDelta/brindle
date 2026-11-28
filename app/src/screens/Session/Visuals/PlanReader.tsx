@@ -465,9 +465,16 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const [sending, setSending] = useState<"approve" | "changes" | "cancel" | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  /* A write the network stopped: a calm note. Nothing was sent and what the person drafted stays,
-     so the same button is how they send it again, with its own checks as the screen is now. */
+  /* A write the network stopped: a calm note. Whether it landed can't be known (the request may
+     have reached the Library before the answer timed out), so what the person drafted stays and the
+     plan is read again. Try again goes through the control they used (`data-again`): it is offered
+     only while that control is on screen and enabled, and clicking it runs that control with its
+     own checks as the screen is now. A card's or thread's write keeps its own control instead. */
   const [net, setNet] = useState<LibraryNetwork | null>(null);
+  const failedControl = useRef<string | null>(null);
+  const [againName, setAgainName] = useState<string | null>(null);
+  const [againControl, setAgainControl] = useState<HTMLButtonElement | null>(null);
+  const verdict = useRef<HTMLElement | null>(null);
   const slow = useSlowPending(busy);
   const [picked, setPicked] = useState<Picked | null>(null);
   // What the person is writing belongs to the text it was started on (`source`): the doc stays
@@ -636,6 +643,10 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     setBusy(true);
     setError(null);
     setNet(null);
+    // The footer control this write came from, if any (a card's or thread's write has none).
+    const control = failedControl.current;
+    failedControl.current = null;
+    setAgainName(null);
     try {
       const now = await work();
       writes.end(now);
@@ -643,17 +654,25 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     } catch (e) {
       writes.end(null);
       refused?.(e);
-      if (alive.current) { setError(refusal(e)); setNet(libraryNetwork(e)); }
+      if (alive.current) { setError(refusal(e)); setNet(libraryNetwork(e)); setAgainName(control); }
       return null;
     } finally {
       if (alive.current) setBusy(false);
     }
   };
   const write = async (work: () => Promise<Plan>) => (await send(work)) !== null;
+  // After every render: the control to go through, only while it is on screen and enabled.
+  useEffect(() => {
+    const found = againName && net ? (verdict.current?.closest("[data-testid=\"plan-reader\"]") ?? verdict.current)?.querySelector<HTMLButtonElement>(`[data-again="${againName}"]`) : null;
+    const usable = found && !found.disabled ? found : null;
+    setAgainControl((old) => (old === usable ? old : usable));
+  });
   const footerNotes = (span: string) => <>
     {slow && <SlowConnectionNote className={`m-0 ${span} text-xs text-ink-3`} />}
     {error && net && <LibraryNetworkNote state={net} className={`m-0 flex ${span} items-center gap-2 text-xs text-ink-2`}
-      hint="Nothing was sent, and what you wrote is kept: send it again when the connection is back." />}
+      hint="It couldn't be confirmed, so it may or may not have gone through. What you wrote is kept: check the plan before sending it again."
+      buttonClassName={`${quiet} px-2 text-xs`}
+      onTryAgain={againControl && !busy ? () => { if (againControl.isConnected && !againControl.disabled) againControl.click(); } : undefined} />}
   </>;
   // Own answers on a decision card (brindle/plan_answers.py). Adding one picks it and removing one
   // drops its pick, so the engine's `confirmed` speaks for the card from then on.
@@ -829,6 +848,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
      frozen version to wait for or to name. */
   const decide = async (approved: boolean, shared = true) => {
     if (historical || !client || (approved && shared && reviewBlocked)) return;
+    failedControl.current = approved ? "approve" : "changes";
     setSending(approved ? "approve" : "changes");
     const version = shared ? reviewVersion : undefined;
     const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(version === undefined ? {} : { version }), ...(attached.length ? { attachments: attached } : {}) }));
@@ -844,6 +864,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   /* Close the plan without approving it: nothing is built or sent to the Library, and the tasks it held wait for the supervisor. */
   const cancelPlanning = async () => {
     if (historical || !client || !client.cancelPlan) return;
+    failedControl.current = "cancel";
     setSending("cancel");
     const now = await send(() => client.cancelPlan!(plan.id, plan.rev));
     if (!alive.current) return;
@@ -856,6 +877,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
      the person to read and Approve. */
   const stopSharing = async () => {
     if (historical) return;
+    failedControl.current = "stop";
     const read = shownTexts;
     setSending("approve");
     const now = await send(() => sharing!.stopSharingPlan!(plan.id, plan.rev));
@@ -868,6 +890,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   };
   const signOff = async () => {
     if (historical || !source.signOff || reviewBlocked) return;
+    failedControl.current = "signoff";
     setSending("approve");
     if (await write(() => source.signOff!(plan.rev, reviewVersion)) && frozen) setRefreshes((n) => n + 1);
     if (alive.current) setSending(null);
@@ -1050,7 +1073,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           {(gate.unconfirmed.reason === "sign_in" || gate.unconfirmed.reason === "other_account") && <LibrarySignIn />}
           {gate.unconfirmed.can_stop_sharing && !next && sharing?.stopSharingPlan && (
             <span>
-              <button type="button" className={`${quiet} -my-0.5 text-xs`} disabled={busy} title="Your teammates lose this plan the next time brindle reaches the Library" onClick={() => void stopSharing()}>Stop sharing and build</button>
+              <button type="button" className={`${quiet} -my-0.5 text-xs`} disabled={busy} title="Your teammates lose this plan the next time brindle reaches the Library" data-again="stop" onClick={() => void stopSharing()}>Stop sharing and build</button>
             </span>
           )}
         </div>
@@ -1110,7 +1133,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
       {/* A redirected plan stays open to cancel (never to approve): the person may close it instead of waiting for a revision. */}
       {plan.state === "redirected" && client?.cancelPlan && (
         <div className="col-span-full flex justify-end">
-          <LoadingButton className={quiet} busy={sending === "cancel"} disabled={!!historical || busy} data-testid="plan-cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>
+          <LoadingButton className={quiet} busy={sending === "cancel"} disabled={!!historical || busy} data-testid="plan-cancel" data-again="cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>
         </div>
       )}
       <div role="status" className="col-span-full flex min-w-0 flex-col gap-0.5 text-sm" data-testid="plan-decided" data-state={plan.state}>
@@ -1234,7 +1257,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         </div>
         {teammate.rights.signOff && !teammate.signedOff && (
           <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked || left.length > 0} data-testid="plan-sign-off"
-            title={left.length ? "Pick an option in every decision first" : undefined} onClick={() => void signOff()}>{signName}</LoadingButton>
+            title={left.length ? "Pick an option in every decision first" : undefined} data-again="signoff" onClick={() => void signOff()}>{signName}</LoadingButton>
         )}
       </>
     );
@@ -1307,7 +1330,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           </div>
           {sharePanel}
         </div>
-        <footer className="flex min-h-[60px] flex-wrap items-center justify-between gap-x-5 gap-y-3 border-t border-line-strong bg-canvas-2 px-4 py-2.5 font-sans" data-testid="plan-verdict">
+        <footer className="flex min-h-[60px] flex-wrap items-center justify-between gap-x-5 gap-y-3 border-t border-line-strong bg-canvas-2 px-4 py-2.5 font-sans" data-testid="plan-verdict" ref={verdict}>
           {draft?.kind === "suggest" ? suggestingBar : live && (editing || raw) ? editingBar : teammate ? teammateBar : open ? (
             <>
               <div role="status" className="grid gap-px" data-testid="plan-next" data-state={left.length ? "open" : "ready"} data-left={left.length}>
@@ -1325,7 +1348,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                     <p className="m-0">Nothing is built. The tasks waiting on this plan go back to your supervisor, who asks you what to do with each.</p>
                     <div className={menuRow}>
                       <button type="button" className={quiet} onClick={() => setCancelOpen(false)}>Keep planning</button>
-                      <LoadingButton className={danger} busy={sending === "cancel"} disabled={!!historical || busy || uploading > 0} data-testid="plan-cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>
+                      <LoadingButton className={danger} busy={sending === "cancel"} disabled={!!historical || busy || uploading > 0} data-testid="plan-cancel" data-again="cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>
                     </div>
                   </Menu>
                 )}
@@ -1352,13 +1375,13 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                       </>
                     ) : <span />}
                     <LoadingButton className={button} busy={sending === "changes"} disabled={!!historical || busy || !canRequest || uploading > 0}
-                      title={canRequest ? undefined : "Comment, add a note or pick differently first"} data-testid="plan-send-back" onClick={() => void decide(false)}>
+                      title={canRequest ? undefined : "Comment, add a note or pick differently first"} data-testid="plan-send-back" data-again="changes" onClick={() => void decide(false)}>
                       Send back
                     </LoadingButton>
                   </div>
                 </Menu>
                 <LoadingButton className={main} busy={sending === "approve"} disabled={approveBlocked} data-testid="plan-build" data-gate={gate?.state}
-                  title={left.length ? "Pick an option in every decision first" : gateHolds ? gateWhy : "Approve this plan and start building it"} onClick={() => void decide(true)}>
+                  title={left.length ? "Pick an option in every decision first" : gateHolds ? gateWhy : "Approve this plan and start building it"} data-again="approve" onClick={() => void decide(true)}>
                   Approve
                 </LoadingButton>
               </div>
@@ -1460,7 +1483,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           <ReviewStrip comments={openThreads.length} decisions={plan.decisions.length - decided} onOpen={() => collapse(false)} />
         ))}
       </div>
-      <footer className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2.5 border-t border-line-strong bg-canvas-2 px-s2 py-3" data-testid="plan-verdict">
+      <footer className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-2.5 border-t border-line-strong bg-canvas-2 px-s2 py-3" data-testid="plan-verdict" ref={verdict}>
         {draft?.kind === "suggest" ? suggestingBar : live && (editing || raw) ? editingBar : teammate ? (
           <>
             <div className="grid min-w-0 gap-0.5" data-testid="plan-next">
@@ -1474,7 +1497,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
               {!next && teammate.rights.signOff && !teammate.signedOff && (
-                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked} data-testid="plan-sign-off" onClick={() => void signOff()}>{signName}</LoadingButton>
+                <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked} data-testid="plan-sign-off" data-again="signoff" onClick={() => void signOff()}>{signName}</LoadingButton>
               )}
             </div>
           </>
@@ -1492,15 +1515,15 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             </div>
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Choose a decision</button>}
-              {client?.cancelPlan && <LoadingButton className={quiet} busy={sending === "cancel"} disabled={!!historical || busy || uploading > 0} data-testid="plan-cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>}
+              {client?.cancelPlan && <LoadingButton className={quiet} busy={sending === "cancel"} disabled={!!historical || busy || uploading > 0} data-testid="plan-cancel" data-again="cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>}
               <LoadingButton className={button} busy={sending === "changes"} disabled={!!historical || busy || !canRequest || uploading > 0}
-                title={canRequest ? "Send it back to the supervisor for a new revision, with your notes" : "Comment, add a note or pick differently first"} onClick={() => void decide(false)}>
+                title={canRequest ? "Send it back to the supervisor for a new revision, with your notes" : "Comment, add a note or pick differently first"} data-again="changes" onClick={() => void decide(false)}>
                 Request changes
               </LoadingButton>
               {/* The person's selections and verdict travel together. */}
               {(
                 <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || !!next || reviewBlocked || uploading > 0 || (!!gate && gate.state !== "ready")} title={next ? "Choose every decision first" : gate && gate.state !== "ready" ? gateWhy : undefined}
-                  onClick={() => { if (next) jump(next.id); else void decide(true); }}
+                  data-again="approve" onClick={() => { if (next) jump(next.id); else void decide(true); }}
                   data-testid="plan-build" data-gate={gate?.state}>
                   Approve
                 </LoadingButton>
