@@ -338,6 +338,10 @@ class SignInBusy(RuntimeError):
     """The Library could not read the sign-in to check its entitlement."""
 
 
+class NotEntitled(RuntimeError):
+    """The local sign-in or configuration doesn't allow Library access."""
+
+
 def require_entitlement(store=None):
     """The verified entitlement, or ``RuntimeError`` (before anything is sent)
     in air-gap mode or without the ``analysis_docs`` feature."""
@@ -345,7 +349,7 @@ def require_entitlement(store=None):
     from brindle.pro import auth, credentials, license
 
     if airgap.enabled():
-        raise RuntimeError("air-gap mode is on: nothing is sent")
+        raise NotEntitled("Air-gap mode is on. The Library is unavailable.")
     try:
         if store is None:
             store = credentials.request_store()
@@ -359,9 +363,9 @@ def require_entitlement(store=None):
     except Exception as e:  # noqa: BLE001
         if isinstance(e, license.LicenseError) and isinstance(e.__cause__, keystore.KeychainReadBlocked):
             raise SignInBusy(str(e.__cause__)) from e
-        raise RuntimeError("not logged in to brindle Pro (`brindle account login`)") from e
+        raise NotEntitled("You're not logged in to brindle. Sign in to use the Library.") from e
     if FEATURE not in ent.features or ent.in_grace:
-        raise RuntimeError("your subscription has no plan library (the `analysis_docs` entitlement)")
+        raise NotEntitled("The Library is unavailable on your current plan.")
     return ent
 
 
@@ -403,6 +407,16 @@ class Refused(RuntimeError):
         super().__init__(message)
         self.status = status
         self.code = code
+        self.firewall_message: str | None = None
+
+    @classmethod
+    def from_response(cls, status: int, resp: dict, body: dict | None = None) -> Refused:
+        code = resp.get("error")
+        code = code if isinstance(code, str) and code else None
+        error = cls(code or why_refused(status, resp, body), status, code)
+        if status == 403 and code is None:
+            error.firewall_message = str(error)
+        return error
 
 
 def api(method: str, path: str, body: dict | None = None, *, client=None, store=None) -> dict:
@@ -413,8 +427,7 @@ def api(method: str, path: str, body: dict | None = None, *, client=None, store=
 
     status, resp = _call(method, path, body, client=client, store=store)
     if status != 200:
-        code = resp.get("error") if isinstance(resp, dict) and isinstance(resp.get("error"), str) else None
-        raise Refused(code or why_refused(status, resp, body), status, code)
+        raise Refused.from_response(status, resp, body)
     if isinstance(resp, dict) and auth.BINARY_KEY in resp:
         return resp
     return resp if isinstance(resp, dict) else {}

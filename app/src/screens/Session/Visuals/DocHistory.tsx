@@ -91,8 +91,8 @@ export function historyEvents(entries: DocHistoryEntry[]): HistoryEvent[] {
 /* Drop into the History tab. Pass onCompare to put the comparison in the reader's document
    pane; without it the component includes its own read-only document preview. Increment refresh
    after a live action or sync. No writes are made when selecting or opening an old revision. */
-export function DocumentHistory({ client, planId, refresh, onCompare, nameOf }: {
-  client: HistoryClient; planId: string; refresh?: unknown;
+export function DocumentHistory({ client, planId, refresh, enabled = true, onCompare, nameOf }: {
+  client: HistoryClient; planId: string; refresh?: unknown; enabled?: boolean;
   nameOf?(sub: string): string;
   onCompare?(comparison: DocRevisionComparison | null, close: () => void): void;
 }) {
@@ -100,6 +100,7 @@ export function DocumentHistory({ client, planId, refresh, onCompare, nameOf }: 
   const [comparison, setComparison] = useState<DocRevisionComparison | null>(null);
   const [error, setError] = useState(false);
   const [loading, setLoading] = useState(false);
+  const loaded = useRef<{ client: HistoryClient; planId: string; refresh: unknown } | null>(null);
   const request = useRef(0);
   const compareCallback = useRef(onCompare);
   compareCallback.current = onCompare;
@@ -113,13 +114,18 @@ export function DocumentHistory({ client, planId, refresh, onCompare, nameOf }: 
     return () => { request.current++; compareCallback.current?.(null, close); };
   }, [client, planId]);
   useEffect(() => {
+    if (!enabled || (loaded.current?.client === client && loaded.current.planId === planId && Object.is(loaded.current.refresh, refresh))) return;
     let active = true;
+    loaded.current = null;
     setEvents(null); setError(false);
     void client.planHistory(planId).then((result) => {
-      if (active && identity.current.client === client && identity.current.planId === planId) setEvents(historyEvents(result.events));
+      if (active && identity.current.client === client && identity.current.planId === planId) {
+        loaded.current = { client, planId, refresh };
+        setEvents(historyEvents(result.events));
+      }
     }, () => { if (active && identity.current.client === client && identity.current.planId === planId) setError(true); });
     return () => { active = false; };
-  }, [client, planId, refresh]);
+  }, [client, planId, refresh, enabled]);
   const pick = async (rev: number) => {
     const sequence = ++request.current;
     const isCurrent = () => request.current === sequence && identity.current.client === client && identity.current.planId === planId;
