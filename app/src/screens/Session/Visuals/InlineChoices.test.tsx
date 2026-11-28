@@ -10,12 +10,21 @@ const visual: VisualDTO = {
   title: "Two choices", answer: null, kept: false, unread: false, created_at: 0,
   inline_html: `
     <style>
-      #recommendation { border: 2px solid purple; background: lavender; }
-      fieldset button span { display: none !important; }
+      body { background: #18181a; }
+      #recommendation {
+        border: 2px solid purple !important;
+        background: lavender linear-gradient(lavender, purple) !important;
+        border-radius: 99px !important;
+        box-shadow: 0 0 0 4px purple !important;
+        outline: 4px solid purple !important;
+        color: purple !important;
+      }
+      fieldset button [data-choice-mark] { display: none !important; }
+      #recommendation small { color: purple; }
     </style>
     <fieldset data-choice="first">
       <legend>First question</legend>
-      <button id="recommendation" data-option="A" data-selected style="border-width: 3px !important">Option A</button>
+      <button id="recommendation" data-option="A" data-selected style="border-width: 3px !important">Option A <small>my pick</small></button>
       <button data-option="B">Option B</button>
     </fieldset>
     <fieldset data-choice="second">
@@ -33,7 +42,10 @@ function openChoices() {
     visuals: vi.fn(), answerVisual: vi.fn(), dismissVisual: vi.fn(),
     keepVisual: vi.fn(), unkeepVisual: vi.fn(), markVisualRead: vi.fn(),
   };
-  render(<VisualReader client={client} visual={visual} onBack={() => {}} onAnswered={() => {}} />);
+  render(<>
+    <style>{":root { --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1); --ink-3: #4c615e; }"}</style>
+    <VisualReader client={client} visual={visual} onBack={() => {}} onAnswered={() => {}} />
+  </>);
   const frame = screen.getByTitle<HTMLIFrameElement>(visual.title);
   const doc = frame.contentDocument!;
   // jsdom does not load srcdoc into the frame.
@@ -46,15 +58,33 @@ it("marks only the user's pick when the page highlights a different option", () 
   const doc = openChoices();
   const recommended = doc.querySelector<HTMLButtonElement>('[data-option="A"]')!;
   const picked = doc.querySelector<HTMLButtonElement>('[data-option="B"]')!;
+  const neutral = doc.querySelector<HTMLButtonElement>('[data-option="C"]')!;
+  const chrome = (button: HTMLButtonElement) => {
+    const style = doc.defaultView!.getComputedStyle(button);
+    return {
+      border: [style.borderTopWidth, style.borderTopStyle, style.borderTopColor],
+      background: style.backgroundColor,
+      backgroundImage: style.backgroundImage,
+      borderRadius: style.borderRadius,
+      boxShadow: style.boxShadow,
+      outline: style.outline,
+      color: style.color,
+    };
+  };
 
-  const originalStyle = recommended.getAttribute("style");
   fireEvent.click(recommended);
-  const selectedBorder = doc.defaultView!.getComputedStyle(recommended).borderWidth;
+  const selectedChrome = chrome(recommended);
   fireEvent.click(picked);
 
   expect(Array.from(doc.querySelectorAll("button[data-selected]"))).toEqual([picked]);
-  expect(selectedBorder).toBe("2px");
-  expect(recommended.getAttribute("style")).toBe(originalStyle);
+  expect(chrome(recommended)).toEqual(chrome(neutral));
+  expect(chrome(neutral).background).not.toBe("rgba(0, 0, 0, 0)");
+  expect(chrome(picked)).toEqual(selectedChrome);
+  expect(selectedChrome.border).not.toEqual(chrome(neutral).border);
+  expect(selectedChrome.background).toBe(chrome(neutral).background);
+  expect(selectedChrome.backgroundImage).not.toBe(chrome(neutral).backgroundImage);
+  const note = recommended.querySelector("small")!;
+  expect(doc.defaultView!.getComputedStyle(note).color).not.toBe(chrome(recommended).color);
   const filled = picked.querySelector('[data-choice-mark="selected"]')!;
   const empty = recommended.querySelector('[data-choice-mark="empty"]')!;
   expect(doc.defaultView!.getComputedStyle(filled).display).toBe("inline-block");

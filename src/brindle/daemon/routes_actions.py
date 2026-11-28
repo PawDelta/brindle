@@ -2499,25 +2499,22 @@ EXPORT_DESTINATIONS = ("download", "google_docs", "sharepoint")
 
 
 def _docs_entitlement(repo: str | None, store=None):
-    from brindle import config
-    from brindle.pro import analysis_docs
+    from brindle import config, keystore
+    from brindle.pro import analysis_docs, auth
 
     if repo:
         config.load_repo_config(repo)        # its air-gap setting applies first
     try:
         return analysis_docs.require_entitlement(store)
-    except RuntimeError as e:
-        if busy := _library_busy(e):
-            raise busy from e
-        raise ServiceError("not_entitled", str(e), 402) from e
+    except (RuntimeError, auth.AuthError, keystore.KeychainReadBlocked) as e:
+        raise upstream_error(e) from e
 
 
 def docs_api(method: str, path: str, body: dict | None = None, *, repo: str | None = None,
              query: dict[str, str] | None = None, scope: str | None = None) -> dict:
     """One call to the library: ``scope`` is ``user`` or ``team:<id>`` /
-    ``org:<id>``. Not entitled (or in the repo's air-gap mode) is 402 before
-    anything is sent; the server's refusal is 502 with its reason; signed
-    out is 401."""
+    ``org:<id>``. Entitlement is checked before sending anything. Library
+    refusals are translated by :func:`upstream_error`."""
     from urllib.parse import urlencode
 
     from brindle import keystore
@@ -2535,37 +2532,72 @@ def docs_api(method: str, path: str, body: dict | None = None, *, repo: str | No
 
 def _library_busy(e: BaseException | None) -> ServiceError | None:
     """A local sign-in delay can surface through entitlement or Library errors."""
-    from brindle.keystore import KeychainReadBlocked
+    from brindle.keystore import KEYCHAIN_UNBLOCK, KeychainReadBlocked
     from brindle.pro.auth import AuthError
 
     while e is not None:
         if isinstance(e, AuthError) and e.code == "lock_timeout":
             return ServiceError("busy", "Another brindle process is refreshing your sign-in.", 503)
         if isinstance(e, KeychainReadBlocked):
-            return ServiceError("busy", str(e), 503)
+            return ServiceError("busy", KEYCHAIN_UNBLOCK, 503)
         e = e.__cause__
     return None
 
 
-def upstream_error(e: Exception) -> ServiceError:
-    """The Library's refusal as the daemon's answer: its own 4xx (a stale
-    version stays a 409, a missing permission a 403) so the app can act on it;
-    a local sign-in delay is 503, and an unreachable or unreadable response
-    is 502. The Library's 401 would read as the daemon's own token being
-    refused, and a 403 without a Library error code comes from its firewall
-    (analysis_docs.why_refused). Both become 502."""
-    from brindle.pro.analysis_docs import Refused
+_LIBRARY_ERRORS = {
+    "signed_out": (402, "Sign in to brindle again to use the Library."),
+    "airgap": (403, "Air-gap mode is on. The Library is unavailable."),
+    "bad_request": (400, "The Library couldn't accept this request."),
+    "forbidden": (403, "You don't have permission to do this in the Library."),
+    "policy_denied": (403, "Your organization's policy doesn't allow this action."),
+    "sign_in_required": (403, "Sign in to brindle to open this link."),
+    "sso_required": (403, "Sign in through your organization to open this link."),
+    "org_only": (403, "This link is available to members of the organization."),
+    "team_only": (403, "This link is available to members of the team."),
+    "share_links_off": (403, "Your organization's policy doesn't allow share links."),
+    "key_unavailable": (503, "The organization's key for this plan is unavailable."),
+    "stale": (409, "This plan has changed. Reload it and try again."),
+    403: (403, "You don't have permission to do this in the Library."),
+    404: (404, "The Library couldn't find what you requested."),
+    409: (409, "The Library couldn't save the change. Reload and try again."),
+    429: (429, "The Library is receiving too many requests. Try again in a moment."),
+    500: (502, "The Library had a problem. Try again."),
+    502: (502, "The Library couldn't complete this request. Try again."),
+}
+_LIBRARY_SIGN_IN_CODES = {"not_logged_in", "invalid_grant", "invalid_token", "reauth_required", "record_changed"}
+
+
+def upstream_error(e: BaseException) -> ServiceError:
+    """Map Library failures to a safe message and a code the app can act on."""
+    from brindle.pro.analysis_docs import NotEntitled, Refused
     from brindle.pro.auth import AuthError, TransportError
 
     if busy := _library_busy(e):
         return busy
     if network := network_error(e):
         return network
-    if isinstance(e, AuthError) and not isinstance(e, TransportError):
-        return from_exception(e)
-    if isinstance(e, Refused) and 400 <= e.status < 500 and e.status != 401 and (e.status != 403 or e.code):
-        return ServiceError(e.code if e.code and e.code.isidentifier() else "upstream", str(e), e.status)
-    return ServiceError("upstream", str(e), 502)
+    if isinstance(e, NotEntitled):
+        return ServiceError("not_entitled", str(e), 402)
+    if isinstance(e, (Refused, AuthError)):
+        code = e.code if e.code and e.code.isidentifier() else None
+        if isinstance(e, Refused):
+            if e.status == 401:
+                return ServiceError("signed_out", _LIBRARY_ERRORS["signed_out"][1], 402)
+            if code == "key_unavailable":
+                return ServiceError(code, _LIBRARY_ERRORS[code][1], 503)
+            if e.status == 403 and not code:
+                return ServiceError("upstream", e.firewall_message or "A firewall refused the Library request.", 502)
+            if 400 <= e.status < 500:
+                _, message = _LIBRARY_ERRORS.get(code, _LIBRARY_ERRORS.get(e.status, _LIBRARY_ERRORS["bad_request"]))
+                return ServiceError(code or "upstream", message, e.status)
+            status, message = _LIBRARY_ERRORS[500 if e.status >= 500 else 502]
+            return ServiceError(code or "upstream", message, status)
+        if e.revoked or code in _LIBRARY_SIGN_IN_CODES:
+            code = "signed_out"
+        if not isinstance(e, TransportError) or code == "airgap":
+            status, message = _LIBRARY_ERRORS.get(code, _LIBRARY_ERRORS[502])
+            return ServiceError(code or "upstream", message, status)
+    return ServiceError("upstream", _LIBRARY_ERRORS[502][1], 502)
 
 
 def docs_org_api(method: str, tail: str, body: dict | None = None, *, repo: str | None = None,
@@ -2621,17 +2653,19 @@ def doc_switches(repo: str | None = None) -> dict:
     """``{"switches": [{name, on, choice, locked, org}]}``: the person's own
     switches (analysis_docs.switch_states). 402 when not entitled, 502 when
     the server refuses or can't be read."""
+    from brindle import keystore
     from brindle.pro import analysis_docs, auth
 
     _docs_entitlement(repo)
     try:
         return {"switches": analysis_docs.switch_states()}
-    except (RuntimeError, auth.TransportError) as e:
-        raise ServiceError("upstream", str(e), 502) from e
+    except (RuntimeError, auth.AuthError, keystore.KeychainReadBlocked) as e:
+        raise upstream_error(e) from e
 
 
 def put_doc_switch(db: DB, params: dict, body: Body) -> Any:
     """Set one of the person's own switches (``name``, ``on``); 403 when their org enforces it."""
+    from brindle import keystore
     from brindle.pro import analysis_docs, analysis_policy, auth
 
     name, on, repo = _get(body, "name", required=True), _get(body, "on", bool, required=True), _get(body, "repo")
@@ -2642,8 +2676,8 @@ def put_doc_switch(db: DB, params: dict, body: Body) -> Any:
         got = analysis_docs.set_switch(on, name=name)
     except analysis_docs.Locked as e:
         raise ServiceError("forbidden", str(e), 403) from e
-    except (RuntimeError, auth.TransportError) as e:
-        raise ServiceError("upstream", str(e), 502) from e
+    except (RuntimeError, auth.AuthError, keystore.KeychainReadBlocked) as e:
+        raise upstream_error(e) from e
     moved = {k: got[k] for k in ("moved", "left") if k in got} if name == "store" and isinstance(got, dict) else {}
     return {**doc_switches(repo), **moved}
 
@@ -2715,6 +2749,7 @@ def _doc_path(params: dict, *rest: str) -> str:
 def share_doc(db: DB, params: dict, body: Body) -> Any:
     """Share a doc with ``scope`` (team:<id> or org:<id>; never ``user``). A
     doc kept on this Mac is put on the server first: only that one doc."""
+    from brindle import keystore
     from brindle.pro import auth, local_library
 
     kind, scope_id = doc_scope(_get(body, "scope", required=True), "")
@@ -2725,8 +2760,8 @@ def share_doc(db: DB, params: dict, body: Body) -> Any:
     _docs_entitlement(repo)
     try:
         server_id = local_library.server_copy(params["id"])
-    except (RuntimeError, auth.AuthError, auth.TransportError) as e:
-        raise ServiceError("upstream", str(e), 502) from e
+    except (RuntimeError, auth.AuthError, keystore.KeychainReadBlocked) as e:
+        raise upstream_error(e) from e
     got = docs_api("POST", _doc_path({"id": server_id}, "share"), {"scope": {"kind": kind, "id": scope_id}},
                    repo=repo)
     shared = [s for s in kept.get("shared") or [] if s != {"kind": kind, "id": scope_id}]

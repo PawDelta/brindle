@@ -284,13 +284,16 @@ def timeline(doc_id: str, *, client=None, store=None) -> dict:
     client, store = ad._session(client, store)
     me = ad.require_entitlement(store).sub
     view = ad.api("GET", sd._path(doc_id), client=client, store=store)
+    revisions, sign_offs = view.get("revisions"), view.get("sign_offs")
     events = [{"id": f"revision:{r['rev']}", "kind": "revision", "actor": _who(r.get("author"), me),
                "rev": r["rev"], "version": None, "at": _at(r.get("at")),
                "source": r.get("source"), "changed": r.get("changed") or []}
-              for r in view.get("revisions") or [] if isinstance(r, dict) and isinstance(r.get("rev"), int)]
+              for r in (revisions if isinstance(revisions, list) else [])
+              if isinstance(r, dict) and isinstance(r.get("rev"), int)]
     events += [{"id": f"sign_off:{s['rev']}:{s['sub']}", "kind": "sign_off", "actor": _who(s["sub"], me),
                 "rev": s["rev"], "version": None, "at": _at(s.get("at"))}
-               for s in view.get("sign_offs") or []]
+               for s in (sign_offs if isinstance(sign_offs, list) else [])
+               if isinstance(s, dict) and isinstance(s.get("rev"), int) and isinstance(s.get("sub"), str)]
     return {"events": sorted(events, key=lambda e: (e["at"], e["id"]), reverse=True)}
 
 
@@ -405,31 +408,30 @@ def link_id(token: str) -> str:
 
 def _signed_in(store) -> str:
     """This account's id, before anything is sent: a link opens for whoever is signed in, on any plan."""
-    from brindle import airgap
+    from brindle import airgap, keystore
     from brindle.pro import license
 
     if airgap.enabled():
         raise ServiceError("air_gapped", "air-gap mode is on: brindle sends nothing, so it can't open this link", 403)
     try:
         return license.current(refresh=False, store=store).sub
-    except Exception as e:  # noqa: BLE001
+    except license.LicenseError as e:
+        if isinstance(e.__cause__, keystore.KeychainReadBlocked):
+            raise e.__cause__
         raise ServiceError("signed_out", "sign in to brindle to open this link", 402) from e
 
 
-def _link_refused(status: int, resp: dict) -> ServiceError:
-    code = resp.get("error") if isinstance(resp.get("error"), str) else None
-    why = resp.get("error_description") if isinstance(resp.get("error_description"), str) else None
-    if code in LINK_REFUSALS:
-        return ServiceError(code, mask(why or NO_LINK), 403)
-    if code == "key_unavailable":
-        return ServiceError(code, "the organization's key for this plan is unavailable", 503)
-    if status == 401:                 # still refused after a token refresh; a 401 would read as the daemon's own
-        return ServiceError("signed_out", "sign in to brindle again to open this link", 402)
-    if status == 429:
-        return ServiceError("rate_limited", "too many links opened at once: try again in a minute", 429)
+def _link_refused(status: int, resp: dict) -> ServiceError | ad.Refused:
+    refused = ad.Refused.from_response(status, resp)
+    if 400 <= status < 500 and refused.code in LINK_REFUSALS:
+        return ad.Refused(str(refused), 403, refused.code)
+    if refused.code == "key_unavailable":
+        return refused
     if status in (403, 404):
         return ServiceError("not_found", NO_LINK, 404)
-    return ServiceError("upstream", mask(why or code or f"HTTP {status}"), 502)
+    if status == 429:
+        return ad.Refused("HTTP 429", status, "rate_limited")
+    return refused
 
 
 def read_link(token: Any, *, client=None, store=None) -> dict:
@@ -470,18 +472,14 @@ def _as_member(doc_id: str, title: Any, client, store) -> dict | None:
     read-only view, which the link already allows."""
     try:
         me = ad.require_entitlement(store).sub
-    except RuntimeError:
+    except ad.NotEntitled:
         return None
     try:
         view = ad.api("GET", sd._path(doc_id), client=client, store=store)
     except ad.Refused as e:
         if e.status in (403, 404):
             raise ServiceError("not_found", NO_LINK, 404) from e
-        if e.status == 401:
-            raise ServiceError("signed_out", "sign in to brindle again to open this link", 402) from e
-        if e.code == "key_unavailable":
-            raise ServiceError(e.code, "the organization's key for this plan is unavailable", 503) from e
-        raise ServiceError("upstream", mask(str(e)), 502) from e
+        raise
     named = {**view, "title": title} if isinstance(title, str) and title.strip() else view
     names = sd.member_names(doc_id, client=client, store=store) if _can(view, me, "can_edit") else None
     return _dto(doc_id, _titled(doc_id, named, client, store), me, names=names)
