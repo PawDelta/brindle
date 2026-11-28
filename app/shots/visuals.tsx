@@ -32,6 +32,35 @@ let rows: VisualDTO[] = [
   { id: "v_old2", session: "sup-42", title: "Permission prompt layout", by: "b31c9f02", kind: "visual", rev: 3, question: "Inline or sheet?", options: [{ id: "inline", label: "Inline" }, { id: "sheet", label: "Sheet" }], answer: { option: "sheet", note: "", at: now - 20000 }, kept: false, unread: false, created_at: now - 30000 },
 ];
 
+// ?inline=1: a visual with its own choice groups (visuals-shots.mjs --only inline). The page's CSS marks
+// option A of the first group as its author's pick, in purple, which must not read as the person's.
+if (params.get("inline") === "1") {
+  const groups = [
+    { id: "gate", question: "When should the release be tagged?", options: [["A", "Tag first", "Tag, then let CI build it"], ["B", "Gate on CI", "Build first, tag when it passes"]] },
+    { id: "rollout", question: "Who gets the build first?", options: [["staff", "Staff first", "A day on staff machines"], ["all", "Everyone", "One release for all"]] },
+    { id: "notes", question: "Where do the release notes go?", options: [["site", "The website", "Linked from the update strip"], ["app", "In the app", "Shown after the restart"]] },
+  ];
+  const style = `<style>
+    :root { color-scheme: light dark; --bg: #f4f6f6; --ink: #0e1716; --dim: #4c615e; --line: rgba(20,40,36,.22); }
+    @media (prefers-color-scheme: dark) { :root { --bg: #080d0b; --ink: #e8f0eb; --dim: #889a90; --line: rgba(130,160,145,.28); } }
+    body { margin: 0; padding: 28px 32px; background: var(--bg); color: var(--ink); font: 14px/1.5 system-ui, sans-serif; }
+    main { max-width: 720px; margin: 0 auto; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    p { margin: 0 0 18px; color: var(--dim); }
+    fieldset { border: 0; margin: 0 0 22px; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    legend { font-weight: 600; padding: 0; margin-bottom: 8px; }
+    button { font: inherit; color: inherit; text-align: left; background: transparent; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; cursor: pointer; }
+    button small { display: block; color: var(--dim); font-size: 12.5px; margin-top: 2px; }
+    #mine { border: 2px solid #8b5cf6; background: rgba(139,92,246,.16); }
+    #mine em { float: right; font-style: normal; font-size: 12px; color: #8b5cf6; }
+  </style>`;
+  const fields = groups.map((g, i) => `<fieldset data-choice="${g.id}"><legend>${g.question}</legend>${g.options.map(([id, label, detail], j) =>
+    `<button data-option="${id}"${i === 0 && j === 0 ? ' id="mine"' : ""}><strong>${label}</strong>${i === 0 && j === 0 ? "<em>my pick</em>" : ""}<small>${detail}</small></button>`).join("")}</fieldset>`).join("");
+  rows = [{ id: "v_inline", session: "sup-42", title: "Three calls before 0.6.3", by: "supervisor", kind: "visual", rev: 1, answer: null, kept: false, unread: true, created_at: now - 60,
+    inline_html: `${style}<main><h1>Three calls before 0.6.3</h1><p>Pick one in each group, then send.</p>${fields}</main>`,
+    choices: groups.map((g) => ({ id: g.id, question: g.question, options: g.options.map(([id, label, detail]) => ({ id, label, detail })) })) }, ...rows];
+}
+
 // The plan row's design doc (shots/plan-shots.mjs): text sections, a diagram,
 // code with a suggestion on it, a table, an open question, three
 // decisions (one confirmed), comment threads, and a split where two workers change one file.
