@@ -34,8 +34,11 @@ it("shows the author's gate and groups its signers by their effect on approval",
 });
 
 it("gives a reviewer the sign-off action in their rail", async () => {
-  read({ gate }, true);
+  read({ gate, outbox: [{ client_id: "feedback", tail: "/comments", state: "waiting", body: { rev: 1, text: "Check the delivery order." } }] }, true);
   const rail = within(await screen.findByTestId("review-rail"));
+  expect(rail.getByTestId("rail-queue").querySelector("article[data-state=waiting] [data-state=waiting]")).toBeTruthy();
+  fireEvent.click(rail.getByRole("button", { name: "Comment" }));
+  expect(within(rail.getByTestId("thread-draft")).getByRole("textbox")).toBeTruthy();
   await waitFor(() => expect(rail.getByTestId("plan-sign-off")).toHaveProperty("disabled", false));
   fireEvent.click(rail.getByTestId("plan-sign-off"));
   await waitFor(() => expect(rail.getByTestId("signoff-alice").dataset.state).toBe("signed"));

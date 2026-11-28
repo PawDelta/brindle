@@ -27,7 +27,7 @@ export type ReviewTab = "comments" | "decisions" | "history" | "tasks";
 /* What the person is writing: a comment or a question on an anchor, or a suggested replacement
    for a range of a section. `where` names the place, as its card will. */
 export type Draft =
-  | { kind: "comment" | "ask"; anchor: PlanAnchor; where: string }
+  | { kind: "comment" | "ask"; anchor: PlanAnchor; where: string; rail?: boolean }
   | { kind: "suggest"; section: string; start: number; before: string; where: string };
 
 export interface TodoItem {

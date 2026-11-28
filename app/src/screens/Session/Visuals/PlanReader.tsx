@@ -65,7 +65,7 @@ import { EarlierRefusals, PendingNote, PlanDeliveryProvider, QueueCount, ShowPla
 import { StoreContext } from "../../../store/useStore";
 import { PlanDraftScope, readPlanDraft, savePlanDraft, usePlanDraft, usePlanDraftScope } from "./planDrafts";
 
-type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach" | "cancelPlan" | "stopAlongside">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient>;
+type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach" | "cancelPlan" | "stopAlongside">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient> & { withdrawPlanApproval?(planId: string): Promise<Plan> };
 
 /* How far along a plan is: its revision, then decided or not. Revisions only grow and a decided
    revision never reopens, so a response with less progress than the one on screen is stale. */
@@ -970,20 +970,11 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     if (now) await decide(true, false);
     else if (alive.current) setSending(null);
   };
-  const [reviewNote, setReviewNote, clearReviewNote] = usePlanDraft<string>(`review-summary:${plan.rev}`);
-  const signOff = async (changes = false) => {
-    if (historical || busy || (changes ? !canComment || !reviewNote?.trim() : !source.signOff || reviewBlocked)) return;
-    failedControl.current = changes ? "changes" : "signoff";
-    setSending(changes ? "changes" : "approve");
-    const ok = await write(async () => {
-      if (reviewNote?.trim() && canComment) {
-        const updated = await source.comment(plan.rev, { kind: "section", section: LEDE }, reviewNote.trim(), false);
-        clearReviewNote();
-        if (changes || updated.rev !== plan.rev || !alive.current) return updated;
-      }
-      return source.signOff!(plan.rev, reviewVersion);
-    });
-    if (ok && frozen) setRefreshes((n) => n + 1);
+  const signOff = async () => {
+    if (historical || busy || !source.signOff || reviewBlocked) return;
+    failedControl.current = "signoff";
+    setSending("approve");
+    if (await write(() => source.signOff!(plan.rev, reviewVersion)) && frozen) setRefreshes(n => n + 1);
     if (alive.current) setSending(null);
   };
   // A write that may change the review (the Share panel's sign-off) asks for the frozen version again.
@@ -1148,10 +1139,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const alongside = <Alongside rows={plan.alongside ?? []} onStop={chrome?.onStopAlongside} />;
   const held = gate?.approval_held?.rev === plan.rev;
   const gateHolds = !!gate && gate.state !== "ready" && !gate.can_hold_approval;
-  const withdraw = held && !teammate && client && <button type="button" className={quiet} disabled={busy || !!historical} onClick={() => {
-    const verdict = { rev: plan.rev, approved: false, withdraw: true, picks: {}, comments: [], note: "" };
-    void send(() => client.decidePlan(plan.id, verdict));
-  }}>Withdraw</button>;
+  const withdraw = held && !teammate && client?.withdrawPlanApproval && <button type="button" className={quiet} disabled={busy || !!historical}
+    onClick={() => void send(() => client.withdrawPlanApproval!(plan.id))}>Withdraw</button>;
   const waitingRows = sheetRows.filter(r => r.required && r.state === "waiting");
   const waitingNames = waitingRows.map(r => r.name).join(" and ");
   const signersLeft = held && gate?.approval_held?.waiting_on.length ? gate.approval_held.waiting_on.map(firstName) : waitingRows.map(r => r.name);
@@ -1165,10 +1154,12 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
     <span>Decisions · {decided} of {plan.decisions.length} decided</span>
     {alongside}
   </div>;
-  const reviewSummary = teammate && canComment && open && <label className="grid w-full gap-1 text-xs text-ink-2">Your review
-    <textarea className={`${menuNote} !min-h-[38px]`} rows={1} value={reviewNote ?? ""} disabled={busy || !!historical} onChange={e => setReviewNote(e.target.value)} placeholder={`A summary for ${authorName}`} />
-  </label>;
-  const requestReviewChanges = reviewSummary && <LoadingButton className={button} busy={sending === "changes"} disabled={busy || !!historical || !reviewNote?.trim()} data-again="changes" onClick={() => signOff(true)}>Request changes</LoadingButton>;
+  const railDraft = draft?.kind === "comment" && draft.rail;
+  const reviewerComment = teammate && canComment && open && (railDraft
+    ? <DraftCard draft={draft} number={Math.max(0, ...threads.map(t => t.id)) + 1} stale={draftStale} busy={busy || !!historical}
+        text={drafting?.text ?? ""} onText={setDraftReason} onSend={text => void sendDraft(text)} onCancel={() => setDrafting(null)} />
+    : <button type="button" className={quiet} disabled={busy || !!historical || !!draft}
+        onClick={() => begin({ kind: "comment", rail: true, where: partName(LEDE), anchor: { kind: "section", section: LEDE } })}>Comment</button>);
 
   // The first share happens in the panel too: adding a person or a team shares the plan.
   const canShare = !!gate || (!!sharing && !!sharePeople && plan.state !== "approved" && scopes.some((s) => s.kind !== "user" && s.can_share !== false));
@@ -1311,7 +1302,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
         node: <MarginNote thread={t} busy={busy} canJudge={!teammate && plan.state === "open"} canReply={canComment} canResolve={!teammate || (canComment && t.author === "person")} actions={actions} lit={followed?.thread === String(t.id)}
           supervisorReplying={isSupervisorReplying(t, plan)} />,
       })),
-      ...(draft && draftAt?.at === at ? [{
+      ...(draft && !railDraft && draftAt?.at === at ? [{
         key: "draft", anchor: draftAt.anchor,
         node: <DraftCard key={`${draft.kind}:${draft.where}`} draft={draft} number={Math.max(0, ...threads.map((t) => t.id)) + 1} stale={draftStale} busy={busy}
           text={drafting?.text ?? ""} onText={setDraftReason} onSend={(text) => void sendDraft(text)} onCancel={() => setDrafting(null)} change={draftChange}
@@ -1373,8 +1364,8 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
           )}
         </div>
         <SignOffDelivery rev={frozen?.id ?? plan.rev} />
-        {reviewSummary}
-        <div className="flex gap-2">{requestReviewChanges}
+        {reviewerComment}
+        <div className="flex gap-2">
         {teammate.rights.signOff && !teammate.signedOff && (
           <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked || left.length > 0} data-testid="plan-sign-off"
             title={left.length ? "Pick an option in every decision first" : undefined} data-again="signoff" onClick={() => void signOff()}>Sign off</LoadingButton>
@@ -1597,7 +1588,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             </>}
           </article>}
         {!sharingOpen && (columnOpen ? (
-          <Review plan={plan} tab={draft ? "comments" : tab} onTab={setTab} todo={todo} decided={decided} onJump={jump} where={where} draft={draft} draftStale={draftStale} busy={busy}
+          <Review plan={plan} tab={draft ? "comments" : tab} onTab={setTab} todo={todo} decided={decided} onJump={jump} where={where} draft={railDraft ? null : draft} draftStale={draftStale} busy={busy}
             draftText={drafting?.text ?? ""} onDraftText={setDraftReason}
             onDraftSend={(text) => void sendDraft(text)} onDraftCancel={() => setDrafting(null)} draftChange={draftChange}
             actions={actions} limits={teammate ? { reply: canComment, resolve: (t) => canComment && t.author === "person" } : undefined} onShow={showThread} shared={sharedFiles} onCollapse={() => { setDrafting(null); collapse(true); }}
@@ -1626,8 +1617,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
               <SignOffDelivery rev={frozen?.id ?? plan.rev} />
-              {reviewSummary}
-              {requestReviewChanges}
+              {reviewerComment}
               {!next && teammate.rights.signOff && !teammate.signedOff && (
                 <LoadingButton className={main} busy={sending === "approve"} disabled={!!historical || busy || reviewBlocked} data-testid="plan-sign-off" data-again="signoff" onClick={() => void signOff()}>Sign off</LoadingButton>
               )}

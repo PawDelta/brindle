@@ -1,8 +1,25 @@
-import { useLayoutEffect, useState, type ReactNode } from "react";
+import { useContext, useLayoutEffect, useState, type ReactNode } from "react";
 import type { Plan } from "../../../api/client";
 import { ago } from "../../../components/ProviderConnect";
 import type { WorkItem } from "./DocHistory";
 import type { SignOffRow } from "./DocReview";
+import { DeliveryStatus, PendingNote, PlanDelivery } from "./PlanDelivery";
+
+function QueuedItems({ plan }: { plan: Plan }) {
+  const items = useContext(PlanDelivery).filter(item => item.state === "waiting" || item.state === "sending");
+  if (!items.length) return null;
+  return <section aria-label="Queued changes" className="grid gap-1 text-xs text-ink-3" data-testid="rail-queue">
+    {items.map(item => {
+      if (item.tail === "/comments" || item.tail === "/suggestions") return <PendingNote key={item.client_id} item={item} />;
+      const decision = plan.decisions.find(d => d.id === item.body.decision);
+      const option = decision?.options.find(o => o.id === item.body.option);
+      return <div key={item.client_id} className="grid gap-1">
+        <span>{item.tail === "/sign-offs" ? "Sign-off" : [decision?.title, option?.label].filter(Boolean).join(" · ") || "Decision"}</span>
+        <DeliveryStatus item={item} />
+      </div>;
+    })}
+  </section>;
+}
 
 export function useRailWidth() {
   const [host, setHost] = useState<HTMLDivElement | null>(null);
@@ -47,7 +64,9 @@ export function ReviewRail({ children, sheet, plan, settled, chosen, jump, along
         </div>)}
       </section>
       {workItem && <section className="grid gap-1"><h3 className={heading}>Work item</h3>{workItem.title} · {workItem.key} · {workItem.state}</section>}
+      <QueuedItems plan={plan} />
     </div>}
+    {folded && <div className="max-h-24 overflow-auto px-4"><QueuedItems plan={plan} /></div>}
     <div className="grid grid-cols-3 gap-3 border-t border-line bg-canvas-2 px-4 pt-3 text-xs text-ink-2">
       {steps.map(({name, segments}) => <span key={name}>{name}<span aria-hidden className="mt-1.5 flex gap-0.5">
         {(segments.length ? segments : [true]).map((done, i) => <i key={i} className={`h-1 flex-1 rounded-sm ${done ? "bg-pass" : "bg-line-strong"}`} />)}
