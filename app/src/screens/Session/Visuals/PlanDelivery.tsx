@@ -23,7 +23,7 @@ export function UnattachedSentNotes() {
 
 const PlanRevision = createContext<number | undefined>(undefined);
 
-export function PlanDeliveryProvider({ items, rev, children }: { items: PlanChange[]; rev?: number; children: ReactNode }) {
+export function PlanDeliveryProvider({ items, rev, children }: { items: PlanChange[]; rev: number; children: ReactNode }) {
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
   return <PlanDelivery.Provider value={items.filter(item => !dismissed.has(item.client_id))}>
     <PlanRevision.Provider value={rev}><DismissSent.Provider value={id => setDismissed(old => new Set([...old, id]))}>{children}</DismissSent.Provider></PlanRevision.Provider>
@@ -94,11 +94,13 @@ export function usePendingNotes() {
     (item.tail === "/suggestions" || (item.tail === "/comments" && item.body.parent === undefined)));
 }
 
-export function PendingNote({ item }: { item: PlanChange }) {
+export function PendingNote({ item, grouped = false }: { item: PlanChange; grouped?: boolean }) {
+  const summary = item.tail === "/suggestions" ? "Suggestion" : item.body.parent !== undefined ? "Reply" : "Comment";
   return <article data-state={item.state}
-    className={`grid gap-1 border-b border-line px-3.5 py-3 ${item.state === "waiting" ? "text-ink-3" : "text-ink-2"}`}>
-    {item.tail === "/suggestions" && <div><del>{item.body.before}</del> <ins>{item.body.after}</ins></div>}
-    <span className="whitespace-pre-wrap break-words">{item.body.text}</span><DeliveryStatus item={item} />
+    className={`grid gap-1 ${grouped ? "" : "border-b border-line px-3.5 py-3"} ${item.state === "waiting" || grouped ? "text-ink-3" : "text-ink-2"}`}>
+    {item.tail === "/suggestions" && (item.body.before || item.body.after) && <div><del>{item.body.before}</del> <ins>{item.body.after}</ins></div>}
+    <span className="whitespace-pre-wrap break-words">{item.body.text || (grouped ? summary : null)}</span>
+    {!grouped && <DeliveryStatus item={item} />}
   </article>;
 }
 
