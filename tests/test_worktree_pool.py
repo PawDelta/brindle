@@ -2,12 +2,13 @@ import json
 import os
 import shutil
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
-from brindle import git, pool, trash, workspaces
-from brindle.db import DB, PoolEntry
+from brindle import disk, git, pool, trash, workspaces
+from brindle.db import DB, PoolEntry, Workspace
 from brindle.config import RepoConfig
 
 from conftest import sh
@@ -28,13 +29,22 @@ def test_pool_cleanup_continues_after_a_failed_removal(db, tmp_path, monkeypatch
         Path(entry.path).mkdir()
         Path(entry.path, "setup-artifact").touch()
         db.add_pool_entry(entry)
+    teardown_calls = []
+
     def teardown(commands, cwd, env):
+        teardown_calls.append(cwd)
         Path(cwd, "setup-artifact").unlink(missing_ok=True)
         return workspaces.SetupResult(True, "")
+
+    fail_blocked_removal = True
+    removals = []
+
     def remove(root, path, force=False):
-        if path == entries[1].path:
+        removals.append(path)
+        if path == entries[1].path and fail_blocked_removal:
             raise git.GitError("disk full")
         Path(path).rmdir()
+
     monkeypatch.setattr(git, "remove_worktree", remove)
     monkeypatch.setattr(git, "run", lambda *a, **k: None)
     monkeypatch.setattr(git, "list_branches", lambda *a: [])
@@ -45,9 +55,48 @@ def test_pool_cleanup_continues_after_a_failed_removal(db, tmp_path, monkeypatch
     getattr(pool, cleanup)(db, str(tmp_path))
     assert not Path(entries[1].path, "setup-artifact").exists()
     assert pool.claim(db, str(tmp_path), "main") is None
-    entries[1].ready = 0
-    assert db.pool_entries(str(tmp_path), ready_only=False) == [entries[1]]
+    assert entries[0].path in removals and entries[2].path in removals
     assert not Path(entries[0].path).exists() and not Path(entries[2].path).exists()
+    if cleanup == "sweep":
+        [reservation] = db.pool_claims(str(tmp_path))
+        assert reservation.path == entries[1].path
+        assert reservation.state == "remove_pending"
+        assert teardown_calls.count(entries[1].path) == 1
+
+        fail_blocked_removal = False
+        pool.sweep(db, str(tmp_path))
+
+        assert removals.count(entries[1].path) == 2
+        assert not Path(entries[1].path).exists()
+        assert db.pool_claims(str(tmp_path)) == []
+        assert teardown_calls.count(entries[1].path) == 1
+    else:
+        entries[1].ready = 0
+        assert db.pool_entries(str(tmp_path), ready_only=False) == [entries[1]]
+
+
+@pytest.mark.variant("failed teardown result still allows reserved pool cleanup to remove its worktree")
+def test_cleanup_reservation_removes_worktree_when_teardown_returns_failure(db, repo):
+    write_config(repo, setup=["true"], teardown=["false"])
+    pool.fill(db, str(repo))
+    [entry] = db.pool_entries(str(repo), "main")
+
+    with pool.claim_lock(str(repo)):
+        claimed = pool.claim(db, str(repo), "main")
+        assert claimed is not None
+        db.mark_pool_claim_cleanup_pending(claimed.claim_token)
+
+    reservation = db.pool_cleanup_reservation(str(repo), entry.path)
+    assert reservation is not None
+
+    assert pool._cleanup_reservation(
+        db, str(repo), reservation, pool.load_repo_config(str(repo))
+    )
+
+    assert not os.path.exists(claimed.path)
+    assert not git.branch_exists(str(repo), entry.branch)
+    assert db.pool_claims(str(repo)) == []
+    assert db.pool_cleanup_reservation(str(repo), claimed.path) is None
 
 
 @pytest.fixture(autouse=True)
@@ -246,4 +295,378 @@ def test_trim_skips_discard_when_a_claim_wins_the_race(db, repo, monkeypatch):
     assert db.count_pool_entries(str(repo), "main") == 0
     assert os.path.isdir(victim.path)  # claimed worktree left untouched
     assert git.branch_exists(str(repo), victim.branch)
+
+
+@pytest.mark.variant("claim-versus-sweep race preserves workspace registration")
+def test_sweep_waits_for_claim_lock_and_preserves_registered_workspace(db, repo, monkeypatch):
+    write_config(repo, setup=["true"])
+    pool.fill(db, str(repo))
+    entry = db.pool_entries(str(repo), "main")[0]
+
+    rebind_started = threading.Event()
+    release_rebind = threading.Event()
+    sweep_lock_attempted = threading.Event()
+    sweep_lock_acquired = threading.Event()
+    sweep_finished = threading.Event()
+    real_rebind = pool.rebind
+    real_claim_lock = pool.claim_lock
+
+    @contextmanager
+    def observed_claim_lock(repo_root):
+        is_sweep_thread = threading.current_thread().name == "sweep-workspaces"
+        if is_sweep_thread:
+            sweep_lock_attempted.set()
+        with real_claim_lock(repo_root):
+            if is_sweep_thread:
+                sweep_lock_acquired.set()
+            yield
+
+    def paused_rebind(repo_root, candidate, branch, start_sha):
+        rebind_started.set()
+        assert release_rebind.wait(timeout=5)
+        return real_rebind(repo_root, candidate, branch, start_sha)
+
+    monkeypatch.setattr(pool, "rebind", paused_rebind)
+    monkeypatch.setattr(pool, "claim_lock", observed_claim_lock)
+    monkeypatch.setattr(disk, "live_in", lambda *a, **k: False)
+    removals = []
+    real_remove = git.remove_worktree
+
+    def record_remove(root, path, force=False):
+        removals.append(path)
+        return real_remove(root, path, force=force)
+
+    monkeypatch.setattr(git, "remove_worktree", record_remove)
+
+    created = []
+    failures = []
+
+    def create_workspace():
+        connection = DB()
+        try:
+            created.append(workspaces.create(
+                connection, str(repo), "feature", apply_prefix=False
+            ))
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            connection.conn.close()
+
+    def sweep_workspaces():
+        connection = DB()
+        try:
+            pool.sweep(connection, str(repo))
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            connection.conn.close()
+            sweep_finished.set()
+
+    create_thread = threading.Thread(target=create_workspace)
+    sweep_thread = None
+
+    try:
+        create_thread.start()
+        assert rebind_started.wait(timeout=5)
+        assert db.count_pool_entries(str(repo), "main") == 0
+        assert db.workspace_by_path(entry.path) is None
+        [claim] = db.pool_claims(str(repo))
+        assert claim.path == entry.path
+        assert claim.state == "active"
+
+        sweep_thread = threading.Thread(
+            target=sweep_workspaces,
+            name="sweep-workspaces",
+        )
+        sweep_thread.start()
+        assert sweep_lock_attempted.wait(timeout=5)
+        assert not sweep_lock_acquired.wait(timeout=0.1)
+        assert not sweep_finished.is_set()
+        assert entry.path not in removals
+    finally:
+        release_rebind.set()
+        if create_thread.ident is not None:
+            create_thread.join(timeout=10)
+        if sweep_thread is not None and sweep_thread.ident is not None:
+            sweep_thread.join(timeout=10)
+
+    assert not create_thread.is_alive()
+    assert sweep_thread is not None and not sweep_thread.is_alive()
+    assert sweep_lock_acquired.is_set()
+    assert not failures
+    assert len(created) == 1
+    assert sweep_finished.is_set()
+    assert db.pool_claims(str(repo)) == []
+    assert db.workspace_by_path(entry.path) is not None
+    assert entry.path not in removals
+
+
+def test_rebind_and_cleanup_git_errors_do_not_fall_back(db, repo, monkeypatch):
+    write_config(repo, setup=["true"])
+    entry = PoolEntry(
+        str(repo / ".brindle" / "worktrees" / "race" / "_w" / "race"),
+        str(repo),
+        "main",
+        git.out(["rev-parse", "main"], str(repo)),
+        "brindle-pool/race",
+        "fingerprint",
+        workspaces._next_port_base(db),
+        1,
+        1000.0,
+    )
+    db.add_pool_entry(entry)
+
+    monkeypatch.setattr(
+        pool,
+        "rebind",
+        lambda *a, **k: (_ for _ in ()).throw(git.GitError("rebind failed")),
+    )
+    discard_calls = []
+    monkeypatch.setattr(pool, "discard", lambda *a, **k: discard_calls.append((a, k)))
+    monkeypatch.setattr(
+        pool,
+        "teardown_entry",
+        lambda *a, **k: (_ for _ in ()).throw(git.GitError("cleanup failed")),
+    )
+
+    fallback_attempted = []
+    monkeypatch.setattr(
+        git,
+        "add_worktree",
+        lambda *a, **k: fallback_attempted.append(True) or "new",
+    )
+
+    with pytest.raises(git.GitError, match="rebind failed"):
+        workspaces.create(db, str(repo), "feature", apply_prefix=False)
+
+    assert discard_calls == []
+    assert fallback_attempted == []
+    [claim] = db.pool_claims(str(repo))
+    assert claim.state == "cleanup_pending"
+
+
+@pytest.mark.variant("abandoned active claim is recovered after its owner releases the lock")
+def test_abandoned_claim_is_recovered_after_claim_lock_is_released(db, repo, monkeypatch):
+    write_config(repo, setup=["true"])
+    pool.fill(db, str(repo))
+    [entry] = db.pool_entries(str(repo), "main")
+    claimed = db.take_pool_entry(str(repo), "main")
+    assert claimed is not None
+    assert db.pool_claims(str(repo))[0].path == entry.path
+
+    removed = []
+    real_remove = git.remove_worktree
+    monkeypatch.setattr(git, "remove_worktree", lambda root, path, force=False: (
+        removed.append(path), real_remove(root, path, force=True)
+    ))
+
+    pool.sweep(db, str(repo))
+
+    assert removed == [entry.path]
+    assert db.pool_claims(str(repo)) == []
+    assert not os.path.exists(entry.path)
+
+
+def test_sweep_recovers_claim_after_rebind_before_workspace_registration(db, repo):
+    write_config(repo, setup=["true"])
+    pool.fill(db, str(repo))
+    [entry] = db.pool_entries(str(repo), "main")
+    target_branch = "feature"
+
+    with pool.claim_lock(str(repo)):
+        claimed = pool.claim(db, str(repo), "main")
+        assert claimed is not None
+        db.mark_pool_claim_target(claimed.claim_token, target_branch)
+        pool.rebind(str(repo), claimed, target_branch, claimed.base_sha)
+
+    assert db.workspace_by_path(entry.path) is None
+    assert git.branch_exists(str(repo), target_branch)
+    [claim] = db.pool_claims(str(repo))
+    assert claim.target_branch == target_branch
+
+    pool.sweep(db, str(repo))
+
+    assert db.pool_claims(str(repo)) == []
+    assert not os.path.exists(entry.path)
+    assert not git.branch_exists(str(repo), entry.branch)
+    assert not git.branch_exists(str(repo), target_branch)
+
+
+@pytest.mark.variant("abandoned-claim cleanup preserves an unrelated branch at the same path")
+def test_sweep_does_not_delete_unrelated_branch_at_abandoned_claim_path(db, repo):
+    write_config(repo, setup=["true"])
+    pool.fill(db, str(repo))
+    [entry] = db.pool_entries(str(repo), "main")
+    target_branch = "feature"
+    unrelated_branch = "unrelated"
+    sh(f"git branch {target_branch} main", repo)
+
+    with pool.claim_lock(str(repo)):
+        claimed = pool.claim(db, str(repo), "main")
+        assert claimed is not None
+        db.mark_pool_claim_target(claimed.claim_token, target_branch)
+        sh(f"git checkout -b {unrelated_branch}", claimed.path)
+
+    pool.sweep(db, str(repo))
+
+    assert db.pool_claims(str(repo)) == []
+    assert not os.path.exists(entry.path)
+    assert git.branch_exists(str(repo), target_branch)
+    assert git.branch_exists(str(repo), unrelated_branch)
+    assert not git.branch_exists(str(repo), entry.branch)
+
+
+def test_workspace_registration_failure_preserves_claim(db, repo, monkeypatch):
+    write_config(repo, setup=["true"])
+    pool.fill(db, str(repo))
+    [entry] = db.pool_entries(str(repo), "main")
+
+    def registration_failure(connection, ws, claim_token):
+        raise git.GitError("registration failed")
+
+    monkeypatch.setattr(DB, "add_pool_claimed_workspace", registration_failure)
+
+    with pytest.raises(git.GitError, match="registration failed"):
+        workspaces.create(db, str(repo), "feature", apply_prefix=False)
+
+    assert db.pool_claims(str(repo))[0].path == entry.path
+    assert db.workspace_by_path(entry.path) is None
+
+
+@pytest.mark.variant("successful cleanup after rebind failure allows new-worktree fallback")
+def test_rebind_failure_with_successful_discard_falls_back(db, repo, monkeypatch):
+    write_config(repo, setup=["true"])
+    pool.fill(db, str(repo))
+
+    failed_claims = []
+    cleanup_calls = []
+    real_cleanup = pool._cleanup_reservation
+
+    def failed_rebind(repo_root, candidate, branch, start_sha):
+        failed_claims.append((candidate.claim_token, candidate.path))
+        raise git.GitError("rebind failed")
+
+    def record_cleanup(connection, repo_root, reservation, cfg):
+        cleanup_calls.append((reservation.claim_token, reservation.path))
+        return real_cleanup(connection, repo_root, reservation, cfg)
+
+    monkeypatch.setattr(pool, "rebind", failed_rebind)
+    monkeypatch.setattr(pool, "_cleanup_reservation", record_cleanup)
+    monkeypatch.setattr(
+        pool, "sweep",
+        lambda *a, **k: pytest.fail("rebind failure must not sweep the entire pool"),
+    )
+
+    created = workspaces.create(db, str(repo), "feature", apply_prefix=False)
+
+    assert len(failed_claims) == 1
+    assert cleanup_calls == failed_claims
+    assert created.how == "new"
+    assert db.pool_claims(str(repo)) == []
+    assert db.workspace_by_path(created.workspace.path) is not None
+
+
+@pytest.mark.variant("targeted rebind cleanup leaves unrelated in-progress pool fills untouched")
+def test_rebind_failure_cleanup_does_not_remove_in_progress_fill_entry(
+    db, repo, monkeypatch
+):
+    write_config(repo, setup=["true"], pool_size=1)
+    pool.fill(db, str(repo))
+
+    setup_started = threading.Event()
+    release_setup = threading.Event()
+    fill_results = []
+    fill_failures = []
+    real_run_setup_commands = workspaces.run_setup_commands
+
+    def pause_fill_setup(workspace, cfg, **kwargs):
+        if threading.current_thread().name == "fill-one":
+            setup_started.set()
+            assert release_setup.wait(timeout=5)
+            return workspaces.SetupResult(True, "")
+        return real_run_setup_commands(workspace, cfg, **kwargs)
+
+    monkeypatch.setattr(workspaces, "run_setup_commands", pause_fill_setup)
+    monkeypatch.setattr(
+        pool,
+        "rebind",
+        lambda *a, **k: (_ for _ in ()).throw(git.GitError("rebind failed")),
+    )
+
+    def fill_entry():
+        connection = DB()
+        try:
+            fill_results.append(pool.fill_one(connection, str(repo)))
+        except BaseException as error:
+            fill_failures.append(error)
+        finally:
+            connection.conn.close()
+
+    fill_thread = threading.Thread(target=fill_entry, name="fill-one")
+    fill_thread.start()
+    try:
+        assert setup_started.wait(timeout=5)
+        [filling_entry] = [
+            entry
+            for entry in db.pool_entries(str(repo), ready_only=False)
+            if not entry.ready
+        ]
+        assert os.path.isdir(filling_entry.path)
+        assert git.branch_exists(str(repo), filling_entry.branch)
+
+        created = workspaces.create(db, str(repo), "feature", apply_prefix=False)
+
+        assert created.how == "new"
+        [remaining_entry] = [
+            entry
+            for entry in db.pool_entries(str(repo), ready_only=False)
+            if entry.path == filling_entry.path
+        ]
+        assert remaining_entry.ready == 0
+        assert os.path.isdir(filling_entry.path)
+        assert git.branch_exists(str(repo), filling_entry.branch)
+    finally:
+        release_setup.set()
+        fill_thread.join(timeout=10)
+
+    assert not fill_thread.is_alive()
+    assert not fill_failures
+    assert len(fill_results) == 1
+    assert fill_results[0] is not None
+    [completed_entry] = [
+        entry
+        for entry in db.pool_entries(str(repo), ready_only=False)
+        if entry.path == filling_entry.path
+    ]
+    assert completed_entry.ready == 1
+    assert os.path.isdir(completed_entry.path)
+
+
+def test_failed_rebind_does_not_delete_concurrent_target_branch(db, repo, monkeypatch, tmp_path):
+    write_config(repo, setup=["true"])
+    pool.fill(db, str(repo))
+    [claimed_entry] = db.pool_entries(str(repo), "main")
+    target_branch = "feature"
+    other_path = tmp_path / "other-feature"
+
+    def failed_rebind(repo_root, candidate, branch, start_sha):
+        sh(f"git worktree add -q -b {branch} {other_path} main", repo)
+        raise git.GitError("rebind failed")
+
+    monkeypatch.setattr(pool, "rebind", failed_rebind)
+
+    with pytest.raises(git.GitError):
+        workspaces.create(db, str(repo), target_branch, apply_prefix=False)
+
+    cached_branch_exists = git.branch_exists(str(repo), target_branch)
+    ref_exists = git.run(
+        ["show-ref", "--verify", "--quiet", f"refs/heads/{target_branch}"],
+        str(repo),
+        check=False,
+    ).returncode == 0
+    assert ref_exists
+    assert cached_branch_exists
+    assert git.worktree_for_branch(str(repo), target_branch) == str(other_path)
+    assert not os.path.exists(claimed_entry.path)
+    assert db.pool_claims(str(repo)) == []
 
