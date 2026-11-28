@@ -238,7 +238,7 @@ export function DraftCard({ draft, number, stale, busy, text, onText, onSend, on
 
 const TABS: [ReviewTab, string][] = [["comments", "Comments"], ["decisions", "Decisions"], ["history", "History"], ["tasks", "Tasks"]];
 
-export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, draftStale, busy, draftText, onDraftText, onDraftSend, onDraftCancel, draftChange, actions, limits, onShow, shared, onCollapse, active, judge, sheet, history, historyRev, onHistoryPick, historyPanel, workItems, work, canLink }: {
+export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, draftStale, busy, draftText, onDraftText, onDraftSend, onDraftCancel, draftChange, actions, limits, onShow, shared, onCollapse, active, judge, history, historyRev, onHistoryPick, historyPanel, workItems, work, canLink }: {
   plan: Plan;
   /* The design's items in the tracker, with what can be done to them (WorkPanel); replaces `workItems`. */
   work?: Work;
@@ -271,8 +271,6 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
   active?: number | null;
   /* Who accepts or rejects suggestions, for someone who can't. */
   judge?: string;
-  /* The sign-off sheet, under the decisions, once the doc is in sign-off. */
-  sheet?: ReactNode;
   history?: HistoryEvent[] | null;
   historyPanel?: ReactNode;
   historyRev?: number | null;
@@ -319,8 +317,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
               </button>
             ))}
           </div>
-        ) : !sheet && <p className="px-3.5 py-3 text-ink-3">This plan has no decisions to take.</p>}
-        {sheet}
+        ) : <p className="px-3.5 py-3 text-ink-3">This plan has no decisions to take.</p>}
       </>
     );
   } else {
@@ -340,7 +337,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
     );
   }
   return (
-    <aside aria-label="Review" className="flex w-[324px] shrink-0 flex-col border-l border-line text-[12.5px]" data-testid="plan-review">
+    <aside aria-label="Review details" className="mx-auto flex w-full max-w-[740px] flex-col border-t border-line text-[12.5px]" data-testid="plan-review">
       <div className="flex items-center gap-4 border-b border-line pl-3.5 pr-1.5 text-ink-3">
         <div role="tablist" aria-label="Review column" className="flex min-w-0 flex-1 gap-4">
           {TABS.map(([id, name]) => (
@@ -371,38 +368,28 @@ export interface SignOffRow {
   note?: string;
 }
 
-export function SignOffSheet({ version, rows, since, onShowChanges }: {
+export function SignOffSheet({ version, rows }: {
   version: string;
   rows: SignOffRow[];
-  /* The revisions since the person last read, each with the sections it changed. */
-  since: { from: number; changes: { rev: number; sections: string[] }[] } | null;
-  onShowChanges?(): void;
 }) {
   return (
     <>
-      <div className="grid gap-[7px] border-b border-line px-3.5 py-3" data-testid="plan-signoffs">
+      <div className="grid gap-2.5" data-testid="plan-signoffs">
         <span className={`${label} text-[11px]`}>{`Sign-offs on ${version}`}</span>
         {rows.length === 0 && <span className="text-ink-3">Nobody is asked to sign it yet.</span>}
-        {rows.map((r) => (
+        {(["required", "optional"] as const).map(group => <div key={group} data-group={group} className="grid gap-2">
+          <div className="text-[11.5px]"><b>{group === "required" ? "Required" : "Optional"}</b><span className="text-ink-3"> · {group === "required" ? "the build waits for them" : "recorded, never hold the build"}</span></div>
+        {rows.filter(r => r.required === (group === "required")).map((r) => (
           <span key={r.key} className="flex items-center gap-2 text-ink-2" data-testid={`signoff-${r.key}`} data-state={r.state} data-sign-off={r.required ? "required" : "optional"}>
             <Avatar who={r.who} ring={r.state === "signed" ? "done" : r.state === "waiting" && r.required ? "wait" : r.required ? undefined : "dim"} />
-            <span className="min-w-0 truncate"><b className="font-medium text-ink">{r.name}</b>{` · ${r.required ? "required" : "optional"}`}</span>
+            <span className="min-w-0 truncate font-medium text-ink">{r.name}</span>
             <span className="flex-1" />
             <span className={`flex-none whitespace-nowrap ${r.state === "signed" ? "text-pass" : (r.state === "waiting" && r.required) || r.state === "changes" ? "text-sap" : "text-ink-3"}`}>
               {r.state === "signed" ? `✓ signed${r.note ? ` ${r.note}` : ""}` : r.state === "changes" ? "changes requested" : r.state === "waived" ? "waived" : r.state === "earlier" ? r.note ?? "signed earlier" : r.required ? "waiting" : "not signed"}
             </span>
           </span>
-        ))}
+        ))}</div>)}
       </div>
-      {since && (
-        <div className="grid gap-[7px] border-b border-line px-3.5 py-3" data-testid="plan-since">
-          <span className={`${label} text-[11px]`}>{`Since you last read · rev ${since.from}`}</span>
-          {since.changes.length === 0 ? <span className="text-ink-3">Nothing has changed.</span> : since.changes.map((c) => (
-            <span key={c.rev} className="text-ink-2"><span className="font-mono text-[11.5px] text-ink-3">{`rev ${c.rev}`}</span>{` · ${c.sections.join(", ") || "the text"}`}</span>
-          ))}
-          {since.changes.length > 0 && onShowChanges && <button type="button" className={`${quiet} -ml-2 justify-self-start text-xs`} onClick={onShowChanges}>Show these changes in the plan</button>}
-        </div>
-      )}
     </>
   );
 }
