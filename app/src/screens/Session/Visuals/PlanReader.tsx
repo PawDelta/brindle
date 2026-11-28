@@ -65,7 +65,7 @@ import { EarlierRefusals, PendingNote, PlanDeliveryProvider, QueueCount, ShowPla
 import { StoreContext } from "../../../store/useStore";
 import { PlanDraftScope, readPlanDraft, savePlanDraft, usePlanDraft, usePlanDraftScope } from "./planDrafts";
 
-type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach" | "cancelPlan" | "stopAlongside">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient> & { withdrawPlanApproval?(planId: string): Promise<Plan> };
+type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach" | "cancelPlan" | "stopAlongside">> & Partial<PlanSharingClient> & Partial<LiveClient> & Partial<PlanShareLinkClient>;
 
 /* How far along a plan is: its revision, then decided or not. Revisions only grow and a decided
    revision never reopens, so a response with less progress than the one on screen is stale. */
@@ -1138,8 +1138,11 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
   const alongside = <Alongside rows={plan.alongside ?? []} onStop={chrome?.onStopAlongside} />;
   const held = gate?.approval_held?.rev === plan.rev;
   const gateHolds = !!gate && gate.state !== "ready" && !gate.can_hold_approval;
-  const withdraw = held && !teammate && client?.withdrawPlanApproval && <button type="button" className={quiet} disabled={busy || !!historical}
-    onClick={() => void send(() => client.withdrawPlanApproval!(plan.id))}>Withdraw</button>;
+  const withdraw = held && !teammate && client && <button type="button" className="cursor-pointer text-xs font-normal text-ink-2 underline disabled:opacity-50" disabled={busy || !!historical}
+    onClick={() => {
+      const verdict = { rev: plan.rev, approved: false, withdraw: true, picks: {}, comments: [], note: "" };
+      void send(() => client.decidePlan(plan.id, verdict));
+    }}>Withdraw</button>;
   const waitingRows = sheetRows.filter(r => r.required && r.state === "waiting");
   const waitingNames = waitingRows.map(r => r.name).join(" and ");
   const signersLeft = held && gate?.approval_held?.waiting_on.length ? gate.approval_held.waiting_on.map(firstName) : waitingRows.map(r => r.name);
@@ -1448,7 +1451,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
               <div role="status" className="grid gap-px" data-testid="plan-next" data-state={left.length ? "open" : "ready"} data-left={left.length}>
                 {left.length ? nextUp : (
                   <>
-                    <span className="text-[13px] text-ink">{buildSentence}</span>
+                    <span className="text-[13px] text-ink">{buildSentence} {withdraw}</span>
                   </>
                 )}
               </div>
@@ -1487,7 +1490,6 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                   title={left.length ? "Pick an option in every decision first" : gateHolds ? gateWhy : "Approve this plan and start building it"} data-again="approve" onClick={() => void decide(true)}>
                   {(held || sending === "approve") && <ApprovalCheck />}Approve
                 </LoadingButton>
-                {withdraw}
               </div>
               {client?.cancelPlan && (
                 <Menu label="Cancel planning" buttonClass={quiet} place="up" open={cancelOpen} onOpenChange={setCancelOpen} testid="plan-cancel-menu" again="cancel">
@@ -1628,7 +1630,7 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
             <div className="grid min-w-0 gap-0.5" data-testid="plan-next">
               <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
                 <span className={`${label} text-[11px]`}>Next</span>
-                <span>{next ? next.title : buildSentence}</span>
+                <span>{next ? next.title : buildSentence} {withdraw}</span>
               </span>
               <span className="text-xs text-ink-3">
                 {summary}
@@ -1649,7 +1651,6 @@ function DesignDocBody({ source, author, teammate: receivedTeammate, plan: recei
                   {(held || sending === "approve") && <ApprovalCheck />}Approve
                 </LoadingButton>
               )}
-              {withdraw}
             </div>
             {client?.cancelPlan && <LoadingButton className={quiet} wrapClassName="justify-self-start" busy={sending === "cancel"} disabled={!!historical || busy || uploading > 0} data-testid="plan-cancel" data-again="cancel" onClick={() => void cancelPlanning()}>Cancel planning</LoadingButton>}
             <div className="col-span-full flex items-center gap-2.5 border-t border-line pt-2.5">
